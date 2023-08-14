@@ -1,0 +1,16 @@
+{
+    "nodes": [ 
+    {
+        "ip": "",
+        "macaroon": "",
+        "cert": "",
+        "id": ""
+    }],
+    "activity": [ 
+    {
+        "src": "",
+        "dest": "",
+        "freq": "",
+        "amt": ""
+    }]
+}
