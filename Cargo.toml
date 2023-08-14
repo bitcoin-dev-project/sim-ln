@@ -1,0 +1,6 @@
+[workspace]
+
+members = [
+    "sim-cli",
+    "sim-lib",
+]
