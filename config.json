@@ -1,10 +1,10 @@
 {
     "nodes": [ 
     {
-        "ip": "",
+        "id": "",
+        "host": "",
         "macaroon": "",
-        "cert": "",
-        "id": ""
+        "cert": ""
     }],
     "activity": [ 
     {
