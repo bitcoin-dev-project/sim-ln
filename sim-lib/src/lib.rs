@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+// Phase 0: User input - see config.json
+
+// Phase 1: Parsed User Input
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct NodeConnection {
     id: String,
@@ -13,17 +17,6 @@ pub struct Config {
     nodes: Vec<NodeConnection>,
 }
 
-pub fn add(left: usize, right: usize) -> usize {
-    left + right
-}
+// Phase 2: Event Queue - TODO
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+// Phase 3: CSV output - TODO
