@@ -3,21 +3,23 @@ use lightning::ln::PaymentHash;
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 
+pub mod lnd;
+
 // Phase 0: User input - see config.json
 
 // Phase 1: Parsed User Input
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NodeConnection {
-    id: String,
-    host: String,
-    macaroon: String,
-    cert: String,
+    pub id: String,
+    pub address: String,
+    pub macaroon: String,
+    pub cert: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
-    nodes: Vec<NodeConnection>,
+    pub nodes: Vec<NodeConnection>,
 }
 
 #[allow(dead_code)]
@@ -35,11 +37,11 @@ pub struct ActivityDefinition {
 // Phase 2: Event Queue
 
 #[allow(dead_code)]
-enum PaymentError {}
+pub enum PaymentError {}
 
 /// LightningNode represents the functionality that is required to execute events on a lightning node.
-trait LightningNode {
-    fn send_payment(&self, dest: PublicKey, amt_msat: u64) -> Result<PaymentHash, ()>;
+pub trait LightningNode {
+    fn send_payment(&self, dest: PublicKey, amt_msat: u64) -> anyhow::Result<PaymentHash>;
     fn track_payment(&self, hash: PaymentHash) -> Result<(), PaymentError>;
 }
 
