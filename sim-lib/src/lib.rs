@@ -20,6 +20,17 @@ pub struct Config {
     nodes: Vec<NodeConnection>,
 }
 
+pub struct ActivityDefinition {
+    // The source of the action.
+    source: PublicKey,
+    // The destination of the action.
+    dest: PublicKey,
+    // The frequency of the action, as in number of times per minute.
+    frequency: u16,
+    // The amount of m_sat to used in this action.
+    amt_msat: u64,
+}
+
 // Phase 2: Event Queue
 
 #[allow(dead_code)]
