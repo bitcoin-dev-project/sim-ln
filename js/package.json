@@ -1,0 +1,22 @@
+{
+  "name": "sim-ln-js",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "bin": {
+    "sim-cli": "./bin/index.js"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@grpc/grpc-js": "^1.9.0",
+    "@grpc/proto-loader": "^0.7.8",
+    "@inquirer/prompts": "^3.0.2",
+    "commander": "^11.0.0",
+    "inquirer": "^9.2.10",
+    "lnd-grpc": "^0.4.6"
+  }
+}
