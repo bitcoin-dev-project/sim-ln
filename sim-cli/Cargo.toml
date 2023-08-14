@@ -10,4 +10,5 @@ anyhow = { version = "1.0.69", features = ["backtrace"] }
 clap = { version = "4.1.6", features = ["derive", "env", "std", "help", "usage", "error-context", "suggestions"], default-features = false }
 serde = "1.0.183"
 serde_json = "1.0.104"
+sim-lib = { path = "../sim-lib" }
 tokio = { version = "1.26.0", features = ["full"] }
