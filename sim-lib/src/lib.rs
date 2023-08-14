@@ -20,6 +20,7 @@ pub struct Config {
     nodes: Vec<NodeConnection>,
 }
 
+#[allow(dead_code)]
 pub struct ActivityDefinition {
     // The source of the action.
     source: PublicKey,
