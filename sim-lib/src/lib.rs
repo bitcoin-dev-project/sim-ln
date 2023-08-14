@@ -1,6 +1,7 @@
-use serde::{Deserialize, Serialize};
 use bitcoin::secp256k1::PublicKey;
 use lightning::ln::PaymentHash;
+use serde::{Deserialize, Serialize};
+use std::time::SystemTime;
 
 // Phase 0: User input - see config.json
 
@@ -48,4 +49,14 @@ struct Event {
     action: NodeAction,
 }
 
-// Phase 3: CSV output - TODO
+// Phase 3: CSV output
+
+#[allow(dead_code)]
+struct PaymentResult {
+    source: PublicKey,
+    dest: PublicKey,
+    start: SystemTime,
+    end: SystemTime,
+    settled: bool,
+    action: u8,
+}
