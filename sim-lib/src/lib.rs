@@ -1,4 +1,10 @@
 use serde::{Deserialize, Serialize};
+use bitcoin::secp256k1::PublicKey;
+use lightning::ln::PaymentHash;
+
+// Phase 0: User input - see config.json
+
+// Phase 1: Parsed User Input
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct NodeConnection {
@@ -13,17 +19,33 @@ pub struct Config {
     nodes: Vec<NodeConnection>,
 }
 
-pub fn add(left: usize, right: usize) -> usize {
-    left + right
+// Phase 2: Event Queue
+
+#[allow(dead_code)]
+enum PaymentError {}
+
+/// LightningNode represents the functionality that is required to execute events on a lightning node.
+trait LightningNode {
+    fn send_payment(&self, dest: PublicKey, amt_msat: u64) -> Result<PaymentHash, ()>;
+    fn track_payment(&self, hash: PaymentHash) -> Result<(), PaymentError>;
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
+#[allow(dead_code)]
+enum NodeAction {
+    // Dispatch a payment of the specified amount to the public key provided.
+    SendPayment(PublicKey, u64),
 }
+
+#[allow(dead_code)]
+struct Event {
+    // The public key of the node executing this event.
+    source: PublicKey,
+
+    // Offset is the time offset from the beginning of execution that this event should be executed.
+    offset: u64,
+
+    // An action to be executed on the source node.
+    action: NodeAction,
+}
+
+// Phase 3: CSV output - TODO
