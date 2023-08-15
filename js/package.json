@@ -6,6 +6,7 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
+  "type": "module",
   "bin": {
     "sim-cli": "./bin/index.js"
   },
@@ -17,6 +18,7 @@
     "@inquirer/prompts": "^3.0.2",
     "commander": "^11.0.0",
     "inquirer": "^9.2.10",
-    "lnd-grpc": "^0.4.6"
+    "lnd-grpc": "^0.4.6",
+    "uuid": "^9.0.0"
   }
 }
