@@ -23,7 +23,7 @@ const controlNodes = config.nodes.map(node => node);
 
 
 
-console.log('Setting up Control Nodes...', config.nodes.length)
+console.log(`Setting up ${config.nodes.length} Controlled Nodes...`)
 async function buildControlNodes() {
     if (!controlNodes.length) return promptForActivities();
 
@@ -48,8 +48,7 @@ async function buildControlNodes() {
         // Do something cool when the wallet gets unlocked.
         grpc.on(`active`, async () => {
             const current_node = await Lightning.getInfo();
-            const nodeGraph = await Lightning.describeGraph()
-            console.log(nodeGraph);
+            const nodeGraph = await Lightning.describeGraph();
 
             if (nodeGraph.nodes < 1) {
                 console.log(`Node: ${node.alias} has no graph`)
@@ -59,7 +58,7 @@ async function buildControlNodes() {
             nodeObj[current_node.identity_pubkey] = current_node;
             nodeObj[current_node.identity_pubkey].graph = nodeGraph;
             node.id = current_node.identity_pubkey;
-            
+
             //create array of possible destintations for node
             nodeObj[current_node.identity_pubkey].possible_dests = nodeGraph.nodes.filter((n) => {
                 return n.pub_key != current_node.identity_pubkey
@@ -69,7 +68,6 @@ async function buildControlNodes() {
         // Do something cool when the connection gets disconnected.
         grpc.on(`disconnected`, () => {
 
-            console.log(config.nodes.length);
             if (Object.keys(nodeObj).length == config.nodes.length) promptForActivities();
             else buildControlNodes();
         })
