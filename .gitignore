@@ -1,4 +1,5 @@
 /target
-*/config.json
 node_modules
+config.json
+
 
