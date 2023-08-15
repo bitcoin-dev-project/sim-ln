@@ -47,10 +47,20 @@ async function buildControlNodes() {
         // Do something cool when the wallet gets unlocked.
         grpc.on(`active`, async () => {
             const current_node = await Lightning.getInfo();
-            nodeObj[current_node.identity_pubkey] = current_node;
-            //dump graph information
             const nodeGraph = await Lightning.describeGraph()
+
+            if(nodeGraph.nodes < 1){ 
+                console.log(`Node: ${node.alias} has no graph`)
+                return console.error("Please check that controlled nodes have open channels to other nodes")
+            }
+            //dump graph information
+            nodeObj[current_node.identity_pubkey] = current_node;
             nodeObj[current_node.identity_pubkey].graph = nodeGraph;
+            node.id = current_node.identity_pubkey;
+
+           
+
+
 
             //create array of possible destintations for node
             nodeObj[current_node.identity_pubkey].possible_dests = nodeGraph.nodes.filter((n) => {
