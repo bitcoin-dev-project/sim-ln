@@ -2,7 +2,7 @@
     "nodes": [ 
     {
         "id": "",
-        "host": "",
+        "address": "",
         "macaroon": "",
         "cert": ""
     }],
