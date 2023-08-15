@@ -46,7 +46,6 @@ async function buildControlNodes() {
 
         // Do something cool when the wallet gets unlocked.
         grpc.on(`active`, async () => {
-
             const current_node = await Lightning.getInfo();
             nodeObj[current_node.identity_pubkey] = current_node;
             //dump graph information
@@ -62,7 +61,7 @@ async function buildControlNodes() {
         // Do something cool when the connection gets disconnected.
         grpc.on(`disconnected`, () => {
 
-          console.log(config.nodes.length);
+            console.log(config.nodes.length);
             if (Object.keys(nodeObj).length == config.nodes.length) promptForActivities();
             else buildControlNodes();
         })
@@ -76,7 +75,7 @@ buildControlNodes();
 
 let activities = [];
 async function promptForActivities() {
-  
+
     console.log("\nCreate a New Activity");
     console.log("_________________________________\n");
     let activity = {};
@@ -93,16 +92,28 @@ async function promptForActivities() {
         })
     })
 
+    let destArray = [{
+        name: `(choose random)`,
+        value: nodeObj[activity.src].possible_dests[Math.floor(Math.random() * nodeObj[activity.src].possible_dests.length)].pub_key
+    }, {
+        name: '(input pubkey)',
+        value: false
+    }]
+
     activity.dest = await select({
         message: "Choose a destination? \n",
-        choices: nodeObj[activity.src].possible_dests.map(dest => {
+        choices: destArray.concat(nodeObj[activity.src].possible_dests.map(dest => {
             return {
                 name: `${dest.alias}:  (${dest.pub_key})`,
                 value: dest.pub_key
             }
-        })
+        }))
 
     })
+
+    if (!activity.dest) {
+        activity.dest = await input({ message: 'Enter pubkey:' });
+    }
 
     activity.action = await input({ message: 'What action?', default: "keysend" });
     activity.frequency = await input({ message: 'At what time would you like to run this action?', default: 0 });
@@ -119,7 +130,7 @@ async function promptForActivities() {
         promptForActivities();
     } else {
 
-        if(options.csv) activities = parse(activities,{header:true});
+        if (options.csv) activities = parse(activities, { header: true });
         config.activity = activities;
         console.log(config);
     }
