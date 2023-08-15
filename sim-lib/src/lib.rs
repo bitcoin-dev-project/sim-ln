@@ -1,7 +1,7 @@
 use bitcoin::secp256k1::PublicKey;
 use lightning::ln::PaymentHash;
 use serde::{Deserialize, Serialize};
-use std::time::SystemTime;
+use std::{collections::HashMap, sync::Arc, time::SystemTime};
 
 pub mod lnd;
 
@@ -11,7 +11,7 @@ pub mod lnd;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NodeConnection {
-    pub id: String,
+    pub id: PublicKey,
     pub address: String,
     pub macaroon: String,
     pub cert: String,
@@ -20,18 +20,19 @@ pub struct NodeConnection {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     pub nodes: Vec<NodeConnection>,
+    pub activity: Vec<ActivityDefinition>,
 }
 
-#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActivityDefinition {
     // The source of the action.
-    source: PublicKey,
+    pub source: PublicKey,
     // The destination of the action.
-    dest: PublicKey,
+    pub dest: PublicKey,
     // The frequency of the action, as in number of times per minute.
-    frequency: u16,
+    pub frequency: u16,
     // The amount of m_sat to used in this action.
-    amt_msat: u64,
+    pub amt_msat: u64,
 }
 
 // Phase 2: Event Queue
@@ -73,4 +74,31 @@ struct PaymentResult {
     end: SystemTime,
     settled: bool,
     action: u8,
+}
+
+pub struct Simulation {
+    // The lightning node that is being simulated.
+    nodes: HashMap<PublicKey, Arc<dyn LightningNode>>,
+
+    // The activity that are to be executed on the node.
+    activity: Vec<ActivityDefinition>,
+}
+
+impl Simulation {
+    pub fn new(
+        nodes: HashMap<PublicKey, Arc<dyn LightningNode>>,
+        activity: Vec<ActivityDefinition>,
+    ) -> Self {
+        Self { nodes, activity }
+    }
+
+    pub async fn run(&self) -> anyhow::Result<()> {
+        println!(
+            "Simulating {} activity on {} nodes",
+            self.activity.len(),
+            self.nodes.len()
+        );
+        println!("42 and Done!");
+        Ok(())
+    }
 }
