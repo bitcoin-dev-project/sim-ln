@@ -28,11 +28,11 @@ pub struct ActivityDefinition {
     // The source of the action.
     pub source: PublicKey,
     // The destination of the action.
-    pub dest: PublicKey,
+    pub destination: PublicKey,
     // The frequency of the action, as in number of times per minute.
     pub frequency: u16,
     // The amount of m_sat to used in this action.
-    pub amt_msat: u64,
+    pub amount_msat: u64,
 }
 
 // Phase 2: Event Queue
