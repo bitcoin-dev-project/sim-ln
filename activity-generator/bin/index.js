@@ -6,7 +6,9 @@ import fs from 'fs';
 import { program } from 'commander';
 import { select, input, confirm } from '@inquirer/prompts';
 import { v4 } from 'uuid';
+import { parse } from 'json2csv';
 program.requiredOption('--config <file>');
+program.option('--csv');
 program.parse();
 
 const options = program.opts();
@@ -16,11 +18,11 @@ const configFile = options.config;
 const fileName = configFile;
 const config = JSON.parse(fs.readFileSync(fileName, 'utf-8'));
 let nodeObj = {};
-const controlNodes = config.nodes;
+const controlNodes = config.nodes.map(node => node);
 
 
 
-console.log('Setting up Control Nodes...')
+console.log('Setting up Control Nodes...', config.nodes.length)
 async function buildControlNodes() {
     if (!controlNodes.length) return promptForActivities();
 
@@ -59,6 +61,8 @@ async function buildControlNodes() {
         })
         // Do something cool when the connection gets disconnected.
         grpc.on(`disconnected`, () => {
+
+          console.log(config.nodes.length);
             if (Object.keys(nodeObj).length == config.nodes.length) promptForActivities();
             else buildControlNodes();
         })
@@ -74,7 +78,7 @@ let activities = [];
 async function promptForActivities() {
   
     console.log("\nCreate a New Activity");
-    console.log("***************************************************\n");
+    console.log("_________________________________\n");
     let activity = {};
     activity.uuid = v4();
 
@@ -108,12 +112,15 @@ async function promptForActivities() {
     activities.push(activity);
 
     const anotherOne = await confirm({ message: 'Create another one?', default: false });
-    console.log("------------------------");
+    console.log("\n------------------------");
     console.log(`Created: ${activity.uuid}\nTotal activities: ${activities.length}`);
-    console.log("------------------------");
+    console.log("------------------------\n");
     if (anotherOne) {
         promptForActivities();
     } else {
-        console.log(activities);
+
+        if(options.csv) activities = parse(activities,{header:true});
+        config.activity = activities;
+        console.log(config);
     }
 }
