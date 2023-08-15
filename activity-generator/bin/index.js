@@ -7,6 +7,7 @@ import { program } from 'commander';
 import { select, input, confirm } from '@inquirer/prompts';
 import { v4 } from 'uuid';
 import { parse } from 'json2csv';
+import { getFrequency, getAmountInSats } from './validation/inputGetters.js';
 program.requiredOption('--config <file>');
 program.option('--csv');
 program.parse();
@@ -58,11 +59,7 @@ async function buildControlNodes() {
             nodeObj[current_node.identity_pubkey] = current_node;
             nodeObj[current_node.identity_pubkey].graph = nodeGraph;
             node.id = current_node.identity_pubkey;
-
-
-
-
-
+            
             //create array of possible destintations for node
             nodeObj[current_node.identity_pubkey].possible_dests = nodeGraph.nodes.filter((n) => {
                 return n.pub_key != current_node.identity_pubkey
@@ -127,11 +124,10 @@ async function promptForActivities() {
     }
 
     activity.action = await input({ message: 'What action?', default: "keysend" });
-    activity.frequency = await input({ message: 'At what time would you like to run this action?', default: 0 });
-    activity.frequency = parseInt(activity.frequency);
 
-    let amount = await input({ message: 'How many sats?', default: 1000 });
-    activity.amount = parseInt(amount);
+    activity.frequency = await getFrequency()
+    activity.amount = await getAmountInSats()
+
     activities.push(activity);
 
     const anotherOne = await confirm({ message: 'Create another one?', default: false });
