@@ -48,8 +48,9 @@ async function buildControlNodes() {
         grpc.on(`active`, async () => {
             const current_node = await Lightning.getInfo();
             const nodeGraph = await Lightning.describeGraph()
+            console.log(nodeGraph);
 
-            if(nodeGraph.nodes < 1){ 
+            if (nodeGraph.nodes < 1) {
                 console.log(`Node: ${node.alias} has no graph`)
                 return console.error("Please check that controlled nodes have open channels to other nodes")
             }
@@ -58,7 +59,7 @@ async function buildControlNodes() {
             nodeObj[current_node.identity_pubkey].graph = nodeGraph;
             node.id = current_node.identity_pubkey;
 
-           
+
 
 
 
@@ -128,6 +129,7 @@ async function promptForActivities() {
     activity.action = await input({ message: 'What action?', default: "keysend" });
     activity.frequency = await input({ message: 'At what time would you like to run this action?', default: 0 });
     activity.frequency = parseInt(activity.frequency);
+
     let amount = await input({ message: 'How many sats?', default: 1000 });
     activity.amount = parseInt(amount);
     activities.push(activity);
