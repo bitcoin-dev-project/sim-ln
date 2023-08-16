@@ -13,6 +13,7 @@ use tokio::time;
 use triggered::{Listener, Trigger};
 
 pub mod lnd;
+
 // Phase 0: User input - see config.json
 
 // Phase 1: Parsed User Input
@@ -59,6 +60,12 @@ pub enum LightningError {
     GetInfoError(String),
     #[error("Send payment error {0}")]
     SendPaymentError(String),
+    #[error("Track pyment error {0}")]
+    TrackPaymentError(String),
+    #[error("Invalid payment hash")]
+    InvalidPaymentHash,
+    #[error("RPC error: {0:?}")]
+    RpcError(#[from] tonic_lnd::tonic::Status),
 }
 
 #[derive(Debug, Clone)]
@@ -174,7 +181,7 @@ impl Simulation {
         }
         (!(results.iter().any(|x| matches!(x, Err(..)))))
             .then_some(())
-            .ok_or(anyhow!("One of our tasks failed"))
+            .ok_or_else(|| anyhow!("One of our tasks failed"))
     }
 }
 
