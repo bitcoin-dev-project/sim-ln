@@ -125,8 +125,10 @@ impl Simulation {
             self.activity.len(),
             self.nodes.len()
         );
-        println!("42 and Done!");
-        Ok(())
+
+        let (shutdown_trigger, shutdown_listener) = triggered::trigger();
+        self.generate_activity(shutdown_trigger, shutdown_listener)
+            .await
     }
 
     async fn generate_activity(&self, shutdown: Trigger, listener: Listener) -> anyhow::Result<()> {
