@@ -7,8 +7,24 @@ on:
     branches: ['*']
 
 jobs:
-  lint_with_clippy:
-    name: SIM_BUILD_TEST_FORMAT_LINT
+  clippy:
+    name: Check code formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions-rs/cargo@v1
+        name: cargo fmt
+        with:
+          command: fmt
+          args: --check
+      - uses: actions-rs/cargo@v1
+        name: cargo clippy
+        with:
+          command: clippy
+          args: -- --deny warnings
+
+  build:
+    name: Build and test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
@@ -25,13 +41,3 @@ jobs:
         with:
           command: test
           args: --all-targets --benches
-      - uses: actions-rs/cargo@v1
-        name: cargo fmt
-        with:
-          command: fmt
-          args: --check
-      - uses: actions-rs/cargo@v1
-        name: cargo clippy
-        with:
-          command: clippy
-          args: -- --deny warnings
