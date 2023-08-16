@@ -15,3 +15,6 @@ tonic_lnd = { git = "https://github.com/fedimint/tonic_lnd", branch="master", fe
 async-trait = "0.1.73"
 thiserror = "1.0.45"
 log = "0.4.20"
+triggered = "0.1.2"
+mpsc = "0.2.0"
+tokio = "1.31.0"

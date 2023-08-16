@@ -1,14 +1,18 @@
+use anyhow::anyhow;
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use lightning::ln::PaymentHash;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::SystemTime;
+use std::collections::HashSet;
+use std::marker::Send;
+use std::{collections::HashMap, sync::Arc, time::SystemTime};
 use thiserror::Error;
+use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::sync::Mutex;
+use tokio::time;
+use triggered::{Listener, Trigger};
 
 pub mod lnd;
-
 // Phase 0: User input - see config.json
 
 // Phase 1: Parsed User Input
@@ -27,7 +31,7 @@ pub struct Config {
     pub activity: Vec<ActivityDefinition>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct ActivityDefinition {
     // The source of the action.
     pub source: PublicKey,
@@ -81,22 +85,10 @@ pub trait LightningNode {
     async fn track_payment(&self, hash: PaymentHash) -> Result<(), LightningError>;
 }
 
-#[allow(dead_code)]
+#[derive(Clone, Copy)]
 enum NodeAction {
     // Dispatch a payment of the specified amount to the public key provided.
     SendPayment(PublicKey, u64),
-}
-
-#[allow(dead_code)]
-struct Event {
-    // The public key of the node executing this event.
-    source: PublicKey,
-
-    // Offset is the time offset from the beginning of execution that this event should be executed.
-    offset: u64,
-
-    // An action to be executed on the source node.
-    action: NodeAction,
 }
 
 // Phase 3: CSV output
@@ -113,7 +105,7 @@ struct PaymentResult {
 
 pub struct Simulation {
     // The lightning node that is being simulated.
-    nodes: HashMap<PublicKey, Arc<dyn LightningNode>>,
+    nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>>,
 
     // The activity that are to be executed on the node.
     activity: Vec<ActivityDefinition>,
@@ -121,7 +113,7 @@ pub struct Simulation {
 
 impl Simulation {
     pub fn new(
-        nodes: HashMap<PublicKey, Arc<dyn LightningNode>>,
+        nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>>,
         activity: Vec<ActivityDefinition>,
     ) -> Self {
         Self { nodes, activity }
@@ -133,7 +125,99 @@ impl Simulation {
             self.activity.len(),
             self.nodes.len()
         );
-        println!("42 and Done!");
-        Ok(())
+
+        let (shutdown_trigger, shutdown_listener) = triggered::trigger();
+        self.generate_activity(shutdown_trigger, shutdown_listener)
+            .await
+    }
+
+    async fn generate_activity(&self, shutdown: Trigger, listener: Listener) -> anyhow::Result<()> {
+        // We only need to spin up producers for nodes that are contained in our activity description, as there will be
+        // no events for nodes that are not source nodes.
+        let mut producer_channels = HashMap::new();
+        let mut set = tokio::task::JoinSet::new();
+
+        for (id, node) in self.nodes.iter().filter(|(pk, _)| {
+            self.activity
+                .iter()
+                .map(|a| a.source)
+                .collect::<HashSet<PublicKey>>()
+                .contains(pk)
+        }) {
+            // For each active node, we'll create a sender and receiver channel to produce and consumer
+            // events. We do not buffer channels as we expect events to clear quickly.
+            let (sender, receiver) = channel(0);
+
+            // Generate a consumer for the receiving end of the channel.
+            set.spawn(consume_events(node.clone(), receiver, shutdown.clone()));
+
+            // Add the producer channel to our map so that various activity descriptions can use it. We may have multiple
+            // activity descriptions that have the same source node.
+            producer_channels.insert(id, sender);
+        }
+
+        for description in self.activity.iter() {
+            let sender_chan = producer_channels.get(&description.source).unwrap();
+            set.spawn(produce_events(
+                *description,
+                sender_chan.clone(),
+                listener.clone(),
+            ));
+        }
+
+        // We always want to wait ofr all threads to exit, so we wait for all of them to exit and track any errors
+        // that surface. It's okay if there are multiple and one is overwritten, we just want to know whether we
+        // exited with an error or not.
+        let mut results = vec![];
+        while let Some(res) = set.join_next().await {
+            results.push(res);
+        }
+        (!(results.iter().any(|x| matches!(x, Err(..)))))
+            .then_some(())
+            .ok_or(anyhow!("One of our tasks failed"))
+    }
+}
+
+// consume_events processes events that are crated for a lightning node that we can execute actions on. If it exits,
+// it will use the trigger provided to trigger shutdown in other threads. If an error occurs elsewhere, we expect the
+// senders corresponding to our receiver to be dropped, which will cause the receiver to error out and exit.
+async fn consume_events(
+    node: Arc<Mutex<dyn LightningNode + Send>>,
+    mut receiver: Receiver<NodeAction>,
+    shutdown: triggered::Trigger,
+) {
+    while let Some(action) = receiver.recv().await {
+        match action {
+            NodeAction::SendPayment(dest, amt_msat) => {
+                let node = node.lock().await;
+                let payment = node.send_payment(dest, amt_msat);
+
+                match payment.await {
+                    Ok(payment_hash) => println!("Send payment: {:?}", payment_hash),
+                    Err(_) => break,
+                };
+            }
+        };
+    }
+
+    // On exit call our shutdown trigger to inform other threads that we have exited, and they need to shut down.
+    shutdown.trigger();
+}
+
+// produce events generates events for the activity description provided. It accepts a shutdown listener so it can
+// exit if other threads signal that they have errored out.
+async fn produce_events(act: ActivityDefinition, sender: Sender<NodeAction>, shutdown: Listener) {
+    let e = NodeAction::SendPayment(act.destination, act.amount_msat);
+    let interval = time::Duration::from_secs(act.frequency as u64);
+
+    loop {
+        if time::timeout(interval, shutdown.clone()).await.is_ok() {
+            println!("Received shutting down signal. Shutting down");
+            break;
+        }
+
+        if sender.send(e).await.is_err() {
+            break;
+        }
     }
 }
