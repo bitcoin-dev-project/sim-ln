@@ -1,9 +1,0 @@
-{
-  "compilerOptions": {
-    "paths": {
-      "/proto": [
-        "./fred/*"  
-      ]
-    }
-  }
-}
