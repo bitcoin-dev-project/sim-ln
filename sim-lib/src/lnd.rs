@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use crate::{LightningNode, NodeInfo, PaymentError};
+use crate::{LightningError, LightningNode, NodeInfo};
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use lightning::ln::PaymentHash;
@@ -15,15 +15,21 @@ pub struct LndNode {
 }
 
 impl LndNode {
-    pub async fn new(address: String, macaroon: String, cert: String) -> anyhow::Result<Self> {
-        let client = tonic_lnd::connect(address, cert, macaroon).await?;
+    pub async fn new(
+        address: String,
+        macaroon: String,
+        cert: String,
+    ) -> Result<Self, LightningError> {
+        let client = tonic_lnd::connect(address, cert, macaroon)
+            .await
+            .map_err(|err| LightningError::ConnectionError(err.to_string()))?;
         Ok(Self { client })
     }
 }
 
 #[async_trait]
 impl LightningNode for LndNode {
-    async fn get_info(&self) -> Result<NodeInfo, PaymentError> {
+    async fn get_info(&self) -> Result<NodeInfo, LightningError> {
         let mut client = self.client.clone();
         let ln_client = client.lightning();
 
@@ -35,13 +41,13 @@ impl LightningNode for LndNode {
         } = ln_client
             .get_info(GetInfoRequest {})
             .await
-            .map_err(|err| PaymentError::GetInfoFailed(err.to_string()))?
+            .map_err(|err| LightningError::GetInfoError(err.to_string()))?
             .into_inner();
 
         Ok(NodeInfo {
             pubkey: PublicKey::from_str(&identity_pubkey)
-                .map_err(|err| PaymentError::GetInfoFailed(err.to_string()))?,
-            features: features.keys().into_iter().copied().collect(),
+                .map_err(|err| LightningError::GetInfoError(err.to_string()))?,
+            features: features.keys().copied().collect(),
             alias,
         })
     }
@@ -50,11 +56,11 @@ impl LightningNode for LndNode {
         &self,
         _dest: PublicKey,
         _amount_msat: u64,
-    ) -> Result<PaymentHash, PaymentError> {
+    ) -> Result<PaymentHash, LightningError> {
         unimplemented!()
     }
 
-    async fn track_payment(&self, _hash: PaymentHash) -> Result<(), PaymentError> {
+    async fn track_payment(&self, _hash: PaymentHash) -> Result<(), LightningError> {
         unimplemented!()
     }
 }
