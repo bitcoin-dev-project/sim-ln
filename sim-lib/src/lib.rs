@@ -1,17 +1,18 @@
+use anyhow::anyhow;
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use lightning::ln::PaymentHash;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::marker::Send;
 use std::{collections::HashMap, sync::Arc, time::SystemTime};
 use thiserror::Error;
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::Mutex;
 use tokio::time;
-use triggered::Listener;
+use triggered::{Listener, Trigger};
 
 pub mod lnd;
-
 // Phase 0: User input - see config.json
 
 // Phase 1: Parsed User Input
@@ -30,7 +31,7 @@ pub struct Config {
     pub activity: Vec<ActivityDefinition>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct ActivityDefinition {
     // The source of the action.
     pub source: PublicKey,
@@ -126,6 +127,52 @@ impl Simulation {
         );
         println!("42 and Done!");
         Ok(())
+    }
+
+    async fn generate_activity(&self, shutdown: Trigger, listener: Listener) -> anyhow::Result<()> {
+        // We only need to spin up producers for nodes that are contained in our activity description, as there will be
+        // no events for nodes that are not source nodes.
+        let mut producer_channels = HashMap::new();
+        let mut set = tokio::task::JoinSet::new();
+
+        for (id, node) in self.nodes.iter().filter(|(pk, _)| {
+            self.activity
+                .iter()
+                .map(|a| a.source)
+                .collect::<HashSet<PublicKey>>()
+                .contains(pk)
+        }) {
+            // For each active node, we'll create a sender and receiver channel to produce and consumer
+            // events. We do not buffer channels as we expect events to clear quickly.
+            let (sender, receiver) = channel(0);
+
+            // Generate a consumer for the receiving end of the channel.
+            set.spawn(consume_events(node.clone(), receiver, shutdown.clone()));
+
+            // Add the producer channel to our map so that various activity descriptions can use it. We may have multiple
+            // activity descriptions that have the same source node.
+            producer_channels.insert(id, sender);
+        }
+
+        for description in self.activity.iter() {
+            let sender_chan = producer_channels.get(&description.source).unwrap();
+            set.spawn(produce_events(
+                *description,
+                sender_chan.clone(),
+                listener.clone(),
+            ));
+        }
+
+        // We always want to wait ofr all threads to exit, so we wait for all of them to exit and track any errors
+        // that surface. It's okay if there are multiple and one is overwritten, we just want to know whether we
+        // exited with an error or not.
+        let mut results = vec![];
+        while let Some(res) = set.join_next().await {
+            results.push(res);
+        }
+        (!(results.iter().any(|x| matches!(x, Err(..)))))
+            .then_some(())
+            .ok_or(anyhow!("One of our tasks failed"))
     }
 }
 
