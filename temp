@@ -1,0 +1,29 @@
+Make it a full config builder:
+ - add a node 
+ - IP address 
+ - macaroon
+
+Two "modes"
+- Create config; will add nodes and create full config.json
+- Create activity: takes config.json (if you already have it) and fills in (overwirting) activity.
+
+Interval between payments (seconds)? Note that 1 is the default (change to 10)
+Remove action type (for now)
+
+High / low: 
+- High: 5 second frequency, amt 100k
+- Low: 5 second frequency, 100 sats
+
+Pick your frequency?
+- H/M/L (show values)
+- High (1 second)
+- Low (1 hour)
+
+Pick you amount?
+- H/M/L (as above) OR % of sender channel balance
+
+~~~
+Source is from nodes
+Destination is from graph
+
+Random source and destiantion - does have validation. 

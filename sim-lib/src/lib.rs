@@ -2,10 +2,13 @@ use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use lightning::ln::PaymentHash;
 use serde::{Deserialize, Serialize};
+use std::marker::Send;
 use std::{collections::HashMap, sync::Arc, time::SystemTime};
 use thiserror::Error;
-use tokio::sync::mpsc::Receiver;
+use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::Mutex;
+use tokio::time;
+use triggered::Listener;
 
 pub mod lnd;
 
@@ -81,6 +84,7 @@ pub trait LightningNode {
     async fn track_payment(&self, hash: PaymentHash) -> Result<(), LightningError>;
 }
 
+#[derive(Clone, Copy)]
 enum NodeAction {
     // Dispatch a payment of the specified amount to the public key provided.
     SendPayment(PublicKey, u64),
@@ -149,4 +153,22 @@ async fn consume_events(
 
     // On exit call our shutdown trigger to inform other threads that we have exited, and they need to shut down.
     shutdown.trigger();
+}
+
+// produce events generates events for the activity description provided. It accepts a shutdown listener so it can
+// exit if other threads signal that they have errored out.
+async fn produce_events(act: ActivityDefinition, sender: Sender<NodeAction>, shutdown: Listener) {
+    let e = NodeAction::SendPayment(act.destination, act.amount_msat);
+    let interval = time::Duration::from_secs(act.frequency as u64);
+
+    loop {
+        if time::timeout(interval, shutdown.clone()).await.is_ok() {
+            println!("Received shutting down signal. Shutting down");
+            break;
+        }
+
+        if sender.send(e).await.is_err() {
+            break;
+        }
+    }
 }
