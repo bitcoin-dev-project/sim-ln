@@ -86,18 +86,6 @@ enum NodeAction {
     SendPayment(PublicKey, u64),
 }
 
-#[allow(dead_code)]
-struct Event {
-    // The public key of the node executing this event.
-    source: PublicKey,
-
-    // Offset is the time offset from the beginning of execution that this event should be executed.
-    offset: u64,
-
-    // An action to be executed on the source node.
-    action: NodeAction,
-}
-
 // Phase 3: CSV output
 
 #[allow(dead_code)]
