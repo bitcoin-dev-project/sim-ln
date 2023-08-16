@@ -5,7 +5,9 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use clap::Parser;
+use log::LevelFilter;
 use sim_lib::{lnd::LndNode, Config, LightningNode, Simulation};
+use simple_logger::SimpleLogger;
 
 #[derive(Parser)]
 #[command(version)]
@@ -16,6 +18,13 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    SimpleLogger::new()
+        .with_level(LevelFilter::Warn)
+        .with_module_level("sim_lib", LevelFilter::Debug)
+        .with_module_level("sim_cli", LevelFilter::Debug)
+        .init()
+        .unwrap();
+
     let cli = Cli::parse();
 
     let config_str = std::fs::read_to_string(cli.config)?;
@@ -27,11 +36,17 @@ async fn main() -> anyhow::Result<()> {
         let lnd = LndNode::new(node.address, node.macaroon, node.cert).await?;
 
         let node_info = lnd.get_info().await?;
-        println!("Node info {:?}", node_info);
+        log::info!(
+            "Connected to {} - Node ID: {}",
+            node_info.alias,
+            node_info.pubkey
+        );
 
         clients.insert(node.id, Arc::new(Mutex::new(lnd)));
     }
 
     let sim = Simulation::new(clients, activity);
-    sim.run().await
+    sim.run().await?;
+
+    Ok(())
 }
