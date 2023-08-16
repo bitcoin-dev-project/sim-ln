@@ -7,7 +7,7 @@ import { program } from 'commander';
 import { select, input, confirm } from '@inquirer/prompts';
 import { v4 } from 'uuid';
 import { parse } from 'json2csv';
-import { getFrequency, getAmountInSats } from './validation/inputGetters.js';
+import { getFrequency, getAmountInSats, verifyPubKey } from './validation/inputGetters.js';
 program.requiredOption('--config <file>');
 program.option('--csv');
 program.parse();
@@ -54,6 +54,7 @@ async function buildControlNodes() {
                 console.log(`Node: ${node.alias} has no graph`)
                 return console.error("Please check that controlled nodes have open channels to other nodes")
             }
+            
             //dump graph information
             nodeObj[current_node.identity_pubkey] = current_node;
             nodeObj[current_node.identity_pubkey].graph = nodeGraph;
@@ -87,16 +88,28 @@ async function promptForActivities() {
     let activity = {};
     activity.uuid = v4();
 
+    let sourceArray = [{
+        name: '(choose random)',
+        value: Object.values(nodeObj)[Math.floor(Math.random() * Object.values(nodeObj).length)].identity_pubkey
+    }, {
+        name: '(input pubkey)',
+        value: false
+    }]
+
     activity.src = await select({
         message: "Choose a source? \n",
-        choices: Object.keys(nodeObj).map(key => {
+        choices: sourceArray.concat(Object.keys(nodeObj).map(key => {
             let node = nodeObj[key];
             return {
                 name: `${node.alias}:  (${node.identity_pubkey})`,
                 value: node.identity_pubkey
             }
-        })
+        }))
     })
+
+    if (!activity.src) {
+        activity.src = await input({ message: 'Enter pubkey:' });
+    }
 
     let destArray = [{
         name: `(choose random)`,
@@ -118,7 +131,14 @@ async function promptForActivities() {
     })
 
     if (!activity.dest) {
-        activity.dest = await input({ message: 'Enter pubkey:' });
+        // console.log(nodeObj[Object.keys(nodeObj)[0]].graph.nodes)
+        const singleNodeGraph = Object.values(nodeObj).find((node) => {
+            return node.graph.nodes
+        }).graph
+
+        const allPossibleNodes = singleNodeGraph.nodes.map((node) => node.pub_key)
+        activity.dest = await verifyPubKey(allPossibleNodes)
+        // activity.dest = await input({ message: 'Enter pubkey:' });
     }
 
     activity.action = await input({ message: 'What action?', default: "keysend" });

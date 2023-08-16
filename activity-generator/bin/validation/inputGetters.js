@@ -32,5 +32,20 @@ const getAmountInSats = async () => {
   }
 }
 
+const verifyPubKey = async (allPossibleNodes) => {
+  try {
+    const pubkey = await input({ message: 'Enter pubkey:' });
+    const isValidPubkey = allPossibleNodes.find((_pubkey) => pubkey === _pubkey )
+    if (!isValidPubkey) {
+      throw new Error(ErrorConfig.PUBKEY_NOT_FOUND)
+    }
+    return pubkey
+  } catch (err) {
+    console.error(err.message)
+    if (err.message === ErrorConfig.PUBKEY_NOT_FOUND) {
+      return await verifyPubKey(allPossibleNodes)
+    }
+  }
+}
 
-export { getFrequency, getAmountInSats }
+export { getFrequency, getAmountInSats, verifyPubKey }
