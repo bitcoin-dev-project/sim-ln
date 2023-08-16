@@ -1,7 +1,11 @@
+use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use lightning::ln::PaymentHash;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc, time::SystemTime};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::SystemTime;
+use thiserror::Error;
 
 pub mod lnd;
 
@@ -35,15 +39,46 @@ pub struct ActivityDefinition {
     pub amount_msat: u64,
 }
 
-// Phase 2: Event Queue
+#[derive(Debug, Error)]
+pub enum SimulationError {
+    #[error("Lightning Error: {0:?}")]
+    LightningError(#[from] LightningError),
+    #[error("Other: {0:?}")]
+    Error(#[from] anyhow::Error),
+}
 
-#[allow(dead_code)]
-pub enum PaymentError {}
+#[derive(Debug, Error)]
+pub enum LightningError {
+    #[error("Node connection error {0}")]
+    ConnectionError(String),
+    #[error("Get info error {0}")]
+    GetInfoError(String),
+    #[error("Send payment error {0}")]
+    SendPaymentError(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct NodeInfo {
+    pub pubkey: PublicKey,
+    pub alias: String,
+    pub features: Vec<u32>,
+}
 
 /// LightningNode represents the functionality that is required to execute events on a lightning node.
+#[async_trait]
 pub trait LightningNode {
-    fn send_payment(&self, dest: PublicKey, amt_msat: u64) -> anyhow::Result<PaymentHash>;
-    fn track_payment(&self, hash: PaymentHash) -> Result<(), PaymentError>;
+    /// Get information about the node.
+    async fn get_info(&self) -> Result<NodeInfo, LightningError>;
+
+    /// Keysend payment worth `amount_msat` from a source node to the destination node.
+    async fn send_payment(
+        &self,
+        dest: PublicKey,
+        amount_msat: u64,
+    ) -> Result<PaymentHash, LightningError>;
+
+    /// Track a payment with the specified hash.
+    async fn track_payment(&self, hash: PaymentHash) -> Result<(), LightningError>;
 }
 
 #[allow(dead_code)]

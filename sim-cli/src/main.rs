@@ -24,7 +24,11 @@ async fn main() -> anyhow::Result<()> {
 
     for node in nodes {
         let lnd = LndNode::new(node.address, node.macaroon, node.cert).await?;
-        clients.insert(node.id, Arc::new(lnd));
+
+        let node_info = lnd.get_info().await?;
+        println!("Node info {:?}", node_info);
+
+        clients.insert(node_info.pubkey, Arc::new(lnd));
     }
 
     let sim = Simulation::new(clients, activity);
