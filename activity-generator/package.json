@@ -4,7 +4,10 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "esbuild bin/index.js --bundle --outdir=dist --out-extension:.js=.cjs \"--external:*.proto\" --platform=node",
+    "compile": "esbuild bin/index.js --bundle --outdir=dist --out-extension:.js=.cjs \"--external:*.proto\" --platform=node && pkg dist/index.cjs -c dist/pkg.json -o releases/act-gen",
+    "run":"./releases/act-gen --config ../config.json"
   },
   "type": "module",
   "bin": {
