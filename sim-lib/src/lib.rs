@@ -4,6 +4,7 @@ use lightning::ln::PaymentHash;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc, time::SystemTime};
 use thiserror::Error;
+use tokio::sync::mpsc::Receiver;
 use tokio::sync::Mutex;
 
 pub mod lnd;
@@ -80,7 +81,6 @@ pub trait LightningNode {
     async fn track_payment(&self, hash: PaymentHash) -> Result<(), LightningError>;
 }
 
-#[allow(dead_code)]
 enum NodeAction {
     // Dispatch a payment of the specified amount to the public key provided.
     SendPayment(PublicKey, u64),
@@ -123,4 +123,30 @@ impl Simulation {
         println!("42 and Done!");
         Ok(())
     }
+}
+
+// consume_events processes events that are crated for a lightning node that we can execute actions on. If it exits,
+// it will use the trigger provided to trigger shutdown in other threads. If an error occurs elsewhere, we expect the
+// senders corresponding to our receiver to be dropped, which will cause the receiver to error out and exit.
+async fn consume_events(
+    node: Arc<Mutex<dyn LightningNode + Send>>,
+    mut receiver: Receiver<NodeAction>,
+    shutdown: triggered::Trigger,
+) {
+    while let Some(action) = receiver.recv().await {
+        match action {
+            NodeAction::SendPayment(dest, amt_msat) => {
+                let node = node.lock().await;
+                let payment = node.send_payment(dest, amt_msat);
+
+                match payment.await {
+                    Ok(payment_hash) => println!("Send payment: {:?}", payment_hash),
+                    Err(_) => break,
+                };
+            }
+        };
+    }
+
+    // On exit call our shutdown trigger to inform other threads that we have exited, and they need to shut down.
+    shutdown.trigger();
 }
