@@ -1,4 +1,4 @@
-{
+{   "name":"act-gen",
     "pkg":{
         "assets": ["proto/**/*"]
     }
