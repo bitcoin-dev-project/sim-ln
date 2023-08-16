@@ -4,7 +4,7 @@ import { ErrorConfig } from './err_config.js';
 const getFrequency = async () => {
   const errMessage = `Frequency ${ErrorConfig.POSITIVE_INTEGER}`
   try {
-    const freq = await input({ message: 'At what time would you like to run this action?', default: 0 });
+    const freq = await input({ message: 'Time delay between actions in seconds', default: 1 });
     if (isNaN(parseInt(freq)) || parseInt(freq) < 1) {
       throw new Error(errMessage)
     }
