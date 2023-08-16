@@ -2,10 +2,9 @@ use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use lightning::ln::PaymentHash;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::SystemTime;
+use std::{collections::HashMap, sync::Arc, time::SystemTime};
 use thiserror::Error;
+use tokio::sync::Mutex;
 
 pub mod lnd;
 
@@ -113,7 +112,7 @@ struct PaymentResult {
 
 pub struct Simulation {
     // The lightning node that is being simulated.
-    nodes: HashMap<PublicKey, Arc<dyn LightningNode>>,
+    nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>>,
 
     // The activity that are to be executed on the node.
     activity: Vec<ActivityDefinition>,
@@ -121,7 +120,7 @@ pub struct Simulation {
 
 impl Simulation {
     pub fn new(
-        nodes: HashMap<PublicKey, Arc<dyn LightningNode>>,
+        nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>>,
         activity: Vec<ActivityDefinition>,
     ) -> Self {
         Self { nodes, activity }
