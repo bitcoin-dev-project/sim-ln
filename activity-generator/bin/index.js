@@ -87,16 +87,28 @@ async function promptForActivities() {
     let activity = {};
     activity.uuid = v4();
 
+    let sourceArray = [{
+        name: '(choose random)',
+        value: Object.values(nodeObj)[Math.floor(Math.random() * Object.values(nodeObj).length)].identity_pubkey
+    }, {
+        name: '(input pubkey)',
+        value: false
+    }]
+
     activity.src = await select({
         message: "Choose a source? \n",
-        choices: Object.keys(nodeObj).map(key => {
+        choices: sourceArray.concat(Object.keys(nodeObj).map(key => {
             let node = nodeObj[key];
             return {
                 name: `${node.alias}:  (${node.identity_pubkey})`,
                 value: node.identity_pubkey
             }
-        })
+        }))
     })
+
+    if (!activity.src) {
+        activity.src = await input({ message: 'Enter pubkey:' });
+    }
 
     let destArray = [{
         name: `(choose random)`,
