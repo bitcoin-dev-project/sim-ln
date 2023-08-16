@@ -40,11 +40,21 @@ pub struct ActivityDefinition {
 }
 
 #[derive(Debug, Error)]
-pub enum PaymentError {
-    #[error("Get info failed {0}")]
-    GetInfoFailed(String),
+pub enum SimulationError {
+    #[error("Lightning Error: {0:?}")]
+    LightningError(#[from] LightningError),
     #[error("Other: {0:?}")]
     Error(#[from] anyhow::Error),
+}
+
+#[derive(Debug, Error)]
+pub enum LightningError {
+    #[error("Node connection error {0}")]
+    ConnectionError(String),
+    #[error("Get info error {0}")]
+    GetInfoError(String),
+    #[error("Send payment error {0}")]
+    SendPaymentError(String),
 }
 
 #[derive(Debug, Clone)]
@@ -58,17 +68,17 @@ pub struct NodeInfo {
 #[async_trait]
 pub trait LightningNode {
     /// Get information about the node.
-    async fn get_info(&self) -> Result<NodeInfo, PaymentError>;
+    async fn get_info(&self) -> Result<NodeInfo, LightningError>;
 
     /// Keysend payment worth `amount_msat` from a source node to the destination node.
     async fn send_payment(
         &self,
         dest: PublicKey,
         amount_msat: u64,
-    ) -> Result<PaymentHash, PaymentError>;
+    ) -> Result<PaymentHash, LightningError>;
 
     /// Track a payment with the specified hash.
-    async fn track_payment(&self, hash: PaymentHash) -> Result<(), PaymentError>;
+    async fn track_payment(&self, hash: PaymentHash) -> Result<(), LightningError>;
 }
 
 #[allow(dead_code)]
