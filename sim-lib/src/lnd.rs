@@ -1,15 +1,18 @@
 use std::{collections::HashMap, str::FromStr};
 
-use crate::{LightningError, LightningNode, NodeInfo};
+use crate::{LightningError, LightningNode, NodeInfo, PaymentResult};
 use async_trait::async_trait;
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::PublicKey;
+use lightning::events::PaymentFailureReason;
 use lightning::ln::{PaymentHash, PaymentPreimage};
+use tonic_lnd::routerrpc::TrackPaymentRequest;
 use tonic_lnd::{
     lnrpc::{GetInfoRequest, GetInfoResponse},
     routerrpc::SendPaymentRequest,
     Client,
 };
+use triggered::Listener;
 
 const KEYSEND_KEY: u64 = 5482373484;
 const SEND_PAYMENT_TIMEOUT_SECS: i32 = 300;
@@ -101,8 +104,51 @@ impl LightningNode for LndNode {
         Ok(payment_hash)
     }
 
-    async fn track_payment(&mut self, _hash: PaymentHash) -> Result<(), LightningError> {
-        unimplemented!()
+    async fn track_payment(
+        &mut self,
+        hash: PaymentHash,
+        shutdown: Listener,
+    ) -> Result<PaymentResult, LightningError> {
+        let response = self
+            .client
+            .router()
+            .track_payment_v2(TrackPaymentRequest {
+                payment_hash: hash.0.to_vec(),
+                no_inflight_updates: true,
+            })
+            .await
+            .map_err(|err| LightningError::TrackPaymentError(err.to_string()))?;
+
+        let mut stream = response.into_inner();
+
+        tokio::select! {
+            biased;
+            stream = stream.message() => {
+                let payment = stream.map_err(|err| LightningError::TrackPaymentError(err.to_string()))?;
+                match payment {
+                    Some(payment) => {
+                        return Ok(PaymentResult {
+                            settled: payment.status == 2 || payment.status == 3,
+                            htlc_count: payment.htlcs.len(),
+                            failure_reason: match payment.failure_reason {
+                            1 => Some(PaymentFailureReason::PaymentExpired),
+                            2 => Some(PaymentFailureReason::RouteNotFound),
+                            3 => Some(PaymentFailureReason::UnexpectedError),
+                            4 => Some(PaymentFailureReason::UnexpectedError), // TODO: Capture failure reasons for incorrect payment
+                            5 => Some(PaymentFailureReason::UnexpectedError), // TODO: Capture failure reasons for insufficient balance
+                            _ => None,
+                        },
+                        });
+                    },
+                    None => {
+                        return Err(LightningError::TrackPaymentError(
+                            "No payment".to_string(),
+                        ));
+                    },
+                }
+            },
+            _ = shutdown => { Err(LightningError::TrackPaymentError("Shutdown before tracking results".to_string())) }
+        }
     }
 }
 
