@@ -8,6 +8,7 @@ import { select, input, confirm } from '@inquirer/prompts';
 import { v4 } from 'uuid';
 import { parse } from 'json2csv';
 import { getFrequency, getAmountInSats, verifyPubKey } from './validation/inputGetters.js';
+import { DefaultConfig } from './default_activities_config.js';
 program.requiredOption('--config <file>');
 program.option('--csv');
 program.parse();
@@ -88,74 +89,97 @@ async function promptForActivities() {
     let activity = {};
     activity.uuid = v4();
 
-    let sourceArray = [{
-        name: '(choose random)',
-        value: Object.values(nodeObj)[Math.floor(Math.random() * Object.values(nodeObj).length)].identity_pubkey
-    }, {
-        name: '(input pubkey)',
-        value: false
-    }]
-
-    activity.src = await select({
-        message: "Choose a source? \n",
-        choices: sourceArray.concat(Object.keys(nodeObj).map(key => {
-            let node = nodeObj[key];
-            return {
-                name: `${node.alias}:  (${node.identity_pubkey})`,
-                value: node.identity_pubkey
-            }
-        }))
+    const predefinedActivity = await select({
+        message: " \n",
+        choices: [
+            {name: "Select a predefined activity", value: true},
+            {name: "Manually create an activity", value: false}
+        ]
     })
 
-    if (!activity.src) {
-        activity.src = await input({ message: 'Enter pubkey:' });
+    if (predefinedActivity) {
+        const selectedPredefinedActivity = await select({
+            message: " \n",
+            choices: Object.keys(DefaultConfig).map((config) => {
+                return {
+                    name: DefaultConfig[config].name,
+                    value: config
+                }
+            })
+        })
+        activity.freq = DefaultConfig[selectedPredefinedActivity].frequency
+        activity.amt = DefaultConfig[selectedPredefinedActivity].amount
+        activity.action = DefaultConfig[selectedPredefinedActivity].action
+        activity.src = Object.values(nodeObj)[Math.floor(Math.random() * Object.values(nodeObj).length)].identity_pubkey
+        activity.dest = nodeObj[activity.src].possible_dests[Math.floor(Math.random() * nodeObj[activity.src].possible_dests.length)].pub_key
+    } else {
+        let sourceArray = [{
+            name: '(choose random)',
+            value: Object.values(nodeObj)[Math.floor(Math.random() * Object.values(nodeObj).length)].identity_pubkey
+        }, {
+            name: '(input pubkey)',
+            value: false
+        }]
+    
+        activity.src = await select({
+            message: "Choose a source? \n",
+            choices: sourceArray.concat(Object.keys(nodeObj).map(key => {
+                let node = nodeObj[key];
+                return {
+                    name: `${node.alias}:  (${node.identity_pubkey})`,
+                    value: node.identity_pubkey
+                }
+            }))
+        })
+    
+        if (!activity.src) {
+            activity.src = await input({ message: 'Enter pubkey:' });
+        }
+    
+        let destArray = [{
+            name: `(choose random)`,
+            value: nodeObj[activity.src].possible_dests[Math.floor(Math.random() * nodeObj[activity.src].possible_dests.length)].pub_key
+        }, {
+            name: '(input pubkey)',
+            value: false
+        }]
+    
+        activity.dest = await select({
+            message: "Choose a destination? \n",
+            choices: destArray.concat(nodeObj[activity.src].possible_dests.map(dest => {
+                return {
+                    name: `${dest.alias}:  (${dest.pub_key})`,
+                    value: dest.pub_key
+                }
+            }))
+    
+        })
+    
+        if (!activity.dest) {
+            const singleNodeGraph = Object.values(nodeObj).find((node) => {
+                return node.graph.nodes
+            }).graph
+    
+            const allPossibleNodes = singleNodeGraph.nodes.map((node) => node.pub_key)
+            activity.dest = await verifyPubKey(allPossibleNodes)
+        }
+    
+        activity.action = await input({ message: 'What action?', default: "keysend" });
+    
+        activity.frequency = await getFrequency()
+        activity.amount = await getAmountInSats()
     }
-
-    let destArray = [{
-        name: `(choose random)`,
-        value: nodeObj[activity.src].possible_dests[Math.floor(Math.random() * nodeObj[activity.src].possible_dests.length)].pub_key
-    }, {
-        name: '(input pubkey)',
-        value: false
-    }]
-
-    activity.dest = await select({
-        message: "Choose a destination? \n",
-        choices: destArray.concat(nodeObj[activity.src].possible_dests.map(dest => {
-            return {
-                name: `${dest.alias}:  (${dest.pub_key})`,
-                value: dest.pub_key
-            }
-        }))
-
-    })
-
-    if (!activity.dest) {
-        // console.log(nodeObj[Object.keys(nodeObj)[0]].graph.nodes)
-        const singleNodeGraph = Object.values(nodeObj).find((node) => {
-            return node.graph.nodes
-        }).graph
-
-        const allPossibleNodes = singleNodeGraph.nodes.map((node) => node.pub_key)
-        activity.dest = await verifyPubKey(allPossibleNodes)
-        // activity.dest = await input({ message: 'Enter pubkey:' });
-    }
-
-    activity.action = await input({ message: 'What action?', default: "keysend" });
-
-    activity.frequency = await getFrequency()
-    activity.amount = await getAmountInSats()
 
     activities.push(activity);
 
+    console.log(
+        `\n------------------------\nCreated: ${activity.uuid}\nTotal activities: ${activities.length}\n------------------------\n`
+    )
+
     const anotherOne = await confirm({ message: 'Create another one?', default: false });
-    console.log("\n------------------------");
-    console.log(`Created: ${activity.uuid}\nTotal activities: ${activities.length}`);
-    console.log("------------------------\n");
     if (anotherOne) {
         promptForActivities();
     } else {
-
         if (options.csv) activities = parse(activities, { header: true });
         config.activity = activities;
         console.log(config);
