@@ -146,7 +146,7 @@ impl Simulation {
         }) {
             // For each active node, we'll create a sender and receiver channel to produce and consumer
             // events. We do not buffer channels as we expect events to clear quickly.
-            let (sender, receiver) = channel(0);
+            let (sender, receiver) = channel(1);
 
             // Generate a consumer for the receiving end of the channel.
             set.spawn(consume_events(node.clone(), receiver, shutdown.clone()));
