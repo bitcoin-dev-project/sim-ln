@@ -6,12 +6,11 @@ use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::PublicKey;
 use lightning::events::PaymentFailureReason;
 use lightning::ln::{PaymentHash, PaymentPreimage};
+use std::collections::HashSet;
+use tonic_lnd::lnrpc::NodeInfoRequest;
+use tonic_lnd::lnrpc::{payment::PaymentStatus, GetInfoRequest, GetInfoResponse};
 use tonic_lnd::routerrpc::TrackPaymentRequest;
-use tonic_lnd::{
-    lnrpc::{payment::PaymentStatus, GetInfoRequest, GetInfoResponse},
-    routerrpc::SendPaymentRequest,
-    Client,
-};
+use tonic_lnd::{routerrpc::SendPaymentRequest, Client};
 use triggered::Listener;
 
 const KEYSEND_KEY: u64 = 5482373484;
@@ -149,6 +148,33 @@ impl LightningNode for LndNode {
                     },
                 }
             },
+        }
+    }
+
+    async fn get_node_announcement(&self, node: PublicKey) -> Result<HashSet<u32>, LightningError> {
+        let mut client = self.client.clone();
+        let lightning_client = client.lightning();
+
+        let node_info = lightning_client
+            .get_node_info(NodeInfoRequest {
+                pub_key: node.to_string(),
+                include_channels: false,
+            })
+            .await
+            .map_err(|err| LightningError::GetNodeInfoError(err.to_string()))?
+            .into_inner();
+
+        if let Some(node_info) = node_info.node {
+            let mut features = HashSet::new();
+            for feature in node_info.features {
+                features.insert(feature.0);
+            }
+
+            Ok(features)
+        } else {
+            Err(LightningError::GetNodeInfoError(
+                "node not found".to_string(),
+            ))
         }
     }
 }

@@ -14,6 +14,8 @@ use tokio::time;
 use triggered::{Listener, Trigger};
 pub mod lnd;
 
+const KEYSEND_OPTIONAL: u32 = 55;
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NodeConnection {
     pub id: PublicKey,
@@ -62,6 +64,8 @@ pub enum LightningError {
     InvalidPaymentHash,
     #[error("RPC error: {0:?}")]
     RpcError(#[from] tonic_lnd::tonic::Status),
+    #[error("Get node info error {0}")]
+    GetNodeInfoError(String),
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +92,9 @@ pub trait LightningNode {
         hash: PaymentHash,
         shutdown: Listener,
     ) -> Result<PaymentResult, LightningError>;
+    /// Looks up a node's announcement in the graph. This function currently only returns features, as they're all we
+    /// need, but may be updated to include any other node announcement fields if required.
+    async fn get_node_announcement(&self, node: PublicKey) -> Result<HashSet<u32>, LightningError>;
 }
 
 #[derive(Clone, Copy)]
