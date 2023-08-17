@@ -1,7 +1,5 @@
 #! /usr/bin/env node
 
-
-import LndGrpc from 'lnd-grpc';
 import fs from 'fs';
 import { program } from 'commander';
 import { select, input, confirm } from '@inquirer/prompts';
@@ -10,7 +8,8 @@ import path from 'path';
 import { parse } from 'json2csv';
 import { getFrequency, getAmountInSats, verifyPubKey } from './validation/inputGetters.js';
 import { DefaultConfig } from './default_activities_config.js';
-const { exec } = require("child_process");
+import { buildControlNodes, setupControlNodes } from './build_node.js';
+import { exec } from "child_process";
 
 program.option('--config <file>');
 program.option('--csv-output <file>');
@@ -20,81 +19,25 @@ const options = program.opts();
 const configFile = options.config;
 
 // Blocking example with fs.readFileSync
-const fileName = configFile;
-const config = JSON.parse(fs.readFileSync(fileName, 'utf-8'));
-let nodeObj = {};
-let controlNodes = config.nodes;
-
-
-
-console.log(`Setting up ${config.nodes.length} Controlled Nodes...`)
-async function buildControlNodes(node) {
-    if (!controlNodes.length) return promptForActivities();
-
-    const grpc = new LndGrpc({
-        host: node.ip,
-        cert: node.cert,
-        macaroon: node.macaroon,
-        protoDir: path.join(__dirname, "proto")
-    })
-
-    grpc.connect();
-    (async function() {
-
-        const { Lightning } = grpc.services
-        // Do something cool if we detect that the wallet is locked.
-        grpc.on(`connected`, () => console.log('wallet connected!'))
-        // Do something cool if we detect that the wallet is locked.
-        grpc.on(`locked`, async () => {
-            await grpc.activateLightning()
-        })
-
-        // Do something cool when the wallet gets unlocked.
-        grpc.on(`active`, async () => {
-            const current_node = await Lightning.getInfo();
-            const nodeGraph = await Lightning.describeGraph();
-
-            if (nodeGraph.nodes < 1) {
-                console.log(`Node: ${node.alias} has no graph`)
-                return console.error("Please check that controlled nodes have open channels to other nodes")
-            }
-
-            //dump graph information
-            nodeObj[current_node.identity_pubkey] = current_node;
-            nodeObj[current_node.identity_pubkey].graph = nodeGraph;
-            node.id = current_node.identity_pubkey;
-
-            //create array of possible destintations for node
-            nodeObj[current_node.identity_pubkey].possible_dests = nodeGraph.nodes.filter((n) => {
-                return n.pub_key != current_node.identity_pubkey
-            })
-            grpc.disconnect()
-        })
-        // Do something cool when the connection gets disconnected.
-        grpc.on(`disconnected`, () => {
-
-            if (Object.keys(nodeObj).length == config.nodes.length) promptForActivities();
-
-        })
-
-
-    })()
-
-}
+const config = configFile ? JSON.parse(fs.readFileSync(configFile, 'utf-8')) : {};
+const nodeObj = {};
+let controlNodes = config.nodes ? config.nodes : [];
 
 async function init() {
     if (!configFile) {
-        nodeObj = await setUpControlNodes();
-        promptForActivities();
+        await setupControlNodes(controlNodes, nodeObj);
     } else {
+        console.log(`Setting up ${config.nodes.length} Controlled Nodes...`)
         controlNodes.forEach(async node => {
-            await buildControlNodes(node);
+            await buildControlNodes({node, nodeObj});
         })
-
     }
+    promptForActivities();
 }
 
 init();
+
+
 
 
 
@@ -113,6 +56,7 @@ async function promptForActivities() {
             { name: "Manually create an activity", value: false }
         ]
     })
+
 
 
     if (predefinedActivity) {
@@ -141,6 +85,7 @@ async function promptForActivities() {
             value: false
         }]
 
+
         activity.src = await select({
             message: "Choose a source? \n",
             choices: sourceArray.concat(Object.keys(nodeObj).map(key => {
@@ -152,9 +97,11 @@ async function promptForActivities() {
             }))
         })
 
+
         if (!activity.src) {
             activity.src = await input({ message: 'Enter pubkey:' });
         }
+
 
         let destArray = [{
             name: `(choose random)`,
@@ -200,6 +147,9 @@ async function promptForActivities() {
     if (anotherOne) {
         promptForActivities();
     } else {
+
+        
+        if (options.csv) activities = parse(activities, { header: true });
         config.activity = activities;
         runSim = await confirm({ message: 'Run the Simulation?', default: false });
         if (runSim) {
