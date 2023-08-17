@@ -142,17 +142,25 @@ impl Simulation {
             self.nodes.len()
         );
 
+        // High level triggers used to manage our tasks.
         let (shutdown_trigger, shutdown_listener) = triggered::trigger();
 
-        // Create a sender/receiver pair that will be used for reporting the outcomes of actions to the simulator.
+        // Before we start the simulation up, start tasks that will be responsible for gathering simulation data.
+        // The action channels are shared across our functionality:
+        // - Action Sender: used by the simulation to inform data reporting that it needs to start tracking the
+        //   final outcome of the action that it has taken.
+        // - Action Receiver: used by data reporting to receive events that have been simulated that need to be
+        //   tracked and recorded.
         let (action_sender, action_receiver) = channel(1);
-        let mut record_data_set = self.record_data(
+        let mut record_data_set = self.run_data_collection(
             action_receiver,
             shutdown_trigger.clone(),
             shutdown_listener.clone(),
         );
 
-        // Create a sender/receiver pair that will be used for reporting the outcomes of actions to the simulator.
+        // Next, we'll spin up our actual activity generator that will be responsible for triggering the activity that
+        // has been configured, passing in the channel that is used to notify data collection that actions  have been
+        // generated.
         let mut generate_activity_set = self
             .generate_activity(action_sender, shutdown_trigger, shutdown_listener)
             .await?;
@@ -160,6 +168,7 @@ impl Simulation {
         // We always want to wait ofr all threads to exit, so we wait for all of them to exit and track any errors
         // that surface. It's okay if there are multiple and one is overwritten, we just want to know whether we
         // exited with an error or not.
+        // TODO: more succinct handling of tasks here.
         let mut success = true;
         while let Some(res) = record_data_set.join_next().await {
             if let Err(e) = res {
@@ -176,15 +185,17 @@ impl Simulation {
         success.then_some(()).ok_or(SimulationError::TaskError)
     }
 
-    fn record_data(
+    // run_data_collection starts the tasks required for the simulation to report of the outcomes of the activity that
+    // it generates. The simulation should report actions via the receiver that is passed in.
+    fn run_data_collection(
         &self,
         action_receiver: Receiver<ActionOutcome>,
         shutdown: Trigger,
         listener: Listener,
     ) -> tokio::task::JoinSet<()> {
         log::debug!("Simulator data recording starting.");
-
         let mut set = JoinSet::new();
+
         // Create a sender/receiver pair that will be used to report final results of action outcomes.
         let (results_sender, results_receiver) = channel(1);
 
@@ -198,7 +209,6 @@ impl Simulation {
         set.spawn(consume_simulation_results(results_receiver, shutdown));
 
         log::debug!("Simulator data recording exiting.");
-
         set
     }
 
@@ -244,6 +254,7 @@ impl Simulation {
             set.spawn(produce_events(
                 *description,
                 sender_chan.clone(),
+                shutdown.clone(),
                 listener.clone(),
             ));
         }
@@ -265,6 +276,7 @@ async fn consume_events(
 ) {
     let node_id = node.lock().await.get_info().pubkey;
     log::debug!("Started consumer for {}", node_id);
+
     while let Some(action) = receiver.recv().await {
         match action {
             NodeAction::SendPayment(dest, amt_msat) => {
@@ -289,7 +301,6 @@ async fn consume_events(
                             dispatch_time: SystemTime::now(),
                         });
 
-                        // TODO - this is failing!
                         match sender.send(outcome).await {
                             Ok(_) => {}
                             Err(e) => {
@@ -318,7 +329,12 @@ async fn consume_events(
 
 // produce events generates events for the activity description provided. It accepts a shutdown listener so it can
 // exit if other threads signal that they have errored out.
-async fn produce_events(act: ActivityDefinition, sender: Sender<NodeAction>, shutdown: Listener) {
+async fn produce_events(
+    act: ActivityDefinition,
+    sender: Sender<NodeAction>,
+    shutdown: Trigger,
+    listener: Listener,
+) {
     let e: NodeAction = NodeAction::SendPayment(act.destination, act.amount_msat);
     let interval = time::Duration::from_secs(act.frequency as u64);
 
@@ -331,7 +347,7 @@ async fn produce_events(act: ActivityDefinition, sender: Sender<NodeAction>, shu
     );
 
     loop {
-        if time::timeout(interval, shutdown.clone()).await.is_ok() {
+        if time::timeout(interval, listener.clone()).await.is_ok() {
             log::debug!(
                 "Stopped producer for {}: {} -> {}. Received shutdown signal.",
                 act.amount_msat,
@@ -346,6 +362,9 @@ async fn produce_events(act: ActivityDefinition, sender: Sender<NodeAction>, shu
             break;
         }
     }
+
+    // On exit call our shutdown trigger to inform other threads that we have exited, and they need to shut down.
+    shutdown.trigger();
 }
 
 async fn consume_simulation_results(
@@ -380,14 +399,12 @@ async fn produce_simulation_results(
     loop {
         tokio::select! {
             outcome = outcomes.recv() => {
-                log::debug!(" Received outcome");
                 match outcome{
                     Some(action_outcome) => {
                         match action_outcome{
                             ActionOutcome::PaymentSent(dispatched_payment) => {
                                 let source_node = nodes.get(&dispatched_payment.source).unwrap().clone();
 
-                                log::debug!("Tracking payment outcome for: {:?}", dispatched_payment.hash);
                                 set.spawn(track_outcome(
                                     source_node,results.clone(),action_outcome, shutdown.clone(),
                                 ));
@@ -396,7 +413,6 @@ async fn produce_simulation_results(
 
                     },
                     None => {
-                        log::debug!("Received none outcome");
                         return
                     }
                 }
@@ -408,7 +424,11 @@ async fn produce_simulation_results(
     }
 
     log::debug!("Simulation results producer exiting.");
-    // TODO - join all spawned track payments
+    while let Some(res) = set.join_next().await {
+        if let Err(e) = res {
+            log::error!("Simulation results producer task exited with error: {e}");
+        }
+    }
 }
 
 async fn track_outcome(
