@@ -1,2 +1,6 @@
 /target
-*/config.json
+node_modules
+config.json
+package-lock.json
+activity-generator/releases/*
+.DS_Store
