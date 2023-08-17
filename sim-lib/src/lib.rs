@@ -78,15 +78,13 @@ pub struct NodeInfo {
 #[async_trait]
 pub trait LightningNode {
     /// Get information about the node.
-    async fn get_info(&self) -> Result<NodeInfo, LightningError>;
-
+    fn get_info(&self) -> &NodeInfo;
     /// Keysend payment worth `amount_msat` from a source node to the destination node.
     async fn send_payment(
         &self,
         dest: PublicKey,
         amount_msat: u64,
     ) -> Result<PaymentHash, LightningError>;
-
     /// Track a payment with the specified hash.
     async fn track_payment(&self, hash: PaymentHash) -> Result<(), LightningError>;
 }
@@ -159,12 +157,7 @@ impl Simulation {
             let (sender, receiver) = channel(1);
 
             // Generate a consumer for the receiving end of the channel.
-            set.spawn(consume_events(
-                *id,
-                node.clone(),
-                receiver,
-                shutdown.clone(),
-            ));
+            set.spawn(consume_events(node.clone(), receiver, shutdown.clone()));
 
             // Add the producer channel to our map so that various activity descriptions can use it. We may have multiple
             // activity descriptions that have the same source node.
@@ -198,11 +191,11 @@ impl Simulation {
 // it will use the trigger provided to trigger shutdown in other threads. If an error occurs elsewhere, we expect the
 // senders corresponding to our receiver to be dropped, which will cause the receiver to error out and exit.
 async fn consume_events(
-    node_id: PublicKey,
     node: Arc<Mutex<dyn LightningNode + Send>>,
     mut receiver: Receiver<NodeAction>,
     shutdown: triggered::Trigger,
 ) {
+    let node_id = node.lock().await.get_info().pubkey;
     log::debug!("Started consumer for {}", node_id);
     while let Some(action) = receiver.recv().await {
         match action {

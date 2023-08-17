@@ -35,11 +35,10 @@ async fn main() -> anyhow::Result<()> {
     for node in nodes {
         let lnd = LndNode::new(node.address, node.macaroon, node.cert).await?;
 
-        let node_info = lnd.get_info().await?;
         log::info!(
             "Connected to {} - Node ID: {}",
-            node_info.alias,
-            node_info.pubkey
+            lnd.get_info().alias,
+            lnd.get_info().pubkey
         );
 
         clients.insert(node.id, Arc::new(Mutex::new(lnd)));
