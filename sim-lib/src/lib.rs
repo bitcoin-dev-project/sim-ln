@@ -36,8 +36,9 @@ pub struct ActivityDefinition {
     pub source: PublicKey,
     // The destination of the action.
     pub destination: PublicKey,
-    // The frequency of the action, as in number of times per minute.
-    pub frequency: u16,
+    // The interval of the action, as in every how many seconds the action is performed.
+    #[serde(alias = "interval_secs")]
+    pub interval: u16,
     // The amount of m_sat to used in this action.
     pub amount_msat: u64,
 }
@@ -382,20 +383,20 @@ async fn produce_events(
     listener: Listener,
 ) {
     let e: NodeAction = NodeAction::SendPayment(act.destination, act.amount_msat);
-    let interval = time::Duration::from_secs(act.frequency as u64);
+    let interval = time::Duration::from_secs(act.interval as u64);
 
     log::debug!(
         "Started producer for {} every {}s: {} -> {}",
         act.amount_msat,
-        act.frequency,
+        act.interval,
         act.source,
         act.destination
     );
 
     loop {
-        if time::timeout(interval, listener.clone()).await.is_ok() {
+        if sender.send(e).await.is_err() {
             log::debug!(
-                "Stopped producer for {}: {} -> {}. Received shutdown signal.",
+                "Stopped producer for {}: {} -> {}. Consumer cannot be reached",
                 act.amount_msat,
                 act.source,
                 act.destination
@@ -403,8 +404,13 @@ async fn produce_events(
 
             break;
         }
-
-        if sender.send(e).await.is_err() {
+        if time::timeout(interval, listener.clone()).await.is_ok() {
+            log::debug!(
+                "Stopped producer for {}: {} -> {}. Received shutdown signal",
+                act.amount_msat,
+                act.source,
+                act.destination
+            );
             break;
         }
     }
