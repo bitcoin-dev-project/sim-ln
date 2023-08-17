@@ -1,10 +1,11 @@
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
+use lightning::events::PaymentFailureReason;
 use lightning::ln::PaymentHash;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::marker::Send;
-use std::{collections::HashMap, sync::Arc, time::SystemTime};
+use std::{collections::HashMap, sync::Arc};
 use thiserror::Error;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::Mutex;
@@ -59,7 +60,7 @@ pub enum LightningError {
     GetInfoError(String),
     #[error("Send payment error {0}")]
     SendPaymentError(String),
-    #[error("Track pyment error {0}")]
+    #[error("Track payment error {0}")]
     TrackPaymentError(String),
     #[error("Invalid payment hash")]
     InvalidPaymentHash,
@@ -86,7 +87,11 @@ pub trait LightningNode {
         amount_msat: u64,
     ) -> Result<PaymentHash, LightningError>;
     /// Track a payment with the specified hash.
-    async fn track_payment(&mut self, hash: PaymentHash) -> Result<(), LightningError>;
+    async fn track_payment(
+        &mut self,
+        hash: PaymentHash,
+        shutdown: Listener,
+    ) -> Result<PaymentResult, LightningError>;
 }
 
 #[derive(Clone, Copy)]
@@ -95,16 +100,11 @@ enum NodeAction {
     SendPayment(PublicKey, u64),
 }
 
-// Phase 3: CSV output
-
-#[allow(dead_code)]
-struct PaymentResult {
-    source: PublicKey,
-    dest: PublicKey,
-    start: SystemTime,
-    end: SystemTime,
-    settled: bool,
-    action: u8,
+#[derive(Debug, Clone)]
+pub struct PaymentResult {
+    pub settled: bool,
+    pub htlc_count: usize,
+    pub failure_reason: Option<PaymentFailureReason>,
 }
 
 pub struct Simulation {
