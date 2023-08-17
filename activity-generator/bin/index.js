@@ -3,6 +3,7 @@
 
 import LndGrpc from 'lnd-grpc';
 import fs from 'fs';
+import path from 'path';
 import { program } from 'commander';
 import { select, input, confirm } from '@inquirer/prompts';
 import { v4 } from 'uuid';
@@ -35,7 +36,7 @@ async function buildControlNodes(node) {
         host: node.ip,
         cert: node.cert,
         macaroon: node.macaroon,
-        protoDir: path.join(__dirname, "proto")
+        protoDir:path.join(__dirname,"proto")
     })
 
     grpc.connect();

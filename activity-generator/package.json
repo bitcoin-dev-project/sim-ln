@@ -11,7 +11,7 @@
   },
   "type": "module",
   "bin": {
-    "sim-cli": "./bin/index.js"
+    "sim-cli": "./dist/index.cjs"
   },
   "author": "",
   "license": "ISC",
@@ -20,9 +20,11 @@
     "@grpc/proto-loader": "^0.7.8",
     "@inquirer/prompts": "^3.0.2",
     "commander": "^11.0.0",
+    "esbuild": "0.19.2",
     "inquirer": "^9.2.10",
     "json2csv": "^6.0.0-alpha.2",
     "lnd-grpc": "^0.4.6",
+    "pkg": "^5.8.1",
     "uuid": "^9.0.0"
   }
 }
