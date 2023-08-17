@@ -19,10 +19,14 @@ async function setupControlNodes(controlNodes, nodeObj) {
   control_node.cert = await input({ message: 'Enter the node cert file path'});
 
   try {
-    const validatedNode = await buildControlNodes({node: control_node, nodeObj})
-    controlNodes.push(validatedNode)
+    const connectedNode = await buildControlNodes({node: control_node, nodeObj})
+    const isPreviouslyAddedNode = controlNodes.find((node) => node.id === connectedNode.id)
+    if (isPreviouslyAddedNode) {
+      throw new Error(`${connectedNode.alias} node already exists in your control nodes`)
+    }
+    controlNodes.push(connectedNode)
     console.log("_________________________________\n")
-    console.log(chalk.green(`\n ${validatedNode.alias} node connected successfully \n`))
+    console.log(chalk.green(`\n ${connectedNode.alias} node connected successfully \n`))
     console.log("_________________________________\n")
     const anotherOne = await confirm({ message: 'Build another control node?', default: false });
     if (anotherOne) { 
@@ -49,13 +53,13 @@ async function buildControlNodes({node, nodeObj}) {
     // protoDir: path.join(__dirname, "proto")
   }
   return new Promise (async (resolve, reject) => {
-    let validatedNode = {}
+    let connectedNode = {}
     try {
       const grpc = new LndGrpc(authObj)
   
       const { Lightning } = grpc.services
       // Do something cool if we detect that the wallet is locked.
-      grpc.on(`connected`, () => console.log('wallet connected!'))
+      grpc.on(`Node`, () => console.log('wallet connected!'))
       // Do something cool if we detect that the wallet is locked.
       grpc.on(`locked`, async () => {
         await grpc.activateLightning()
@@ -78,7 +82,7 @@ async function buildControlNodes({node, nodeObj}) {
           nodeObj[current_node.identity_pubkey].possible_dests = nodeGraph.nodes.filter((n) => {
             return n.pub_key != current_node.identity_pubkey
           })
-          validatedNode = {
+          connectedNode = {
             "ip": node.ip,
             "macaroon": node.macaroon,
             "cert": node.cert,
@@ -89,8 +93,8 @@ async function buildControlNodes({node, nodeObj}) {
         await grpc.disconnect()
       })
       grpc.on(`disconnected`, async() => {
-        if (validatedNode.id) {
-          resolve(validatedNode)
+        if (connectedNode.id) {
+          resolve(connectedNode)
         } else {
           reject()
         }
