@@ -142,9 +142,15 @@ impl Simulation {
             self.nodes.len()
         );
 
+        // High level triggers used to manage our tasks.
         let (shutdown_trigger, shutdown_listener) = triggered::trigger();
 
-        // Create a sender/receiver pair that will be used for reporting the outcomes of actions to the simulator.
+        // Before we start the simulation up, start tasks that will be responsible for gathering simulation data.
+        // The action channels are shared across our functionality:
+        // - Action Sender: used by the simulation to inform data reporting that it needs to start tracking the
+        //   final outcome of the action that it has taken.
+        // - Action Receiver: used by data reporting to receive events that have been simulated that need to be
+        //   tracked and recorded.
         let (action_sender, action_receiver) = channel(1);
         let mut record_data_set = self.record_data(
             action_receiver,
@@ -152,7 +158,9 @@ impl Simulation {
             shutdown_listener.clone(),
         );
 
-        // Create a sender/receiver pair that will be used for reporting the outcomes of actions to the simulator.
+        // Next, we'll spin up our actual activity generator that will be responsible for triggering the activity that
+        // has been configured, passing in the channel that is used to notify data collection that actions  have been
+        // generated.
         let mut generate_activity_set = self
             .generate_activity(action_sender, shutdown_trigger, shutdown_listener)
             .await?;
@@ -160,6 +168,7 @@ impl Simulation {
         // We always want to wait ofr all threads to exit, so we wait for all of them to exit and track any errors
         // that surface. It's okay if there are multiple and one is overwritten, we just want to know whether we
         // exited with an error or not.
+        // TODO: more succinct handling of tasks here.
         let mut success = true;
         while let Some(res) = record_data_set.join_next().await {
             if let Err(e) = res {
