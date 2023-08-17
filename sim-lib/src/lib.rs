@@ -5,18 +5,14 @@ use lightning::ln::PaymentHash;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::marker::Send;
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::SystemTime};
 use thiserror::Error;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::Mutex;
+use tokio::task::JoinSet;
 use tokio::time;
 use triggered::{Listener, Trigger};
-
 pub mod lnd;
-
-// Phase 0: User input - see config.json
-
-// Phase 1: Parsed User Input
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NodeConnection {
@@ -107,6 +103,22 @@ pub struct PaymentResult {
     pub failure_reason: Option<PaymentFailureReason>,
 }
 
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+struct DispatchedPayment {
+    source: PublicKey,
+    destination: PublicKey,
+    hash: PaymentHash,
+    amount_msat: u64,
+    dispatch_time: SystemTime,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ActionOutcome {
+    // The payment hash that results from a SendPayment NodeAction being triggered.
+    PaymentSent(DispatchedPayment),
+}
+
 pub struct Simulation {
     // The lightning node that is being simulated.
     nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>>,
@@ -131,19 +143,76 @@ impl Simulation {
         );
 
         let (shutdown_trigger, shutdown_listener) = triggered::trigger();
-        self.generate_activity(shutdown_trigger, shutdown_listener)
-            .await
+
+        // Create a sender/receiver pair that will be used for reporting the outcomes of actions to the simulator.
+        let (action_sender, action_receiver) = channel(1);
+        let mut record_data_set = self.record_data(
+            action_receiver,
+            shutdown_trigger.clone(),
+            shutdown_listener.clone(),
+        );
+
+        // Create a sender/receiver pair that will be used for reporting the outcomes of actions to the simulator.
+        let mut generate_activity_set = self
+            .generate_activity(action_sender, shutdown_trigger, shutdown_listener)
+            .await?;
+
+        // We always want to wait ofr all threads to exit, so we wait for all of them to exit and track any errors
+        // that surface. It's okay if there are multiple and one is overwritten, we just want to know whether we
+        // exited with an error or not.
+        let mut success = true;
+        while let Some(res) = record_data_set.join_next().await {
+            if let Err(e) = res {
+                log::error!("Task exited with error: {e}");
+                success = false;
+            }
+        }
+        while let Some(res) = generate_activity_set.join_next().await {
+            if let Err(e) = res {
+                log::error!("Task exited with error: {e}");
+                success = false;
+            }
+        }
+        success.then_some(()).ok_or(SimulationError::TaskError)
+    }
+
+    fn record_data(
+        &self,
+        action_receiver: Receiver<ActionOutcome>,
+        shutdown: Trigger,
+        listener: Listener,
+    ) -> tokio::task::JoinSet<()> {
+        log::debug!("Simulator data recording starting.");
+
+        let mut set = JoinSet::new();
+        // Create a sender/receiver pair that will be used to report final results of action outcomes.
+        let (results_sender, results_receiver) = channel(1);
+
+        set.spawn(produce_simulation_results(
+            self.nodes.clone(),
+            action_receiver,
+            results_sender,
+            listener,
+        ));
+
+        set.spawn(consume_simulation_results(results_receiver, shutdown));
+
+        log::debug!("Simulator data recording exiting.");
+
+        set
     }
 
     async fn generate_activity(
         &self,
+        executed_actions: Sender<ActionOutcome>,
         shutdown: Trigger,
         listener: Listener,
-    ) -> Result<(), SimulationError> {
+    ) -> Result<JoinSet<()>, SimulationError> {
+        let mut set = JoinSet::new();
+        // Before we start the simulation, we'll spin up the infrastructure that we need to record data:
         // We only need to spin up producers for nodes that are contained in our activity description, as there will be
         // no events for nodes that are not source nodes.
         let mut producer_channels = HashMap::new();
-        let mut set = tokio::task::JoinSet::new();
 
         for (id, node) in self.nodes.iter().filter(|(pk, _)| {
             self.activity
@@ -156,8 +225,14 @@ impl Simulation {
             // events. We do not buffer channels as we expect events to clear quickly.
             let (sender, receiver) = channel(1);
 
-            // Generate a consumer for the receiving end of the channel.
-            set.spawn(consume_events(node.clone(), receiver, shutdown.clone()));
+            // Generate a consumer for the receiving end of the channel. It takes the event receiver that it'll pull
+            // events from and the results sender to report the events it has triggered for further monitoring.
+            set.spawn(consume_events(
+                node.clone(),
+                receiver,
+                executed_actions.clone(),
+                shutdown.clone(),
+            ));
 
             // Add the producer channel to our map so that various activity descriptions can use it. We may have multiple
             // activity descriptions that have the same source node.
@@ -173,26 +248,19 @@ impl Simulation {
             ));
         }
 
-        // We always want to wait ofr all threads to exit, so we wait for all of them to exit and track any errors
-        // that surface. It's okay if there are multiple and one is overwritten, we just want to know whether we
-        // exited with an error or not.
-        let mut success = true;
-        while let Some(res) = set.join_next().await {
-            if let Err(e) = res {
-                log::error!("Task exited with error: {e}");
-                success = false;
-            }
-        }
-        success.then_some(()).ok_or(SimulationError::TaskError)
+        Ok(set)
     }
 }
 
-// consume_events processes events that are crated for a lightning node that we can execute actions on. If it exits,
-// it will use the trigger provided to trigger shutdown in other threads. If an error occurs elsewhere, we expect the
-// senders corresponding to our receiver to be dropped, which will cause the receiver to error out and exit.
+// consume_events processes events that are crated for a lightning node that we can execute actions on. Any output
+// that is generated from the action being taken is piped into a channel to handle the result of the action. If it
+// exits, it will use the trigger provided to trigger shutdown in other threads. If an error occurs elsewhere, we
+// expect the senders corresponding to our receiver to be dropped, which will cause the receiver to error out and
+// exit.
 async fn consume_events(
     node: Arc<Mutex<dyn LightningNode + Send>>,
     mut receiver: Receiver<NodeAction>,
+    sender: Sender<ActionOutcome>,
     shutdown: triggered::Trigger,
 ) {
     let node_id = node.lock().await.get_info().pubkey;
@@ -210,7 +278,25 @@ async fn consume_events(
                             node_id,
                             dest,
                             hex::encode(payment_hash.0)
-                        )
+                        );
+
+                        log::info!("Sending action for {:?}", payment_hash);
+                        let outcome = ActionOutcome::PaymentSent(DispatchedPayment {
+                            source: node.get_info().pubkey,
+                            hash: payment_hash,
+                            amount_msat: amt_msat,
+                            destination: dest,
+                            dispatch_time: SystemTime::now(),
+                        });
+
+                        // TODO - this is failing!
+                        match sender.send(outcome).await {
+                            Ok(_) => {}
+                            Err(e) => {
+                                log::error!("Error sending action outcome: {:?}", e);
+                                break;
+                            }
+                        }
                     }
                     Err(e) => {
                         log::error!(
@@ -252,6 +338,7 @@ async fn produce_events(act: ActivityDefinition, sender: Sender<NodeAction>, shu
                 act.source,
                 act.destination
             );
+
             break;
         }
 
@@ -259,4 +346,95 @@ async fn produce_events(act: ActivityDefinition, sender: Sender<NodeAction>, shu
             break;
         }
     }
+}
+
+async fn consume_simulation_results(
+    mut receiver: Receiver<(DispatchedPayment, PaymentResult)>,
+    shutdown: triggered::Trigger,
+) {
+    log::debug!("Simulation results consumer started.");
+
+    while let Some(resolved_payment) = receiver.recv().await {
+        // TODO - write to CSV.
+        println!("Resolved payment received: {:?}", resolved_payment);
+    }
+
+    log::debug!("Simulation results consumer exiting");
+    shutdown.trigger();
+}
+
+/// produce_results is responsible for receiving the outcomes of actions that the simulator has taken and
+/// spinning up a producer that will report the results to our main result consumer. We handle each outcome
+/// separately because they can take a long time to resolve (eg, a payemnt that ends up on chain will take a long
+/// time to resolve).
+async fn produce_simulation_results(
+    nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>>,
+    mut outcomes: Receiver<ActionOutcome>,
+    results: Sender<(DispatchedPayment, PaymentResult)>,
+    shutdown: Listener,
+) {
+    log::debug!("Simulation results producer started.");
+
+    let mut set = tokio::task::JoinSet::new();
+
+    loop {
+        tokio::select! {
+            outcome = outcomes.recv() => {
+                log::debug!(" Received outcome");
+                match outcome{
+                    Some(action_outcome) => {
+                        match action_outcome{
+                            ActionOutcome::PaymentSent(dispatched_payment) => {
+                                let source_node = nodes.get(&dispatched_payment.source).unwrap().clone();
+
+                                log::debug!("Tracking payment outcome for: {:?}", dispatched_payment.hash);
+                                set.spawn(track_outcome(
+                                    source_node,results.clone(),action_outcome, shutdown.clone(),
+                                ));
+                            },
+                        };
+
+                    },
+                    None => {
+                        log::debug!("Received none outcome");
+                        return
+                    }
+                }
+            }
+            _ = shutdown.clone() => {
+                break;
+            },
+        }
+    }
+
+    log::debug!("Simulation results producer exiting.");
+    // TODO - join all spawned track payments
+}
+
+async fn track_outcome(
+    node: Arc<Mutex<dyn LightningNode + Send>>,
+    results: Sender<(DispatchedPayment, PaymentResult)>,
+    outcome: ActionOutcome,
+    shutdown: Listener,
+) {
+    log::trace!("Outcome tracker starting.");
+
+    let mut node = node.lock().await;
+
+    match outcome {
+        ActionOutcome::PaymentSent(payment) => {
+            let track_payment = node.track_payment(payment.hash, shutdown.clone());
+
+            match track_payment.await {
+                Ok(res) => {
+                    if results.clone().send((payment, res)).await.is_err() {
+                        log::debug!("Could not send payment result for {:?}.", payment.hash);
+                    }
+                }
+                Err(e) => log::error!("Track payment failed for {:?}: {e}", payment.hash),
+            }
+        }
+    }
+
+    log::trace!("Outcome tracker exiting.");
 }
