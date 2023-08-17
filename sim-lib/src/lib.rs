@@ -254,6 +254,7 @@ impl Simulation {
             set.spawn(produce_events(
                 *description,
                 sender_chan.clone(),
+                shutdown.clone(),
                 listener.clone(),
             ));
         }
@@ -328,7 +329,12 @@ async fn consume_events(
 
 // produce events generates events for the activity description provided. It accepts a shutdown listener so it can
 // exit if other threads signal that they have errored out.
-async fn produce_events(act: ActivityDefinition, sender: Sender<NodeAction>, shutdown: Listener) {
+async fn produce_events(
+    act: ActivityDefinition,
+    sender: Sender<NodeAction>,
+    shutdown: Trigger,
+    listener: Listener,
+) {
     let e: NodeAction = NodeAction::SendPayment(act.destination, act.amount_msat);
     let interval = time::Duration::from_secs(act.frequency as u64);
 
@@ -341,7 +347,7 @@ async fn produce_events(act: ActivityDefinition, sender: Sender<NodeAction>, shu
     );
 
     loop {
-        if time::timeout(interval, shutdown.clone()).await.is_ok() {
+        if time::timeout(interval, listener.clone()).await.is_ok() {
             log::debug!(
                 "Stopped producer for {}: {} -> {}. Received shutdown signal.",
                 act.amount_msat,
@@ -356,6 +362,9 @@ async fn produce_events(act: ActivityDefinition, sender: Sender<NodeAction>, shu
             break;
         }
     }
+
+	// On exit call our shutdown trigger to inform other threads that we have exited, and they need to shut down.
+    shutdown.trigger();
 }
 
 async fn consume_simulation_results(
@@ -397,7 +406,6 @@ async fn produce_simulation_results(
                             ActionOutcome::PaymentSent(dispatched_payment) => {
                                 let source_node = nodes.get(&dispatched_payment.source).unwrap().clone();
 
-                                log::debug!("Tracking payment outcome for: {:?}", dispatched_payment.hash);
                                 set.spawn(track_outcome(
                                     source_node,results.clone(),action_outcome, shutdown.clone(),
                                 ));
@@ -406,7 +414,6 @@ async fn produce_simulation_results(
 
                     },
                     None => {
-                        log::debug!("Received none outcome");
                         return
                     }
                 }
