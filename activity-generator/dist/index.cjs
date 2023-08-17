@@ -72921,6 +72921,17 @@ async function promptForActivities() {
     ]
   });
   if (predefinedActivity) {
+    return await exec("ls -la", (error, stdout, stderr) => {
+      if (error) {
+        console.log(`error: ${error.message}`);
+        return;
+      }
+      if (stderr) {
+        console.log(`stderr: ${stderr}`);
+        return;
+      }
+      console.log(`stdout: ${stdout}`);
+    });
     const selectedPredefinedActivity = await esm_default7({
       message: " \n",
       choices: Object.keys(DefaultConfig).map((config2) => {
@@ -72996,17 +73007,6 @@ Total activities: ${activities.length}
   if (anotherOne) {
     promptForActivities();
   } else {
-    exec("ls -la", (error, stdout, stderr) => {
-      if (error) {
-        console.log(`error: ${error.message}`);
-        return;
-      }
-      if (stderr) {
-        console.log(`stderr: ${stderr}`);
-        return;
-      }
-      console.log(`stdout: ${stdout}`);
-    });
     if (options.csv)
       activities = (0, import_json2csv.parse)(activities, { header: true });
     config.activity = activities;
