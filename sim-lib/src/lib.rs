@@ -152,7 +152,7 @@ impl Simulation {
         // - Action Receiver: used by data reporting to receive events that have been simulated that need to be
         //   tracked and recorded.
         let (action_sender, action_receiver) = channel(1);
-        let mut record_data_set = self.record_data(
+        let mut record_data_set = self.run_data_collection(
             action_receiver,
             shutdown_trigger.clone(),
             shutdown_listener.clone(),
@@ -185,15 +185,17 @@ impl Simulation {
         success.then_some(()).ok_or(SimulationError::TaskError)
     }
 
-    fn record_data(
+    // run_data_collection starts the tasks required for the simulation to report of the outcomes of the activity that
+    // it generates. The simulation should report actions via the receiver that is passed in.
+    fn run_data_collection(
         &self,
         action_receiver: Receiver<ActionOutcome>,
         shutdown: Trigger,
         listener: Listener,
     ) -> tokio::task::JoinSet<()> {
         log::debug!("Simulator data recording starting.");
-
         let mut set = JoinSet::new();
+
         // Create a sender/receiver pair that will be used to report final results of action outcomes.
         let (results_sender, results_receiver) = channel(1);
 
@@ -207,7 +209,6 @@ impl Simulation {
         set.spawn(consume_simulation_results(results_receiver, shutdown));
 
         log::debug!("Simulator data recording exiting.");
-
         set
     }
 
