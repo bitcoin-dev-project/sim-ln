@@ -363,7 +363,7 @@ async fn produce_events(
         }
     }
 
-	// On exit call our shutdown trigger to inform other threads that we have exited, and they need to shut down.
+    // On exit call our shutdown trigger to inform other threads that we have exited, and they need to shut down.
     shutdown.trigger();
 }
 
@@ -399,7 +399,6 @@ async fn produce_simulation_results(
     loop {
         tokio::select! {
             outcome = outcomes.recv() => {
-                log::debug!(" Received outcome");
                 match outcome{
                     Some(action_outcome) => {
                         match action_outcome{
