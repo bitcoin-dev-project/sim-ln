@@ -1,4 +1,3 @@
-use anyhow::anyhow;
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use lightning::ln::PaymentHash;
@@ -48,8 +47,8 @@ pub struct ActivityDefinition {
 pub enum SimulationError {
     #[error("Lightning Error: {0:?}")]
     LightningError(#[from] LightningError),
-    #[error("Other: {0:?}")]
-    Error(#[from] anyhow::Error),
+    #[error("TaskError")]
+    TaskError,
 }
 
 #[derive(Debug, Error)]
@@ -126,8 +125,8 @@ impl Simulation {
         Self { nodes, activity }
     }
 
-    pub async fn run(&self) -> anyhow::Result<()> {
-        println!(
+    pub async fn run(&self) -> Result<(), SimulationError> {
+        log::info!(
             "Simulating {} activity on {} nodes",
             self.activity.len(),
             self.nodes.len()
@@ -138,7 +137,11 @@ impl Simulation {
             .await
     }
 
-    async fn generate_activity(&self, shutdown: Trigger, listener: Listener) -> anyhow::Result<()> {
+    async fn generate_activity(
+        &self,
+        shutdown: Trigger,
+        listener: Listener,
+    ) -> Result<(), SimulationError> {
         // We only need to spin up producers for nodes that are contained in our activity description, as there will be
         // no events for nodes that are not source nodes.
         let mut producer_channels = HashMap::new();
@@ -156,7 +159,12 @@ impl Simulation {
             let (sender, receiver) = channel(1);
 
             // Generate a consumer for the receiving end of the channel.
-            set.spawn(consume_events(node.clone(), receiver, shutdown.clone()));
+            set.spawn(consume_events(
+                *id,
+                node.clone(),
+                receiver,
+                shutdown.clone(),
+            ));
 
             // Add the producer channel to our map so that various activity descriptions can use it. We may have multiple
             // activity descriptions that have the same source node.
@@ -175,13 +183,14 @@ impl Simulation {
         // We always want to wait ofr all threads to exit, so we wait for all of them to exit and track any errors
         // that surface. It's okay if there are multiple and one is overwritten, we just want to know whether we
         // exited with an error or not.
-        let mut results = vec![];
+        let mut success = true;
         while let Some(res) = set.join_next().await {
-            results.push(res);
+            if let Err(e) = res {
+                log::error!("Task exited with error: {e}");
+                success = false;
+            }
         }
-        (!(results.iter().any(|x| matches!(x, Err(..)))))
-            .then_some(())
-            .ok_or_else(|| anyhow!("One of our tasks failed"))
+        success.then_some(()).ok_or(SimulationError::TaskError)
     }
 }
 
@@ -189,10 +198,12 @@ impl Simulation {
 // it will use the trigger provided to trigger shutdown in other threads. If an error occurs elsewhere, we expect the
 // senders corresponding to our receiver to be dropped, which will cause the receiver to error out and exit.
 async fn consume_events(
+    node_id: PublicKey,
     node: Arc<Mutex<dyn LightningNode + Send>>,
     mut receiver: Receiver<NodeAction>,
     shutdown: triggered::Trigger,
 ) {
+    log::debug!("Started consumer for {}", node_id);
     while let Some(action) = receiver.recv().await {
         match action {
             NodeAction::SendPayment(dest, amt_msat) => {
@@ -200,8 +211,23 @@ async fn consume_events(
                 let payment = node.send_payment(dest, amt_msat);
 
                 match payment.await {
-                    Ok(payment_hash) => println!("Send payment: {:?}", payment_hash),
-                    Err(_) => break,
+                    Ok(payment_hash) => {
+                        log::info!(
+                            "Send payment: {} -> {}: ({})",
+                            node_id,
+                            dest,
+                            hex::encode(payment_hash.0)
+                        )
+                    }
+                    Err(e) => {
+                        log::error!(
+                            "Error while sending payment {} -> {}. Terminating consumer. {}",
+                            node_id,
+                            dest,
+                            e
+                        );
+                        break;
+                    }
                 };
             }
         };
@@ -214,12 +240,25 @@ async fn consume_events(
 // produce events generates events for the activity description provided. It accepts a shutdown listener so it can
 // exit if other threads signal that they have errored out.
 async fn produce_events(act: ActivityDefinition, sender: Sender<NodeAction>, shutdown: Listener) {
-    let e = NodeAction::SendPayment(act.destination, act.amount_msat);
+    let e: NodeAction = NodeAction::SendPayment(act.destination, act.amount_msat);
     let interval = time::Duration::from_secs(act.frequency as u64);
+
+    log::debug!(
+        "Started producer for {} every {}s: {} -> {}",
+        act.amount_msat,
+        act.frequency,
+        act.source,
+        act.destination
+    );
 
     loop {
         if time::timeout(interval, shutdown.clone()).await.is_ok() {
-            println!("Received shutting down signal. Shutting down");
+            log::debug!(
+                "Stopped producer for {}: {} -> {}. Received shutdown signal.",
+                act.amount_msat,
+                act.source,
+                act.destination
+            );
             break;
         }
 
