@@ -19,13 +19,16 @@ const options = program.opts();
 const configFile = options.config;
 
 // Blocking example with fs.readFileSync
-const config = configFile ? JSON.parse(fs.readFileSync(configFile, 'utf-8')) : {};
+const config = configFile ? JSON.parse(fs.readFileSync(configFile, 'utf-8')) : {
+    nodes: [],
+    activity: []
+};
 const nodeObj = {};
-let controlNodes = config.nodes ? config.nodes : [];
+let controlNodes = config.nodes;
 
 async function init() {
     if (!configFile) {
-        await setupControlNodes(controlNodes, nodeObj);
+        await setupControlNodes(config.nodes, nodeObj);
     } else {
         console.log(`Setting up ${config.nodes.length} Controlled Nodes...`)
         controlNodes.forEach(async node => {
@@ -60,20 +63,28 @@ async function promptForActivities() {
 
 
     if (predefinedActivity) {
-
-
-        const selectedPredefinedActivity = await select({
-            message: " \n",
-            choices: Object.keys(DefaultConfig).map((config) => {
+        const selectedPredefinedFreq = await select({
+            message: `${DefaultConfig.FREQUENCY_OPTIONS.name} \n`,
+            choices: DefaultConfig.FREQUENCY_OPTIONS.options.map((config) => {
                 return {
-                    name: DefaultConfig[config].name,
-                    value: config
+                    name: config.name,
+                    value: config.value
                 }
             })
         })
-        activity.freq = DefaultConfig[selectedPredefinedActivity].frequency
-        activity.amt = DefaultConfig[selectedPredefinedActivity].amount
-        activity.action = DefaultConfig[selectedPredefinedActivity].action
+        const selectedPredefinedAmount = await select({
+            message: `${DefaultConfig.AMOUNT_OPTIONS.name} \n`,
+            choices: DefaultConfig.AMOUNT_OPTIONS.options.map((config) => {
+                return {
+                    name: config.name,
+                    value: config.value
+                }
+            })
+        })
+
+        activity.freq = selectedPredefinedFreq
+        activity.amt = selectedPredefinedAmount
+        activity.action = DefaultConfig.ACTION_TYPE.KEYSEND_PAYMENTS
         activity.src = Object.values(nodeObj)[Math.floor(Math.random() * Object.values(nodeObj).length)].identity_pubkey
         activity.dest = nodeObj[activity.src].possible_dests[Math.floor(Math.random() * nodeObj[activity.src].possible_dests.length)].pub_key
     } else {
