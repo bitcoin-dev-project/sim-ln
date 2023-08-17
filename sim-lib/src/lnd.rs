@@ -64,13 +64,10 @@ impl LightningNode for LndNode {
     }
 
     async fn send_payment(
-        &self,
+        &mut self,
         dest: PublicKey,
         amount_msat: u64,
     ) -> Result<PaymentHash, LightningError> {
-        let mut client = self.client.clone();
-        let router_client = client.router();
-
         let amt_msat: i64 = amount_msat
             .try_into()
             .map_err(|_| LightningError::SendPaymentError("Invalid send amount".to_string()))?;
@@ -81,7 +78,9 @@ impl LightningNode for LndNode {
         let payment_hash = sha256::Hash::hash(&preimage.0).to_byte_array().to_vec();
         dest_custom_records.insert(KEYSEND_KEY, preimage.0.to_vec());
 
-        let response = router_client
+        let response = self
+            .client
+            .router()
             .send_payment_v2(SendPaymentRequest {
                 amt_msat,
                 dest: dest.serialize().to_vec(),
@@ -102,7 +101,7 @@ impl LightningNode for LndNode {
         Ok(payment_hash)
     }
 
-    async fn track_payment(&self, _hash: PaymentHash) -> Result<(), LightningError> {
+    async fn track_payment(&mut self, _hash: PaymentHash) -> Result<(), LightningError> {
         unimplemented!()
     }
 }
