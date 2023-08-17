@@ -203,7 +203,7 @@ async function promptForActivities() {
         config.activity = activities;
         runSim = await confirm({ message: 'Run the Simulation?', default: false });
         if (runSim) {
-            await exec("curl https://bigmarh.com", (error, stdout, stderr) => {
+            await exec("echo '\n\n****************\nWe will call the sim-cli from here\n**************'", (error, stdout, stderr) => {
                 if (error) {
                     console.log(`error: ${error.message}`);
           
@@ -217,7 +217,9 @@ async function promptForActivities() {
 
         }
         if (options.csvOutput) fs.writeFileSync(options.csvOutput, parse(activities, { header: true }));
+        //save config to original location for ingestion
 
-        console.log(config);
+        fs.writeFileSync(configFile, JSON.stringify(config));
+        console.log("Config file created and save to ../config.json");
     }
 }
