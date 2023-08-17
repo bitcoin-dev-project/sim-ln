@@ -408,7 +408,11 @@ async fn produce_simulation_results(
     }
 
     log::debug!("Simulation results producer exiting.");
-    // TODO - join all spawned track payments
+    while let Some(res) = set.join_next().await {
+        if let Err(e) = res {
+            log::error!("Simulation results producer task exited with error: {e}");
+        }
+    }
 }
 
 async fn track_outcome(
