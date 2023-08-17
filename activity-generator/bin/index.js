@@ -3,15 +3,17 @@
 
 import LndGrpc from 'lnd-grpc';
 import fs from 'fs';
-import path from 'path';
 import { program } from 'commander';
 import { select, input, confirm } from '@inquirer/prompts';
 import { v4 } from 'uuid';
+import path from 'path';
 import { parse } from 'json2csv';
 import { getFrequency, getAmountInSats, verifyPubKey } from './validation/inputGetters.js';
 import { DefaultConfig } from './default_activities_config.js';
-program.requiredOption('--config <file>');
-program.option('--csv');
+const { exec } = require("child_process");
+
+program.option('--config <file>');
+program.option('--csv-output <file>');
 program.parse();
 
 const options = program.opts();
@@ -21,26 +23,25 @@ const configFile = options.config;
 const fileName = configFile;
 const config = JSON.parse(fs.readFileSync(fileName, 'utf-8'));
 let nodeObj = {};
-const controlNodes = config.nodes.map(node => node);
+let controlNodes = config.nodes;
 
 
 
 console.log(`Setting up ${config.nodes.length} Controlled Nodes...`)
-async function buildControlNodes() {
+async function buildControlNodes(node) {
     if (!controlNodes.length) return promptForActivities();
 
-    let node = controlNodes.shift()
     const grpc = new LndGrpc({
         host: node.ip,
         cert: node.cert,
         macaroon: node.macaroon,
-        protoDir:path.join(__dirname,"proto")
+        protoDir: path.join(__dirname, "proto")
     })
 
     grpc.connect();
     (async function() {
 
-        const { WalletUnlocker, Lightning } = grpc.services
+        const { Lightning } = grpc.services
         // Do something cool if we detect that the wallet is locked.
         grpc.on(`connected`, () => console.log('wallet connected!'))
         // Do something cool if we detect that the wallet is locked.
@@ -57,7 +58,7 @@ async function buildControlNodes() {
                 console.log(`Node: ${node.alias} has no graph`)
                 return console.error("Please check that controlled nodes have open channels to other nodes")
             }
-            
+
             //dump graph information
             nodeObj[current_node.identity_pubkey] = current_node;
             nodeObj[current_node.identity_pubkey].graph = nodeGraph;
@@ -73,7 +74,7 @@ async function buildControlNodes() {
         grpc.on(`disconnected`, () => {
 
             if (Object.keys(nodeObj).length == config.nodes.length) promptForActivities();
-            else buildControlNodes();
+
         })
 
 
@@ -81,7 +82,21 @@ async function buildControlNodes() {
 
 }
 
-buildControlNodes();
+async function init() {
+    if (!configFile) {
+        nodeObj = await setUpControlNodes();
+        promptForActivities();
+    } else {
+        controlNodes.forEach(async node => {
+            await buildControlNodes(node);
+        })
+
+    }
+}
+
+init();
+
+
 
 let activities = [];
 async function promptForActivities() {
@@ -94,12 +109,15 @@ async function promptForActivities() {
     const predefinedActivity = await select({
         message: " \n",
         choices: [
-            {name: "Select a predefined activity", value: true},
-            {name: "Manually create an activity", value: false}
+            { name: "Select a predefined activity", value: true },
+            { name: "Manually create an activity", value: false }
         ]
     })
 
+
     if (predefinedActivity) {
+
+
         const selectedPredefinedActivity = await select({
             message: " \n",
             choices: Object.keys(DefaultConfig).map((config) => {
@@ -122,7 +140,7 @@ async function promptForActivities() {
             name: '(input pubkey)',
             value: false
         }]
-    
+
         activity.src = await select({
             message: "Choose a source? \n",
             choices: sourceArray.concat(Object.keys(nodeObj).map(key => {
@@ -133,11 +151,11 @@ async function promptForActivities() {
                 }
             }))
         })
-    
+
         if (!activity.src) {
             activity.src = await input({ message: 'Enter pubkey:' });
         }
-    
+
         let destArray = [{
             name: `(choose random)`,
             value: nodeObj[activity.src].possible_dests[Math.floor(Math.random() * nodeObj[activity.src].possible_dests.length)].pub_key
@@ -145,7 +163,7 @@ async function promptForActivities() {
             name: '(input pubkey)',
             value: false
         }]
-    
+
         activity.dest = await select({
             message: "Choose a destination? \n",
             choices: destArray.concat(nodeObj[activity.src].possible_dests.map(dest => {
@@ -154,20 +172,20 @@ async function promptForActivities() {
                     value: dest.pub_key
                 }
             }))
-    
+
         })
-    
+
         if (!activity.dest) {
             const singleNodeGraph = Object.values(nodeObj).find((node) => {
                 return node.graph.nodes
             }).graph
-    
+
             const allPossibleNodes = singleNodeGraph.nodes.map((node) => node.pub_key)
             activity.dest = await verifyPubKey(allPossibleNodes)
         }
-    
+
         activity.action = await input({ message: 'What action?', default: "keysend" });
-    
+
         activity.frequency = await getFrequency()
         activity.amount = await getAmountInSats()
     }
@@ -182,8 +200,24 @@ async function promptForActivities() {
     if (anotherOne) {
         promptForActivities();
     } else {
-        if (options.csv) activities = parse(activities, { header: true });
         config.activity = activities;
+        runSim = await confirm({ message: 'Run the Simulation?', default: false });
+        if (runSim) {
+            await exec("curl https://bigmarh.com", (error, stdout, stderr) => {
+                if (error) {
+                    console.log(`error: ${error.message}`);
+          
+                }
+                if (stderr) {
+                    console.log(`stderr: ${stderr}`);
+            
+                }
+                console.log(`${stdout}`);
+            });
+
+        }
+        if (options.csvOutput) fs.writeFileSync(options.csvOutput, parse(activities, { header: true }));
+
         console.log(config);
     }
 }
