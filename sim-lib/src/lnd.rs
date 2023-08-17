@@ -8,7 +8,7 @@ use lightning::events::PaymentFailureReason;
 use lightning::ln::{PaymentHash, PaymentPreimage};
 use tonic_lnd::routerrpc::TrackPaymentRequest;
 use tonic_lnd::{
-    lnrpc::{GetInfoRequest, GetInfoResponse},
+    lnrpc::{payment::PaymentStatus, GetInfoRequest, GetInfoResponse},
     routerrpc::SendPaymentRequest,
     Client,
 };
@@ -127,8 +127,9 @@ impl LightningNode for LndNode {
                 let payment = stream.map_err(|err| LightningError::TrackPaymentError(err.to_string()))?;
                 match payment {
                     Some(payment) => {
+                        let payment_status = PaymentStatus::from_i32(payment.status).unwrap();
                         return Ok(PaymentResult {
-                            settled: payment.status == 2 || payment.status == 3,
+                            settled: payment_status == PaymentStatus::Succeeded || payment_status == PaymentStatus::Failed,
                             htlc_count: payment.htlcs.len(),
                             failure_reason: match payment.failure_reason {
                             1 => Some(PaymentFailureReason::PaymentExpired),
