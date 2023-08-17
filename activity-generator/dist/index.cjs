@@ -227,11 +227,21 @@ var require_state_machine = __commonJS({
                   on: { transition: "onTransition" }
                 };
               },
+<<<<<<< HEAD
               configureInitTransition: function(init2) {
                 if (typeof init2 === "string") {
                   return this.mapTransition(mixin({}, this.defaults.init, { to: init2, active: true }));
                 } else if (typeof init2 === "object") {
                   return this.mapTransition(mixin({}, this.defaults.init, init2, { active: true }));
+=======
+
+              configureInitTransition: function(init) {
+                if (typeof init === "string") {
+                  return this.mapTransition(mixin({}, this.defaults.init, { to: init, active: true }));
+                } else if (typeof init === "object") {
+                  return this.mapTransition(mixin({}, this.defaults.init, init, { active: true }));
+
+>>>>>>> 000e249 (parsed out build nodes)
                 } else {
                   this.addState(this.defaults.init.from);
                   return this.defaults.init;
@@ -1103,7 +1113,15 @@ var require_node = __commonJS({
   "node_modules/debug/src/node.js"(exports2, module2) {
     var tty = require("tty");
     var util = require("util");
+<<<<<<< HEAD
     exports2.init = init2;
+=======
+<<<<<<< HEAD
+    exports2.init = init;
+=======
+    exports2.init = init2;
+>>>>>>> f268fd1 (parsed out build nodes)
+>>>>>>> 000e249 (parsed out build nodes)
     exports2.log = log;
     exports2.formatArgs = formatArgs;
     exports2.save = save;
@@ -1247,6 +1265,10 @@ var require_node = __commonJS({
     function load() {
       return process.env.DEBUG;
     }
+<<<<<<< HEAD
+=======
+
+>>>>>>> 000e249 (parsed out build nodes)
     function init2(debug) {
       debug.inspectOpts = {};
       const keys = Object.keys(exports2.inspectOpts);
@@ -9607,10 +9629,24 @@ var require_lib3 = __commonJS({
        * @return  Void
        */
       constructor() {
+<<<<<<< HEAD
         let init2 = arguments.length > 0 && arguments[0] !== void 0 ? arguments[0] : void 0;
         this[MAP] = /* @__PURE__ */ Object.create(null);
         if (init2 instanceof _Headers) {
           const rawHeaders = init2.raw();
+=======
+<<<<<<< HEAD
+        let init = arguments.length > 0 && arguments[0] !== void 0 ? arguments[0] : void 0;
+        this[MAP] = /* @__PURE__ */ Object.create(null);
+        if (init instanceof _Headers) {
+          const rawHeaders = init.raw();
+=======
+        let init2 = arguments.length > 0 && arguments[0] !== void 0 ? arguments[0] : void 0;
+        this[MAP] = /* @__PURE__ */ Object.create(null);
+        if (init2 instanceof _Headers) {
+          const rawHeaders = init2.raw();
+>>>>>>> f268fd1 (parsed out build nodes)
+>>>>>>> 000e249 (parsed out build nodes)
           const headerNames = Object.keys(rawHeaders);
           for (const headerName of headerNames) {
             for (const value of rawHeaders[headerName]) {
@@ -9619,16 +9655,38 @@ var require_lib3 = __commonJS({
           }
           return;
         }
+<<<<<<< HEAD
         if (init2 == null)
           ;
         else if (typeof init2 === "object") {
           const method = init2[Symbol.iterator];
+=======
+<<<<<<< HEAD
+        if (init == null)
+          ;
+        else if (typeof init === "object") {
+          const method = init[Symbol.iterator];
+=======
+        if (init2 == null)
+          ;
+        else if (typeof init2 === "object") {
+          const method = init2[Symbol.iterator];
+>>>>>>> f268fd1 (parsed out build nodes)
+>>>>>>> 000e249 (parsed out build nodes)
           if (method != null) {
             if (typeof method !== "function") {
               throw new TypeError("Header pairs must be iterable");
             }
             const pairs = [];
+<<<<<<< HEAD
             for (const pair of init2) {
+=======
+<<<<<<< HEAD
+            for (const pair of init) {
+=======
+            for (const pair of init2) {
+>>>>>>> f268fd1 (parsed out build nodes)
+>>>>>>> 000e249 (parsed out build nodes)
               if (typeof pair !== "object" || typeof pair[Symbol.iterator] !== "function") {
                 throw new TypeError("Each header pair must be iterable");
               }
@@ -9641,8 +9699,18 @@ var require_lib3 = __commonJS({
               this.append(pair[0], pair[1]);
             }
           } else {
+<<<<<<< HEAD
             for (const key of Object.keys(init2)) {
               const value = init2[key];
+=======
+<<<<<<< HEAD
+            for (const key of Object.keys(init)) {
+              const value = init[key];
+=======
+            for (const key of Object.keys(init2)) {
+              const value = init2[key];
+>>>>>>> f268fd1 (parsed out build nodes)
+>>>>>>> 000e249 (parsed out build nodes)
               this.append(key, value);
             }
           }
@@ -9972,7 +10040,15 @@ var require_lib3 = __commonJS({
     }
     var Request = class _Request {
       constructor(input) {
+<<<<<<< HEAD
         let init2 = arguments.length > 1 && arguments[1] !== void 0 ? arguments[1] : {};
+=======
+<<<<<<< HEAD
+        let init = arguments.length > 1 && arguments[1] !== void 0 ? arguments[1] : {};
+=======
+        let init2 = arguments.length > 1 && arguments[1] !== void 0 ? arguments[1] : {};
+>>>>>>> f268fd1 (parsed out build nodes)
+>>>>>>> 000e249 (parsed out build nodes)
         let parsedURL;
         if (!isRequest(input)) {
           if (input && input.href) {
@@ -9984,6 +10060,26 @@ var require_lib3 = __commonJS({
         } else {
           parsedURL = parseURL(input.url);
         }
+<<<<<<< HEAD
+        let method = init2.method || input.method || "GET";
+=======
+<<<<<<< HEAD
+        let method = init.method || input.method || "GET";
+>>>>>>> 000e249 (parsed out build nodes)
+        method = method.toUpperCase();
+        if ((init2.body != null || isRequest(input) && input.body !== null) && (method === "GET" || method === "HEAD")) {
+          throw new TypeError("Request with GET/HEAD method cannot have body");
+        }
+        let inputBody = init2.body != null ? init2.body : isRequest(input) && input.body !== null ? clone(input) : null;
+        Body.call(this, inputBody, {
+          timeout: init2.timeout || input.timeout || 0,
+          size: init2.size || input.size || 0
+        });
+<<<<<<< HEAD
+        const headers = new Headers(init2.headers || input.headers || {});
+=======
+        const headers = new Headers(init.headers || input.headers || {});
+=======
         let method = init2.method || input.method || "GET";
         method = method.toUpperCase();
         if ((init2.body != null || isRequest(input) && input.body !== null) && (method === "GET" || method === "HEAD")) {
@@ -9995,6 +10091,8 @@ var require_lib3 = __commonJS({
           size: init2.size || input.size || 0
         });
         const headers = new Headers(init2.headers || input.headers || {});
+>>>>>>> f268fd1 (parsed out build nodes)
+>>>>>>> 000e249 (parsed out build nodes)
         if (inputBody != null && !headers.has("Content-Type")) {
           const contentType = extractContentType(inputBody);
           if (contentType) {
@@ -10002,22 +10100,53 @@ var require_lib3 = __commonJS({
           }
         }
         let signal = isRequest(input) ? input.signal : null;
+<<<<<<< HEAD
         if ("signal" in init2)
           signal = init2.signal;
+=======
+<<<<<<< HEAD
+        if ("signal" in init)
+          signal = init.signal;
+=======
+        if ("signal" in init2)
+          signal = init2.signal;
+>>>>>>> f268fd1 (parsed out build nodes)
+>>>>>>> 000e249 (parsed out build nodes)
         if (signal != null && !isAbortSignal(signal)) {
           throw new TypeError("Expected signal to be an instanceof AbortSignal");
         }
         this[INTERNALS$2] = {
           method,
+<<<<<<< HEAD
           redirect: init2.redirect || input.redirect || "follow",
+=======
+<<<<<<< HEAD
+          redirect: init.redirect || input.redirect || "follow",
+=======
+          redirect: init2.redirect || input.redirect || "follow",
+>>>>>>> f268fd1 (parsed out build nodes)
+>>>>>>> 000e249 (parsed out build nodes)
           headers,
           parsedURL,
           signal
         };
+<<<<<<< HEAD
+=======
+<<<<<<< HEAD
+        this.follow = init.follow !== void 0 ? init.follow : input.follow !== void 0 ? input.follow : 20;
+        this.compress = init.compress !== void 0 ? init.compress : input.compress !== void 0 ? input.compress : true;
+        this.counter = init.counter || input.counter || 0;
+        this.agent = init.agent || input.agent;
+=======
+>>>>>>> 000e249 (parsed out build nodes)
         this.follow = init2.follow !== void 0 ? init2.follow : input.follow !== void 0 ? input.follow : 20;
         this.compress = init2.compress !== void 0 ? init2.compress : input.compress !== void 0 ? input.compress : true;
         this.counter = init2.counter || input.counter || 0;
         this.agent = init2.agent || input.agent;
+<<<<<<< HEAD
+=======
+>>>>>>> f268fd1 (parsed out build nodes)
+>>>>>>> 000e249 (parsed out build nodes)
       }
       get method() {
         return this[INTERNALS$2].method;
@@ -17797,7 +17926,15 @@ var require_aes = __commonJS({
       });
     };
     forge.aes.Algorithm = function(name, mode) {
+<<<<<<< HEAD
       if (!init2) {
+=======
+<<<<<<< HEAD
+      if (!init) {
+=======
+      if (!init2) {
+>>>>>>> f268fd1 (parsed out build nodes)
+>>>>>>> 000e249 (parsed out build nodes)
         initialize();
       }
       var self2 = this;
@@ -17850,7 +17987,15 @@ var require_aes = __commonJS({
       this._init = true;
     };
     forge.aes._expandKey = function(key, decrypt) {
+<<<<<<< HEAD
       if (!init2) {
+=======
+<<<<<<< HEAD
+      if (!init) {
+=======
+      if (!init2) {
+>>>>>>> f268fd1 (parsed out build nodes)
+>>>>>>> 000e249 (parsed out build nodes)
         initialize();
       }
       return _expandKey(key, decrypt);
@@ -17868,7 +18013,15 @@ var require_aes = __commonJS({
       };
       forge.cipher.registerAlgorithm(name, factory);
     }
+<<<<<<< HEAD
     var init2 = false;
+=======
+<<<<<<< HEAD
+    var init = false;
+=======
+    var init2 = false;
+>>>>>>> f268fd1 (parsed out build nodes)
+>>>>>>> 000e249 (parsed out build nodes)
     var Nb = 4;
     var sbox;
     var isbox;
@@ -17876,7 +18029,15 @@ var require_aes = __commonJS({
     var mix;
     var imix;
     function initialize() {
+<<<<<<< HEAD
       init2 = true;
+=======
+<<<<<<< HEAD
+      init = true;
+=======
+      init2 = true;
+>>>>>>> f268fd1 (parsed out build nodes)
+>>>>>>> 000e249 (parsed out build nodes)
       rcon = [0, 1, 2, 4, 8, 16, 32, 64, 128, 27, 54];
       var xtime = new Array(256);
       for (var i = 0; i < 128; ++i) {
@@ -31553,11 +31714,27 @@ var require_ed25519 = __commonJS({
         q[i] ^= t;
       }
     }
+<<<<<<< HEAD
     function gf(init2) {
       var i, r = new Float64Array(16);
       if (init2) {
         for (i = 0; i < init2.length; ++i) {
           r[i] = init2[i];
+=======
+<<<<<<< HEAD
+    function gf(init) {
+      var i, r = new Float64Array(16);
+      if (init) {
+        for (i = 0; i < init.length; ++i) {
+          r[i] = init[i];
+=======
+    function gf(init2) {
+      var i, r = new Float64Array(16);
+      if (init2) {
+        for (i = 0; i < init2.length; ++i) {
+          r[i] = init2[i];
+>>>>>>> f268fd1 (parsed out build nodes)
+>>>>>>> 000e249 (parsed out build nodes)
         }
       }
       return r;
@@ -72788,7 +72965,15 @@ var ErrorConfig = {
 var getFrequency = async () => {
   const errMessage = `Frequency ${ErrorConfig.POSITIVE_INTEGER}`;
   try {
+<<<<<<< HEAD
     const freq = await esm_default5({ message: "Time delay between actions in seconds", default: 1 });
+=======
+<<<<<<< HEAD
+    const freq = await esm_default5({ message: "At what time would you like to run this action?", default: 0 });
+=======
+    const freq = await esm_default5({ message: "Time delay between actions in seconds", default: 1 });
+>>>>>>> f268fd1 (parsed out build nodes)
+>>>>>>> 000e249 (parsed out build nodes)
     if (isNaN(parseInt(freq)) || parseInt(freq) < 1) {
       throw new Error(errMessage);
     }
@@ -72831,6 +73016,7 @@ var verifyPubKey = async (allPossibleNodes) => {
   }
 };
 
+<<<<<<< HEAD
 // bin/default_activities_config.js
 var DefaultConfig = {
   "HIGH_VOLUME_TRANSACTIONS": {
@@ -72850,6 +73036,31 @@ var DefaultConfig = {
 // bin/index.js
 var { exec } = require("child_process");
 program.option("--config <file>");
+=======
+<<<<<<< HEAD
+// bin/index.js
+program.requiredOption("--config <file>");
+=======
+// bin/default_activities_config.js
+var DefaultConfig = {
+  "HIGH_VOLUME_TRANSACTIONS": {
+    name: "High Volume Keysend Payments",
+    frequency: 5,
+    amount: 1e5,
+    action: "keysend"
+  },
+  "LOW_VOLUME_TRANSACTIONS": {
+    name: "Low Volume Keysend Payments",
+    frequency: 5,
+    amount: 100,
+    action: "keysend"
+  }
+};
+
+// bin/index.js
+program.option("--config <file>");
+>>>>>>> f268fd1 (parsed out build nodes)
+>>>>>>> 000e249 (parsed out build nodes)
 program.option("--csv");
 program.parse();
 var options = program.opts();
@@ -72857,11 +73068,27 @@ var configFile = options.config;
 var fileName = configFile;
 var config = JSON.parse(import_fs.default.readFileSync(fileName, "utf-8"));
 var nodeObj = {};
+<<<<<<< HEAD
+var controlNodes = config.nodes;
+=======
+<<<<<<< HEAD
+var controlNodes = config.nodes.map((node) => node);
+>>>>>>> 000e249 (parsed out build nodes)
+console.log(`Setting up ${config.nodes.length} Controlled Nodes...`);
+async function buildControlNodes(node) {
+  if (!controlNodes.length)
+    return promptForActivities();
+<<<<<<< HEAD
+=======
+  let node = controlNodes.shift();
+=======
 var controlNodes = config.nodes;
 console.log(`Setting up ${config.nodes.length} Controlled Nodes...`);
 async function buildControlNodes(node) {
   if (!controlNodes.length)
     return promptForActivities();
+>>>>>>> f268fd1 (parsed out build nodes)
+>>>>>>> 000e249 (parsed out build nodes)
   const grpc = new import_lnd_grpc.default({
     host: node.ip,
     cert: node.cert,
@@ -72870,7 +73097,15 @@ async function buildControlNodes(node) {
   });
   grpc.connect();
   (async function() {
+<<<<<<< HEAD
     const { Lightning } = grpc.services;
+=======
+<<<<<<< HEAD
+    const { WalletUnlocker, Lightning } = grpc.services;
+=======
+    const { Lightning } = grpc.services;
+>>>>>>> f268fd1 (parsed out build nodes)
+>>>>>>> 000e249 (parsed out build nodes)
     grpc.on(`connected`, () => console.log("wallet connected!"));
     grpc.on(`locked`, async () => {
       await grpc.activateLightning();
@@ -72893,9 +73128,23 @@ async function buildControlNodes(node) {
     grpc.on(`disconnected`, () => {
       if (Object.keys(nodeObj).length == config.nodes.length)
         promptForActivities();
+<<<<<<< HEAD
     });
   })();
 }
+=======
+<<<<<<< HEAD
+      else
+        buildControlNodes();
+    });
+  })();
+}
+buildControlNodes();
+=======
+    });
+  })();
+}
+>>>>>>> 000e249 (parsed out build nodes)
 async function init() {
   if (!configFile) {
     nodeObj = await setUpControlNodes();
@@ -72907,18 +73156,42 @@ async function init() {
   }
 }
 init();
+<<<<<<< HEAD
+=======
+>>>>>>> f268fd1 (parsed out build nodes)
+>>>>>>> 000e249 (parsed out build nodes)
 var activities = [];
 async function promptForActivities() {
   console.log("\nCreate a New Activity");
   console.log("_________________________________\n");
   let activity = {};
   activity.uuid = v4_default();
+<<<<<<< HEAD
   const predefinedActivity = await esm_default7({
     message: " \n",
     choices: [
       { name: "Select a predefined activity", value: true },
       { name: "Manually create an activity", value: false }
     ]
+=======
+<<<<<<< HEAD
+  let sourceArray = [{
+    name: "(choose random)",
+    value: Object.values(nodeObj)[Math.floor(Math.random() * Object.values(nodeObj).length)].identity_pubkey
+  }, {
+    name: "(input pubkey)",
+    value: false
+  }];
+  activity.src = await esm_default7({
+    message: "Choose a source? \n",
+    choices: sourceArray.concat(Object.keys(nodeObj).map((key) => {
+      let node = nodeObj[key];
+      return {
+        name: `${node.alias}:  (${node.identity_pubkey})`,
+        value: node.identity_pubkey
+      };
+    }))
+>>>>>>> 000e249 (parsed out build nodes)
   });
   if (predefinedActivity) {
     return await exec("ls -la", (error, stdout, stderr) => {
@@ -73004,6 +73277,95 @@ Total activities: ${activities.length}
 `
   );
   const anotherOne = await esm_default2({ message: "Create another one?", default: false });
+<<<<<<< HEAD
+=======
+  console.log("\n------------------------");
+  console.log(`Created: ${activity.uuid}
+Total activities: ${activities.length}`);
+  console.log("------------------------\n");
+=======
+  const predefinedActivity = await esm_default7({
+    message: " \n",
+    choices: [
+      { name: "Select a predefined activity", value: true },
+      { name: "Manually create an activity", value: false }
+    ]
+  });
+  if (predefinedActivity) {
+    const selectedPredefinedActivity = await esm_default7({
+      message: " \n",
+      choices: Object.keys(DefaultConfig).map((config2) => {
+        return {
+          name: DefaultConfig[config2].name,
+          value: config2
+        };
+      })
+    });
+    activity.freq = DefaultConfig[selectedPredefinedActivity].frequency;
+    activity.amt = DefaultConfig[selectedPredefinedActivity].amount;
+    activity.action = DefaultConfig[selectedPredefinedActivity].action;
+    activity.src = Object.values(nodeObj)[Math.floor(Math.random() * Object.values(nodeObj).length)].identity_pubkey;
+    activity.dest = nodeObj[activity.src].possible_dests[Math.floor(Math.random() * nodeObj[activity.src].possible_dests.length)].pub_key;
+  } else {
+    let sourceArray = [{
+      name: "(choose random)",
+      value: Object.values(nodeObj)[Math.floor(Math.random() * Object.values(nodeObj).length)].identity_pubkey
+    }, {
+      name: "(input pubkey)",
+      value: false
+    }];
+    activity.src = await esm_default7({
+      message: "Choose a source? \n",
+      choices: sourceArray.concat(Object.keys(nodeObj).map((key) => {
+        let node = nodeObj[key];
+        return {
+          name: `${node.alias}:  (${node.identity_pubkey})`,
+          value: node.identity_pubkey
+        };
+      }))
+    });
+    if (!activity.src) {
+      activity.src = await esm_default5({ message: "Enter pubkey:" });
+    }
+    let destArray = [{
+      name: `(choose random)`,
+      value: nodeObj[activity.src].possible_dests[Math.floor(Math.random() * nodeObj[activity.src].possible_dests.length)].pub_key
+    }, {
+      name: "(input pubkey)",
+      value: false
+    }];
+    activity.dest = await esm_default7({
+      message: "Choose a destination? \n",
+      choices: destArray.concat(nodeObj[activity.src].possible_dests.map((dest) => {
+        return {
+          name: `${dest.alias}:  (${dest.pub_key})`,
+          value: dest.pub_key
+        };
+      }))
+    });
+    if (!activity.dest) {
+      const singleNodeGraph = Object.values(nodeObj).find((node) => {
+        return node.graph.nodes;
+      }).graph;
+      const allPossibleNodes = singleNodeGraph.nodes.map((node) => node.pub_key);
+      activity.dest = await verifyPubKey(allPossibleNodes);
+    }
+    activity.action = await esm_default5({ message: "What action?", default: "keysend" });
+    activity.frequency = await getFrequency();
+    activity.amount = await getAmountInSats();
+  }
+  activities.push(activity);
+  console.log(
+    `
+------------------------
+Created: ${activity.uuid}
+Total activities: ${activities.length}
+------------------------
+`
+  );
+  const anotherOne = await esm_default2({ message: "Create another one?", default: false });
+>>>>>>> f268fd1 (parsed out build nodes)
+>>>>>>> 000e249 (parsed out build nodes)
   if (anotherOne) {
     promptForActivities();
   } else {

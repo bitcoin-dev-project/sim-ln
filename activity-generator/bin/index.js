@@ -11,6 +11,7 @@ import { parse } from 'json2csv';
 import { getFrequency, getAmountInSats, verifyPubKey } from './validation/inputGetters.js';
 import { DefaultConfig } from './default_activities_config.js';
 const { exec } = require("child_process");
+
 program.option('--config <file>');
 program.option('--csv');
 program.parse();
