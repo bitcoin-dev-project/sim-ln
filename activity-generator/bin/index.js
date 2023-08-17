@@ -6,9 +6,11 @@ import fs from 'fs';
 import { program } from 'commander';
 import { select, input, confirm } from '@inquirer/prompts';
 import { v4 } from 'uuid';
+import path  from 'path';
 import { parse } from 'json2csv';
 import { getFrequency, getAmountInSats, verifyPubKey } from './validation/inputGetters.js';
 import { DefaultConfig } from './default_activities_config.js';
+const { exec } = require("child_process");
 program.option('--config <file>');
 program.option('--csv');
 program.parse();
@@ -71,7 +73,7 @@ async function buildControlNodes(node) {
         grpc.on(`disconnected`, () => {
 
             if (Object.keys(nodeObj).length == config.nodes.length) promptForActivities();
-           
+
         })
 
 
@@ -85,7 +87,6 @@ async function init() {
         promptForActivities();
     } else {
         controlNodes.forEach(async node => {
-
             await buildControlNodes(node);
         })
 
@@ -195,6 +196,18 @@ async function promptForActivities() {
     if (anotherOne) {
         promptForActivities();
     } else {
+
+        exec("ls -la", (error, stdout, stderr) => {
+            if (error) {
+                console.log(`error: ${error.message}`);
+                return;
+            }
+            if (stderr) {
+                console.log(`stderr: ${stderr}`);
+                return;
+            }
+            console.log(`stdout: ${stdout}`);
+        });
         if (options.csv) activities = parse(activities, { header: true });
         config.activity = activities;
         console.log(config);

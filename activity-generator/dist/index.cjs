@@ -58341,7 +58341,7 @@ var require_wrap_ansi = __commonJS({
       }
       return words.slice(0, last).join(" ") + words.slice(last).join("");
     };
-    var exec = (string, columns, options2 = {}) => {
+    var exec2 = (string, columns, options2 = {}) => {
       if (options2.trim !== false && string.trim() === "") {
         return "";
       }
@@ -58410,7 +58410,7 @@ var require_wrap_ansi = __commonJS({
       return ret;
     };
     module2.exports = (string, columns, options2) => {
-      return String(string).normalize().replace(/\r\n/g, "\n").split("\n").map((line) => exec(line, columns, options2)).join("\n");
+      return String(string).normalize().replace(/\r\n/g, "\n").split("\n").map((line) => exec2(line, columns, options2)).join("\n");
     };
   }
 });
@@ -71863,7 +71863,6 @@ var require_json2csv = __commonJS({
 // bin/index.js
 var import_lnd_grpc = __toESM(require_dist2(), 1);
 var import_fs = __toESM(require("fs"), 1);
-var import_path = __toESM(require("path"), 1);
 
 // node_modules/commander/esm.mjs
 var import_index = __toESM(require_commander(), 1);
@@ -72776,6 +72775,7 @@ function v4(options2, buf, offset) {
 var v4_default = v4;
 
 // bin/index.js
+var import_path = __toESM(require("path"), 1);
 var import_json2csv = __toESM(require_json2csv(), 1);
 
 // bin/validation/err_config.js
@@ -72848,6 +72848,7 @@ var DefaultConfig = {
 };
 
 // bin/index.js
+var { exec } = require("child_process");
 program.option("--config <file>");
 program.option("--csv");
 program.parse();
@@ -72995,6 +72996,17 @@ Total activities: ${activities.length}
   if (anotherOne) {
     promptForActivities();
   } else {
+    exec("ls -la", (error, stdout, stderr) => {
+      if (error) {
+        console.log(`error: ${error.message}`);
+        return;
+      }
+      if (stderr) {
+        console.log(`stderr: ${stderr}`);
+        return;
+      }
+      console.log(`stdout: ${stdout}`);
+    });
     if (options.csv)
       activities = (0, import_json2csv.parse)(activities, { header: true });
     config.activity = activities;
