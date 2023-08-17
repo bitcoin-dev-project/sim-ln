@@ -275,6 +275,7 @@ async fn consume_events(
 ) {
     let node_id = node.lock().await.get_info().pubkey;
     log::debug!("Started consumer for {}", node_id);
+
     while let Some(action) = receiver.recv().await {
         match action {
             NodeAction::SendPayment(dest, amt_msat) => {
@@ -299,7 +300,6 @@ async fn consume_events(
                             dispatch_time: SystemTime::now(),
                         });
 
-                        // TODO - this is failing!
                         match sender.send(outcome).await {
                             Ok(_) => {}
                             Err(e) => {
