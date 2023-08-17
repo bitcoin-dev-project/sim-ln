@@ -165,12 +165,7 @@ impl LightningNode for LndNode {
             .into_inner();
 
         if let Some(node_info) = node_info.node {
-            let mut features = HashSet::new();
-            for feature in node_info.features {
-                features.insert(feature.0);
-            }
-
-            Ok(features)
+            Ok(node_info.features.into_keys().collect())
         } else {
             Err(LightningError::GetNodeInfoError(
                 "node not found".to_string(),
