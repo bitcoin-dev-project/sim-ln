@@ -44,7 +44,14 @@ async fn main() -> anyhow::Result<()> {
         clients.insert(node.id, Arc::new(Mutex::new(lnd)));
     }
 
-    let sim = Simulation::new(clients, activity);
+    let sim = Arc::new(Simulation::new(clients, activity));
+    let sim2 = sim.clone();
+
+    ctrlc::set_handler(move || {
+        log::info!("Shutting down simulation...");
+        sim2.shutdown();
+    })?;
+
     sim.run().await?;
 
     Ok(())
