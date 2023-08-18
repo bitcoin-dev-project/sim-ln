@@ -146,7 +146,7 @@ async function promptForActivities() {
             choices: sourceArray.concat(Object.keys(nodeObj).map(key => {
                 let node = nodeObj[key];
                 return {
-                    name: `${node.alias}:  (${node.identity_pubkey})`,
+                    name: `${node.alias || "-----" }:  (${node.identity_pubkey})`,
                     value: node.identity_pubkey
                 }
             }))
@@ -168,7 +168,7 @@ async function promptForActivities() {
             message: "Choose a destination? \n",
             choices: destArray.concat(nodeObj[activity.src].possible_dests.map(dest => {
                 return {
-                    name: `${dest.alias}:  (${dest.pub_key})`,
+                    name: `${dest.alias || "-----"}:  (${dest.pub_key})`,
                     value: dest.pub_key
                 }
             }))
