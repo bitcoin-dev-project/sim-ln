@@ -145,7 +145,7 @@ async function promptForActivities() {
 
         activity.action = DefaultConfig.ACTION_TYPE.KEYSEND_PAYMENTS //await input({ message: 'What action?', default: "keysend" });
 
-        activity.frequency = await getFrequency()
+        activity.interval_secs = await getFrequency()
         activity.amount = await getAmountInSats()
     }
 
