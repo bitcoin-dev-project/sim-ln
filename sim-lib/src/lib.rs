@@ -395,30 +395,28 @@ async fn produce_events(
 
     loop {
         tokio::select! {
-            biased;
-            r = sender.send(e) => {
-                // Consumer was dropped
-                if r.is_err() {
-                    log::debug!(
-                        "Stopped producer for {}: {} -> {}. Consumer cannot be reached",
-                        act.amount_msat,
-                        act.source,
-                        act.destination
-                    );
-                    break;
-                }
+        biased;
+        _ = time::sleep(interval) => {
+            // Consumer was dropped
+            if sender.send(e).await.is_err() {
+                log::debug!(
+                    "Stopped producer for {}: {} -> {}. Consumer cannot be reached",
+                    act.amount_msat,
+                    act.source,
+                    act.destination
+                );
+                break;
             }
-            r = time::timeout(interval, listener.clone()) => {
-                if r.is_ok(){
-                    // Shutdown was signaled
-                    log::debug!(
-                        "Stopped producer for {}: {} -> {}. Received shutdown signal",
-                        act.amount_msat,
-                        act.source,
-                        act.destination
-                    );
-                    break;
-                }
+        }
+        _ = listener.clone() => {
+            // Shutdown was signaled
+            log::debug!(
+                    "Stopped producer for {}: {} -> {}. Received shutdown signal",
+                    act.amount_msat,
+                    act.source,
+                    act.destination
+            );
+            break;
             }
         }
     }
