@@ -14,6 +14,8 @@ use tokio::time;
 use triggered::{Listener, Trigger};
 pub mod lnd;
 
+const KEYSEND_OPTIONAL: u32 = 55;
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NodeConnection {
     pub id: PublicKey,
@@ -48,6 +50,7 @@ pub enum SimulationError {
     TaskError,
 }
 
+// Phase 2: Event Queue
 #[derive(Debug, Error)]
 pub enum LightningError {
     #[error("Node connection error {0}")]
@@ -60,6 +63,10 @@ pub enum LightningError {
     TrackPaymentError(String),
     #[error("Invalid payment hash")]
     InvalidPaymentHash,
+    #[error("Get node info error {0}")]
+    GetNodeInfoError(String),
+    #[error("Config validation failed {0}")]
+    ValidationError(String),
     #[error("RPC error: {0:?}")]
     RpcError(#[from] tonic_lnd::tonic::Status),
 }
@@ -88,6 +95,9 @@ pub trait LightningNode {
         hash: PaymentHash,
         shutdown: Listener,
     ) -> Result<PaymentResult, LightningError>;
+    /// Looks up a node's announcement in the graph. This function currently only returns features, as they're all we
+    /// need, but may be updated to include any other node announcement fields if required.
+    async fn get_node_announcement(&self, node: PublicKey) -> Result<HashSet<u32>, LightningError>;
 }
 
 #[derive(Clone, Copy)]
@@ -135,7 +145,43 @@ impl Simulation {
         Self { nodes, activity }
     }
 
+    /// validate_activity validates that the user-provided activity description is achievable for the network that
+    /// we're working with.
+    async fn validate_activity(&self) -> Result<(), LightningError> {
+        for payment_flow in self.activity.iter() {
+            // We need every source node that is configured to execute some activity to be included in our set of
+            // nodes so that we can execute actions on it.
+            let source_node =
+                self.nodes
+                    .get(&payment_flow.source)
+                    .ok_or(LightningError::ValidationError(format!(
+                        "source node not found {}",
+                        payment_flow.source,
+                    )))?;
+
+            // Destinations must support keysend to be able to receive payments.
+            // Note: validation should be update with a different check if an action is not a payment.
+            let features = source_node
+                .lock()
+                .await
+                .get_node_announcement(payment_flow.destination)
+                .await
+                .map_err(|err| LightningError::GetNodeInfoError(err.to_string()))?;
+
+            if !features.contains(&KEYSEND_OPTIONAL) {
+                return Err(LightningError::ValidationError(format!(
+                    "destination node does not support keysend {}",
+                    payment_flow.destination,
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
     pub async fn run(&self) -> Result<(), SimulationError> {
+        self.validate_activity().await?;
+
         log::info!(
             "Simulating {} activity on {} nodes",
             self.activity.len(),
