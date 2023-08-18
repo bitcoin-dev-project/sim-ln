@@ -394,24 +394,32 @@ async fn produce_events(
     );
 
     loop {
-        if sender.send(e).await.is_err() {
-            log::debug!(
-                "Stopped producer for {}: {} -> {}. Consumer cannot be reached",
-                act.amount_msat,
-                act.source,
-                act.destination
-            );
-
-            break;
-        }
-        if time::timeout(interval, listener.clone()).await.is_ok() {
-            log::debug!(
-                "Stopped producer for {}: {} -> {}. Received shutdown signal",
-                act.amount_msat,
-                act.source,
-                act.destination
-            );
-            break;
+        tokio::select! {
+            biased;
+            r = sender.send(e) => {
+                // Consumer was dropped
+                if r.is_err() {
+                    log::debug!(
+                        "Stopped producer for {}: {} -> {}. Consumer cannot be reached",
+                        act.amount_msat,
+                        act.source,
+                        act.destination
+                    );
+                    break;
+                }
+            }
+            r = time::timeout(interval, listener.clone()) => {
+                if r.is_ok(){
+                    // Shutdown was signaled
+                    log::debug!(
+                        "Stopped producer for {}: {} -> {}. Received shutdown signal",
+                        act.amount_msat,
+                        act.source,
+                        act.destination
+                    );
+                    break;
+                }
+            }
         }
     }
 
@@ -436,7 +444,7 @@ async fn consume_simulation_results(
 
 /// produce_results is responsible for receiving the outcomes of actions that the simulator has taken and
 /// spinning up a producer that will report the results to our main result consumer. We handle each outcome
-/// separately because they can take a long time to resolve (eg, a payemnt that ends up on chain will take a long
+/// separately because they can take a long time to resolve (eg, a payment that ends up on chain will take a long
 /// time to resolve).
 async fn produce_simulation_results(
     nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>>,
@@ -450,6 +458,8 @@ async fn produce_simulation_results(
 
     loop {
         tokio::select! {
+            biased;
+            _ = shutdown.clone() => break,
             outcome = outcomes.recv() => {
                 match outcome{
                     Some(action_outcome) => {
@@ -469,9 +479,6 @@ async fn produce_simulation_results(
                     }
                 }
             }
-            _ = shutdown.clone() => {
-                break;
-            },
         }
     }
 
