@@ -331,7 +331,7 @@ async fn consume_events(
 
                 match payment.await {
                     Ok(payment_hash) => {
-                        log::info!(
+                        log::debug!(
                             "Send payment: {} -> {}: ({})",
                             node_id,
                             dest,
