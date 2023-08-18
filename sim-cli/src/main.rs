@@ -14,6 +14,8 @@ use simple_logger::SimpleLogger;
 struct Cli {
     #[clap(long, short)]
     config: PathBuf,
+    #[clap(long, short)]
+    total_time: Option<u32>,
 }
 
 #[tokio::main]
@@ -44,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
         clients.insert(node.id, Arc::new(Mutex::new(lnd)));
     }
 
-    let sim = Arc::new(Simulation::new(clients, activity));
+    let sim = Simulation::new(clients, activity, cli.total_time);
     let sim2 = sim.clone();
 
     ctrlc::set_handler(move || {

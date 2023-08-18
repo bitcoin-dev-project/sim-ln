@@ -13,6 +13,7 @@ use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tokio::time;
+use tokio::time::Duration;
 use triggered::{Listener, Trigger};
 
 pub mod lnd;
@@ -168,19 +169,20 @@ enum ActionOutcome {
 pub struct Simulation {
     // The lightning node that is being simulated.
     nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>>,
-
     // The activity that are to be executed on the node.
     activity: Vec<ActivityDefinition>,
-
     // High level triggers used to manage simulation tasks and shutdown.
     shutdown_trigger: Trigger,
     shutdown_listener: Listener,
+    // Total simulation time. The simulation will run forever if undefined.
+    total_time: Option<time::Duration>,
 }
 
 impl Simulation {
     pub fn new(
         nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>>,
         activity: Vec<ActivityDefinition>,
+        total_time: Option<u32>,
     ) -> Self {
         let (shutdown_trigger, shutdown_listener) = triggered::trigger();
         Self {
@@ -188,6 +190,7 @@ impl Simulation {
             activity,
             shutdown_trigger,
             shutdown_listener,
+            total_time: total_time.map(|x| Duration::from_secs(x as u64)),
         }
     }
 
@@ -226,6 +229,12 @@ impl Simulation {
     }
 
     pub async fn run(&self) -> Result<(), SimulationError> {
+        if let Some(total_time) = self.total_time {
+            log::info!("Running the simulation for {}s", total_time.as_secs());
+        } else {
+            log::info!("Running the simulation forever");
+        }
+
         self.validate_activity().await?;
 
         log::info!(
@@ -248,6 +257,21 @@ impl Simulation {
         // has been configured, passing in the channel that is used to notify data collection that actions  have been
         // generated.
         self.generate_activity(action_sender, &mut tasks).await?;
+
+        if let Some(total_time) = self.total_time {
+            let t = self.shutdown_trigger.clone();
+            let l = self.shutdown_listener.clone();
+
+            tasks.spawn(async move {
+                if time::timeout(total_time, l).await.is_err() {
+                    log::info!(
+                        "Simulation run for {}s. Shutting down",
+                        total_time.as_secs()
+                    );
+                    t.trigger()
+                }
+            });
+        }
 
         // We always want to wait ofr all threads to exit, so we wait for all of them to exit and track any errors
         // that surface. It's okay if there are multiple and one is overwritten, we just want to know whether we
