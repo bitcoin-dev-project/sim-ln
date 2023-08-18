@@ -338,7 +338,7 @@ async fn consume_events(
                             hex::encode(payment_hash.0)
                         );
 
-                        log::info!("Sending action for {:?}", payment_hash);
+                        log::debug!("Sending action for {}", hex::encode(payment_hash.0));
                         let outcome = ActionOutcome::PaymentSent(DispatchedPayment {
                             source: node.get_info().pubkey,
                             hash: payment_hash,
@@ -493,6 +493,7 @@ async fn produce_simulation_results(
                             ActionOutcome::PaymentSent(dispatched_payment) => {
                                 let source_node = nodes.get(&dispatched_payment.source).unwrap().clone();
 
+                                log::debug!("Tracking payment outcome for: {}", hex::encode(dispatched_payment.hash.0));
                                 set.spawn(track_outcome(
                                     source_node,results.clone(),action_outcome, shutdown.clone(),
                                 ));
