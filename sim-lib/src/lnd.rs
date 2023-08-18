@@ -123,6 +123,7 @@ impl LightningNode for LndNode {
 
         tokio::select! {
             biased;
+            _ = shutdown => { Err(LightningError::TrackPaymentError("Shutdown before tracking results".to_string())) },
             stream = stream.message() => {
                 let payment = stream.map_err(|err| LightningError::TrackPaymentError(err.to_string()))?;
                 match payment {
@@ -148,7 +149,6 @@ impl LightningNode for LndNode {
                     },
                 }
             },
-            _ = shutdown => { Err(LightningError::TrackPaymentError("Shutdown before tracking results".to_string())) }
         }
     }
 }
