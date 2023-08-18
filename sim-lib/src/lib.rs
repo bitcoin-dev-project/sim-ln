@@ -329,7 +329,6 @@ impl Simulation {
                 node.clone(),
                 receiver,
                 executed_actions.clone(),
-                shutdown.clone(),
             ));
 
             // Add the producer channel to our map so that various activity descriptions can use it. We may have multiple
@@ -360,7 +359,6 @@ async fn consume_events(
     node: Arc<Mutex<dyn LightningNode + Send>>,
     mut receiver: Receiver<NodeAction>,
     sender: Sender<ActionOutcome>,
-    shutdown: triggered::Trigger,
 ) {
     let node_id = node.lock().await.get_info().pubkey;
     log::debug!("Started consumer for {}", node_id);
@@ -410,9 +408,6 @@ async fn consume_events(
             }
         };
     }
-
-    // On exit call our shutdown trigger to inform other threads that we have exited, and they need to shut down.
-    shutdown.trigger();
 }
 
 // produce events generates events for the activity description provided. It accepts a shutdown listener so it can
