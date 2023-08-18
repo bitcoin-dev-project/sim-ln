@@ -164,12 +164,17 @@ enum ActionOutcome {
     PaymentSent(DispatchedPayment),
 }
 
+#[derive(Clone)]
 pub struct Simulation {
     // The lightning node that is being simulated.
     nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>>,
 
     // The activity that are to be executed on the node.
     activity: Vec<ActivityDefinition>,
+
+    // High level triggers used to manage simulation tasks and shutdown.
+    shutdown_trigger: Trigger,
+    shutdown_listener: Listener,
 }
 
 impl Simulation {
@@ -177,7 +182,13 @@ impl Simulation {
         nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>>,
         activity: Vec<ActivityDefinition>,
     ) -> Self {
-        Self { nodes, activity }
+        let (shutdown_trigger, shutdown_listener) = triggered::trigger();
+        Self {
+            nodes,
+            activity,
+            shutdown_trigger,
+            shutdown_listener,
+        }
     }
 
     /// validate_activity validates that the user-provided activity description is achievable for the network that
@@ -223,9 +234,6 @@ impl Simulation {
             self.nodes.len()
         );
 
-        // High level triggers used to manage our tasks.
-        let (shutdown_trigger, shutdown_listener) = triggered::trigger();
-
         // Before we start the simulation up, start tasks that will be responsible for gathering simulation data.
         // The action channels are shared across our functionality:
         // - Action Sender: used by the simulation to inform data reporting that it needs to start tracking the
@@ -233,15 +241,12 @@ impl Simulation {
         // - Action Receiver: used by data reporting to receive events that have been simulated that need to be
         //   tracked and recorded.
         let (action_sender, action_receiver) = channel(1);
-        let mut record_data_set =
-            self.run_data_collection(action_receiver, shutdown_listener.clone());
+        let mut record_data_set = self.run_data_collection(action_receiver);
 
         // Next, we'll spin up our actual activity generator that will be responsible for triggering the activity that
         // has been configured, passing in the channel that is used to notify data collection that actions  have been
         // generated.
-        let mut generate_activity_set = self
-            .generate_activity(action_sender, shutdown_trigger.clone(), shutdown_listener)
-            .await?;
+        let mut generate_activity_set = self.generate_activity(action_sender).await?;
 
         // We always want to wait ofr all threads to exit, so we wait for all of them to exit and track any errors
         // that surface. It's okay if there are multiple and one is overwritten, we just want to know whether we
@@ -263,13 +268,18 @@ impl Simulation {
         success.then_some(()).ok_or(SimulationError::TaskError)
     }
 
+    pub fn shutdown(&self) {
+        self.shutdown_trigger.trigger()
+    }
+
     // run_data_collection starts the tasks required for the simulation to report of the outcomes of the activity that
     // it generates. The simulation should report actions via the receiver that is passed in.
     fn run_data_collection(
         &self,
         action_receiver: Receiver<ActionOutcome>,
-        listener: Listener,
     ) -> tokio::task::JoinSet<()> {
+        let listener = self.shutdown_listener.clone();
+
         log::debug!("Simulator data recording starting.");
         let mut set = JoinSet::new();
 
@@ -292,10 +302,11 @@ impl Simulation {
     async fn generate_activity(
         &self,
         executed_actions: Sender<ActionOutcome>,
-        shutdown: Trigger,
-        listener: Listener,
     ) -> Result<JoinSet<()>, SimulationError> {
         let mut set = JoinSet::new();
+        let shutdown = self.shutdown_trigger.clone();
+        let listener = self.shutdown_listener.clone();
+
         // Before we start the simulation, we'll spin up the infrastructure that we need to record data:
         // We only need to spin up producers for nodes that are contained in our activity description, as there will be
         // no events for nodes that are not source nodes.
