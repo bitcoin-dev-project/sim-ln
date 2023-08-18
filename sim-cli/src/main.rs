@@ -20,7 +20,7 @@ struct Cli {
 async fn main() -> anyhow::Result<()> {
     SimpleLogger::new()
         .with_level(LevelFilter::Warn)
-        .with_module_level("sim_lib", LevelFilter::Debug)
+        .with_module_level("sim_lib", LevelFilter::Info)
         .with_module_level("sim_cli", LevelFilter::Debug)
         .init()
         .unwrap();

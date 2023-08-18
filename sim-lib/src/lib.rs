@@ -331,14 +331,14 @@ async fn consume_events(
 
                 match payment.await {
                     Ok(payment_hash) => {
-                        log::info!(
+                        log::debug!(
                             "Send payment: {} -> {}: ({})",
                             node_id,
                             dest,
                             hex::encode(payment_hash.0)
                         );
 
-                        log::info!("Sending action for {:?}", payment_hash);
+                        log::debug!("Sending action for {}", hex::encode(payment_hash.0));
                         let outcome = ActionOutcome::PaymentSent(DispatchedPayment {
                             source: node.get_info().pubkey,
                             hash: payment_hash,
@@ -418,14 +418,56 @@ async fn consume_simulation_results(
     shutdown: triggered::Trigger,
 ) {
     log::debug!("Simulation results consumer started.");
+    let mut result_logger = PaymentResultLogger::new();
 
-    while let Some(resolved_payment) = receiver.recv().await {
-        // TODO - write to CSV.
-        println!("Resolved payment received: {:?}", resolved_payment);
+    while let Some((details, result)) = receiver.recv().await {
+        result_logger.report_result(&details, &result);
+        log::trace!("Resolved payment received: ({:?}, {:?})", details, result);
     }
 
     log::debug!("Simulation results consumer exiting");
     shutdown.trigger();
+}
+
+/// PaymentResultLogger is an aggregate logger that will report on a summary of the payments that have been reported
+/// to it at regular intervals (defined by the log_interval it is created with).
+#[derive(Default)]
+struct PaymentResultLogger {
+    success_payment: u64,
+    failed_payment: u64,
+    total_sent: u64,
+    call_count: u8,
+    log_interval: u8,
+}
+
+impl PaymentResultLogger {
+    fn new() -> Self {
+        PaymentResultLogger {
+            // TODO: set the interval at which we log based on the number of payment we're expecting to log.
+            log_interval: 10,
+            ..Default::default()
+        }
+    }
+
+    fn report_result(&mut self, details: &DispatchedPayment, result: &PaymentResult) {
+        match result.failure_reason {
+            Some(_) => self.failed_payment += 1,
+            None => self.success_payment += 1,
+        }
+
+        self.total_sent += details.amount_msat;
+        self.call_count += 1;
+
+        if self.call_count % self.log_interval == 0 {
+            let total_payments = self.success_payment + self.failed_payment;
+            log::info!(
+                "Processed {} payments sending {} msat with {}% success rate",
+                total_payments,
+                self.total_sent,
+                (self.success_payment * 100 / total_payments)
+            );
+        }
+    }
 }
 
 /// produce_results is responsible for receiving the outcomes of actions that the simulator has taken and
@@ -456,6 +498,7 @@ async fn produce_simulation_results(
                             ActionOutcome::PaymentSent(dispatched_payment) => {
                                 let source_node = nodes.get(&dispatched_payment.source).unwrap().clone();
 
+                                log::debug!("Tracking payment outcome for: {}", hex::encode(dispatched_payment.hash.0));
                                 set.spawn(track_outcome(
                                     source_node,results.clone(),action_outcome, shutdown.clone(),
                                 ));
