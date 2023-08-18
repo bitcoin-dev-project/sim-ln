@@ -36,8 +36,9 @@ pub struct ActivityDefinition {
     pub source: PublicKey,
     // The destination of the action.
     pub destination: PublicKey,
-    // The frequency of the action, as in number of times per minute.
-    pub frequency: u16,
+    // The interval of the action, as in every how many seconds the action is performed.
+    #[serde(alias = "interval_secs")]
+    pub interval: u16,
     // The amount of m_sat to used in this action.
     pub amount_msat: u64,
 }
@@ -382,30 +383,43 @@ async fn produce_events(
     listener: Listener,
 ) {
     let e: NodeAction = NodeAction::SendPayment(act.destination, act.amount_msat);
-    let interval = time::Duration::from_secs(act.frequency as u64);
+    let interval = time::Duration::from_secs(act.interval as u64);
 
     log::debug!(
         "Started producer for {} every {}s: {} -> {}",
         act.amount_msat,
-        act.frequency,
+        act.interval,
         act.source,
         act.destination
     );
 
     loop {
-        if time::timeout(interval, listener.clone()).await.is_ok() {
-            log::debug!(
-                "Stopped producer for {}: {} -> {}. Received shutdown signal.",
-                act.amount_msat,
-                act.source,
-                act.destination
-            );
-
-            break;
-        }
-
-        if sender.send(e).await.is_err() {
-            break;
+        tokio::select! {
+            biased;
+            r = sender.send(e) => {
+                // Consumer was dropped
+                if r.is_err() {
+                    log::debug!(
+                        "Stopped producer for {}: {} -> {}. Consumer cannot be reached",
+                        act.amount_msat,
+                        act.source,
+                        act.destination
+                    );
+                    break;
+                }
+            }
+            r = time::timeout(interval, listener.clone()) => {
+                if r.is_ok(){
+                    // Shutdown was signaled
+                    log::debug!(
+                        "Stopped producer for {}: {} -> {}. Received shutdown signal",
+                        act.amount_msat,
+                        act.source,
+                        act.destination
+                    );
+                    break;
+                }
+            }
         }
     }
 
@@ -472,7 +486,7 @@ impl PaymentResultLogger {
 
 /// produce_results is responsible for receiving the outcomes of actions that the simulator has taken and
 /// spinning up a producer that will report the results to our main result consumer. We handle each outcome
-/// separately because they can take a long time to resolve (eg, a payemnt that ends up on chain will take a long
+/// separately because they can take a long time to resolve (eg, a payment that ends up on chain will take a long
 /// time to resolve).
 ///
 /// Note: this producer does not accept a shutdown trigger because it only expects to be dispatched once. In the single
@@ -491,6 +505,8 @@ async fn produce_simulation_results(
 
     loop {
         tokio::select! {
+            biased;
+            _ = shutdown.clone() => break,
             outcome = outcomes.recv() => {
                 match outcome{
                     Some(action_outcome) => {
@@ -511,9 +527,6 @@ async fn produce_simulation_results(
                     }
                 }
             }
-            _ = shutdown.clone() => {
-                break;
-            },
         }
     }
 
