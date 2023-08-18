@@ -3,6 +3,7 @@
 import LndGrpc from 'lnd-grpc';
 import chalk from "chalk"
 import { input, confirm } from '@inquirer/prompts';
+import path from 'path';
 
 async function setupControlNodes(controlNodes, nodeObj) {
   console.log("\nAdd a Control Node");
@@ -50,7 +51,7 @@ async function buildControlNodes({node, nodeObj}) {
     host: node.ip,
     cert: node.cert,
     macaroon: node.macaroon,
-    // protoDir: path.join(__dirname, "proto")
+    protoDir: path.join(__dirname, "proto")
   }
   return new Promise (async (resolve, reject) => {
     let connectedNode = {}

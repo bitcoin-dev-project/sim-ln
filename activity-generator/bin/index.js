@@ -35,7 +35,8 @@ async function init() {
             await buildControlNodes({node, nodeObj});
         })
     }
-    promptForActivities();
+
+    config.nodes.length > 0 ? promptForActivities() : console.error("-------------------------------\nYou must setup at least one node\n-------------------------------");
 }
 
 init();
