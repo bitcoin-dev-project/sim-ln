@@ -1,10 +1,12 @@
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
+use csv::WriterBuilder;
 use lightning::events::PaymentFailureReason;
 use lightning::ln::PaymentHash;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::marker::Send;
+use std::mem::size_of;
 use std::{collections::HashMap, sync::Arc, time::SystemTime};
 use thiserror::Error;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
@@ -12,6 +14,7 @@ use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tokio::time;
 use triggered::{Listener, Trigger};
+
 pub mod lnd;
 
 const KEYSEND_OPTIONAL: u32 = 55;
@@ -49,6 +52,10 @@ pub enum SimulationError {
     LightningError(#[from] LightningError),
     #[error("TaskError")]
     TaskError,
+    #[error("CSV Error: {0:?}")]
+    CsvError(#[from] csv::Error),
+    #[error("File Error")]
+    FileError,
 }
 
 // Phase 2: Event Queue
@@ -107,21 +114,48 @@ enum NodeAction {
     SendPayment(PublicKey, u64),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentResult {
     pub settled: bool,
     pub htlc_count: usize,
+    #[serde(skip)]
     pub failure_reason: Option<PaymentFailureReason>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[allow(dead_code)]
 struct DispatchedPayment {
     source: PublicKey,
     destination: PublicKey,
+    #[serde(
+        serialize_with = "serialize_payment_hash",
+        deserialize_with = "deserialize_payment_hash"
+    )]
     hash: PaymentHash,
     amount_msat: u64,
+    #[serde(with = "serde_millis")]
     dispatch_time: SystemTime,
+}
+
+fn serialize_payment_hash<S>(hash: &PaymentHash, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&hex::encode(hash.0))
+}
+
+fn deserialize_payment_hash<'de, D>(deserializer: D) -> Result<PaymentHash, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    let bytes = hex::decode(s).map_err(serde::de::Error::custom)?;
+    let slice: [u8; 32] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(serde::de::Error::custom)?;
+
+    Ok(PaymentHash(slice))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -199,17 +233,14 @@ impl Simulation {
         // - Action Receiver: used by data reporting to receive events that have been simulated that need to be
         //   tracked and recorded.
         let (action_sender, action_receiver) = channel(1);
-        let mut record_data_set = self.run_data_collection(
-            action_receiver,
-            shutdown_trigger.clone(),
-            shutdown_listener.clone(),
-        );
+        let mut record_data_set =
+            self.run_data_collection(action_receiver, shutdown_listener.clone());
 
         // Next, we'll spin up our actual activity generator that will be responsible for triggering the activity that
         // has been configured, passing in the channel that is used to notify data collection that actions  have been
         // generated.
         let mut generate_activity_set = self
-            .generate_activity(action_sender, shutdown_trigger, shutdown_listener)
+            .generate_activity(action_sender, shutdown_trigger.clone(), shutdown_listener)
             .await?;
 
         // We always want to wait ofr all threads to exit, so we wait for all of them to exit and track any errors
@@ -237,7 +268,6 @@ impl Simulation {
     fn run_data_collection(
         &self,
         action_receiver: Receiver<ActionOutcome>,
-        shutdown: Trigger,
         listener: Listener,
     ) -> tokio::task::JoinSet<()> {
         log::debug!("Simulator data recording starting.");
@@ -250,10 +280,10 @@ impl Simulation {
             self.nodes.clone(),
             action_receiver,
             results_sender,
-            listener,
+            listener.clone(),
         ));
 
-        set.spawn(consume_simulation_results(results_receiver, shutdown));
+        set.spawn(consume_simulation_results(results_receiver, listener));
 
         log::debug!("Simulator data recording exiting.");
         set
@@ -426,19 +456,63 @@ async fn produce_events(
 }
 
 async fn consume_simulation_results(
-    mut receiver: Receiver<(DispatchedPayment, PaymentResult)>,
-    shutdown: triggered::Trigger,
+    receiver: Receiver<(DispatchedPayment, PaymentResult)>,
+    listener: Listener,
 ) {
     log::debug!("Simulation results consumer started.");
-    let mut result_logger = PaymentResultLogger::new();
 
-    while let Some((details, result)) = receiver.recv().await {
-        result_logger.report_result(&details, &result);
-        log::trace!("Resolved payment received: ({:?}, {:?})", details, result);
+    match write_payment_results(receiver, listener).await {
+        Ok(_) => {
+            log::debug!("Simulation results ok but exiting!!!");
+        }
+        Err(e) => log::error!("Error while reporting payment results: {:?}", e),
     }
 
     log::debug!("Simulation results consumer exiting");
-    shutdown.trigger();
+}
+
+async fn write_payment_results(
+    mut receiver: Receiver<(DispatchedPayment, PaymentResult)>,
+    listener: Listener,
+) -> Result<(), SimulationError> {
+    let mut writer = WriterBuilder::new()
+        .buffer_capacity(size_of::<(DispatchedPayment, PaymentResult)>() * 5)
+        .from_path(format!(
+            "simulation_{:?}.csv",
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        ))?;
+
+    let mut result_logger = PaymentResultLogger::new();
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = listener.clone() => {
+                log::debug!("Simulation results consumer received shutdown signal.");
+                break writer.flush().map_err(|_| SimulationError::FileError)
+            },
+            payment_report = receiver.recv() => {
+                match payment_report {
+                    Some((details, result)) => {
+                        result_logger.report_result(&details, &result);
+                        log::trace!("Resolved payment received: ({:?}, {:?})", details, result);
+
+                        writer.serialize((details, result)).map_err(|e| {
+                            let _ = writer.flush();
+                            SimulationError::CsvError(e)
+                        })?;
+                        continue;
+                    },
+                    None => {
+                        break writer.flush().map_err(|_| SimulationError::FileError)
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// PaymentResultLogger is an aggregate logger that will report on a summary of the payments that have been reported
