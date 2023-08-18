@@ -432,6 +432,11 @@ async fn consume_simulation_results(
 /// spinning up a producer that will report the results to our main result consumer. We handle each outcome
 /// separately because they can take a long time to resolve (eg, a payemnt that ends up on chain will take a long
 /// time to resolve).
+///
+/// Note: this producer does not accept a shutdown trigger because it only expects to be dispatched once. In the single
+/// producer case exit will drop the only sending channel and the receiving channel provided to the consumer will error
+/// out. In the multiple-producer case, a single producer shutting down does not drop *all* sending channels so the
+/// consumer will not exit and a trigger is required.
 async fn produce_simulation_results(
     nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>>,
     mut outcomes: Receiver<ActionOutcome>,
