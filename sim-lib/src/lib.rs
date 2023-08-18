@@ -470,10 +470,10 @@ impl PaymentResultLogger {
         self.total_sent += details.amount_msat;
         self.call_count += 1;
 
-        if self.call_count % self.log_interval == 0 {
+        if self.call_count % self.log_interval == 0 || self.call_count == 0 {
             let total_payments = self.success_payment + self.failed_payment;
             log::info!(
-                "Processed {} payments sending {} msat with {}% success rate",
+                "Processed {} payments sending {} msat total with {}% success rate",
                 total_payments,
                 self.total_sent,
                 (self.success_payment * 100 / total_payments)
