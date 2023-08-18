@@ -143,7 +143,7 @@ async function promptForActivities() {
             activity.dest = await verifyPubKey(allPossibleNodes)
         }
 
-        activity.action = await input({ message: 'What action?', default: "keysend" });
+        activity.action = DefaultConfig.ACTION_TYPE.KEYSEND_PAYMENTS //await input({ message: 'What action?', default: "keysend" });
 
         activity.frequency = await getFrequency()
         activity.amount = await getAmountInSats()
