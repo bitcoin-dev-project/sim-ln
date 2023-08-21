@@ -20,8 +20,14 @@ pub mod lnd;
 
 const KEYSEND_OPTIONAL: u32 = 55;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum NodeConnection {
+    #[serde(alias = "lnd", alias = "Lnd")]
+    LND(LndNodeConnection),
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct NodeConnection {
+pub struct LndNodeConnection {
     pub id: PublicKey,
     pub address: String,
     pub macaroon: String,
