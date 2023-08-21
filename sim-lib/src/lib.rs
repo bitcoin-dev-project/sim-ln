@@ -13,6 +13,7 @@ use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tokio::time;
+use tokio::time::Duration;
 use triggered::{Listener, Trigger};
 
 pub mod lnd;
@@ -168,19 +169,20 @@ enum ActionOutcome {
 pub struct Simulation {
     // The lightning node that is being simulated.
     nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>>,
-
     // The activity that are to be executed on the node.
     activity: Vec<ActivityDefinition>,
-
     // High level triggers used to manage simulation tasks and shutdown.
     shutdown_trigger: Trigger,
     shutdown_listener: Listener,
+    // Total simulation time. The simulation will run forever if undefined.
+    total_time: Option<time::Duration>,
 }
 
 impl Simulation {
     pub fn new(
         nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>>,
         activity: Vec<ActivityDefinition>,
+        total_time: Option<u32>,
     ) -> Self {
         let (shutdown_trigger, shutdown_listener) = triggered::trigger();
         Self {
@@ -188,6 +190,7 @@ impl Simulation {
             activity,
             shutdown_trigger,
             shutdown_listener,
+            total_time: total_time.map(|x| Duration::from_secs(x as u64)),
         }
     }
 
@@ -226,6 +229,12 @@ impl Simulation {
     }
 
     pub async fn run(&self) -> Result<(), SimulationError> {
+        if let Some(total_time) = self.total_time {
+            log::info!("Running the simulation for {}s", total_time.as_secs());
+        } else {
+            log::info!("Running the simulation forever");
+        }
+
         self.validate_activity().await?;
 
         log::info!(
@@ -233,6 +242,7 @@ impl Simulation {
             self.activity.len(),
             self.nodes.len()
         );
+        let mut tasks = JoinSet::new();
 
         // Before we start the simulation up, start tasks that will be responsible for gathering simulation data.
         // The action channels are shared across our functionality:
@@ -241,30 +251,39 @@ impl Simulation {
         // - Action Receiver: used by data reporting to receive events that have been simulated that need to be
         //   tracked and recorded.
         let (action_sender, action_receiver) = channel(1);
-        let mut record_data_set = self.run_data_collection(action_receiver);
+        self.run_data_collection(action_receiver, &mut tasks);
 
         // Next, we'll spin up our actual activity generator that will be responsible for triggering the activity that
         // has been configured, passing in the channel that is used to notify data collection that actions  have been
         // generated.
-        let mut generate_activity_set = self.generate_activity(action_sender).await?;
+        self.generate_activity(action_sender, &mut tasks).await?;
+
+        if let Some(total_time) = self.total_time {
+            let t = self.shutdown_trigger.clone();
+            let l = self.shutdown_listener.clone();
+
+            tasks.spawn(async move {
+                if time::timeout(total_time, l).await.is_err() {
+                    log::info!(
+                        "Simulation run for {}s. Shutting down",
+                        total_time.as_secs()
+                    );
+                    t.trigger()
+                }
+            });
+        }
 
         // We always want to wait ofr all threads to exit, so we wait for all of them to exit and track any errors
         // that surface. It's okay if there are multiple and one is overwritten, we just want to know whether we
         // exited with an error or not.
-        // TODO: more succinct handling of tasks here.
         let mut success = true;
-        while let Some(res) = record_data_set.join_next().await {
+        while let Some(res) = tasks.join_next().await {
             if let Err(e) = res {
                 log::error!("Task exited with error: {e}");
                 success = false;
             }
         }
-        while let Some(res) = generate_activity_set.join_next().await {
-            if let Err(e) = res {
-                log::error!("Task exited with error: {e}");
-                success = false;
-            }
-        }
+
         success.then_some(()).ok_or(SimulationError::TaskError)
     }
 
@@ -277,33 +296,30 @@ impl Simulation {
     fn run_data_collection(
         &self,
         action_receiver: Receiver<ActionOutcome>,
-    ) -> tokio::task::JoinSet<()> {
+        tasks: &mut JoinSet<()>,
+    ) {
         let listener = self.shutdown_listener.clone();
-
         log::debug!("Simulator data recording starting.");
-        let mut set = JoinSet::new();
 
         // Create a sender/receiver pair that will be used to report final results of action outcomes.
         let (results_sender, results_receiver) = channel(1);
 
-        set.spawn(produce_simulation_results(
+        tasks.spawn(produce_simulation_results(
             self.nodes.clone(),
             action_receiver,
             results_sender,
             listener.clone(),
         ));
 
-        set.spawn(consume_simulation_results(results_receiver, listener));
-
+        tasks.spawn(consume_simulation_results(results_receiver, listener));
         log::debug!("Simulator data recording exiting.");
-        set
     }
 
     async fn generate_activity(
         &self,
         executed_actions: Sender<ActionOutcome>,
-    ) -> Result<JoinSet<()>, SimulationError> {
-        let mut set = JoinSet::new();
+        tasks: &mut JoinSet<()>,
+    ) -> Result<(), SimulationError> {
         let shutdown = self.shutdown_trigger.clone();
         let listener = self.shutdown_listener.clone();
 
@@ -325,7 +341,7 @@ impl Simulation {
 
             // Generate a consumer for the receiving end of the channel. It takes the event receiver that it'll pull
             // events from and the results sender to report the events it has triggered for further monitoring.
-            set.spawn(consume_events(
+            tasks.spawn(consume_events(
                 node.clone(),
                 receiver,
                 executed_actions.clone(),
@@ -338,7 +354,7 @@ impl Simulation {
 
         for description in self.activity.iter() {
             let sender_chan = producer_channels.get(&description.source).unwrap();
-            set.spawn(produce_events(
+            tasks.spawn(produce_events(
                 *description,
                 sender_chan.clone(),
                 shutdown.clone(),
@@ -346,7 +362,7 @@ impl Simulation {
             ));
         }
 
-        Ok(set)
+        Ok(())
     }
 }
 
