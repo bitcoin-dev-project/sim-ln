@@ -22,3 +22,5 @@ rand = "0.8.5"
 hex = "0.4.3"
 csv = "1.2.2"
 serde_millis = "0.1.1"
+tonic = { version="0.8", feaures=["tls", "transport"] }
+cln-grpc = "0.1.3"

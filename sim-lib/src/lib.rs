@@ -16,6 +16,7 @@ use tokio::time;
 use tokio::time::Duration;
 use triggered::{Listener, Trigger};
 
+pub mod cln;
 pub mod lnd;
 
 const KEYSEND_OPTIONAL: u32 = 55;
@@ -24,6 +25,8 @@ const KEYSEND_OPTIONAL: u32 = 55;
 pub enum NodeConnection {
     #[serde(alias = "lnd", alias = "Lnd")]
     LND(LndNodeConnection),
+    #[serde(alias = "cln", alias = "Cln")]
+    CLN(ClnNodeConnection),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -32,6 +35,15 @@ pub struct LndNodeConnection {
     pub address: String,
     pub macaroon: String,
     pub cert: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClnNodeConnection {
+    pub id: PublicKey,
+    pub address: String,
+    pub ca_pem: String,
+    pub client_pem: String,
+    pub client_key: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -82,8 +94,12 @@ pub enum LightningError {
     GetNodeInfoError(String),
     #[error("Config validation failed {0}")]
     ValidationError(String),
-    #[error("RPC error: {0:?}")]
-    RpcError(#[from] tonic_lnd::tonic::Status),
+    #[error("RPC status error: {0:?}")]
+    RpcStatusError(#[from] tonic_lnd::tonic::Status),
+    #[error("RPC transport error: {0:?}")]
+    RpcTransportError(#[from] tonic::transport::Error),
+    #[error("IO error: {0:?}")]
+    IoError(#[from] tokio::io::Error),
 }
 
 #[derive(Debug, Clone)]
@@ -112,7 +128,10 @@ pub trait LightningNode {
     ) -> Result<PaymentResult, LightningError>;
     /// Looks up a node's announcement in the graph. This function currently only returns features, as they're all we
     /// need, but may be updated to include any other node announcement fields if required.
-    async fn get_node_announcement(&self, node: PublicKey) -> Result<HashSet<u32>, LightningError>;
+    async fn get_node_announcement(
+        &mut self,
+        node: PublicKey,
+    ) -> Result<HashSet<u32>, LightningError>;
 }
 
 #[derive(Clone, Copy)]

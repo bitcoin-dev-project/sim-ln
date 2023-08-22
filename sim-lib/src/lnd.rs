@@ -91,7 +91,8 @@ impl LightningNode for LndNode {
                 timeout_seconds: SEND_PAYMENT_TIMEOUT_SECS,
                 ..Default::default()
             })
-            .await?;
+            .await
+            .map_err(|err| LightningError::SendPaymentError(err.to_string()))?;
 
         let mut stream = response.into_inner();
 
@@ -151,11 +152,13 @@ impl LightningNode for LndNode {
         }
     }
 
-    async fn get_node_announcement(&self, node: PublicKey) -> Result<HashSet<u32>, LightningError> {
-        let mut client = self.client.clone();
-        let lightning_client = client.lightning();
-
-        let node_info = lightning_client
+    async fn get_node_announcement(
+        &mut self,
+        node: PublicKey,
+    ) -> Result<HashSet<u32>, LightningError> {
+        let node_info = self
+            .client
+            .lightning()
             .get_node_info(NodeInfoRequest {
                 pub_key: node.to_string(),
                 include_channels: false,

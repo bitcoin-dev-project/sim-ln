@@ -6,7 +6,10 @@ use tokio::sync::Mutex;
 
 use clap::Parser;
 use log::LevelFilter;
-use sim_lib::{lnd::LndNode, Config, LightningNode, LndNodeConnection, NodeConnection, Simulation};
+use sim_lib::{
+    cln::ClnNode, lnd::LndNode, ClnNodeConnection, Config, LightningNode, LndNodeConnection,
+    NodeConnection, Simulation,
+};
 use simple_logger::SimpleLogger;
 
 #[derive(Parser)]
@@ -41,16 +44,31 @@ async fn main() -> anyhow::Result<()> {
                 macaroon,
                 cert,
                 id,
-            }) => (LndNode::new(address, macaroon, cert).await?, id),
+            }) => {
+                let lnd: Arc<Mutex<dyn LightningNode + Send>> =
+                    Arc::new(Mutex::new(LndNode::new(address, macaroon, cert).await?));
+                (lnd, id)
+            }
+            NodeConnection::CLN(ClnNodeConnection {
+                address,
+                ca_pem,
+                client_pem,
+                client_key,
+                id,
+            }) => {
+                let cln: Arc<Mutex<dyn LightningNode + Send>> = Arc::new(Mutex::new(
+                    ClnNode::new(&address, &ca_pem, &client_pem, &client_key).await?,
+                ));
+                (cln, id)
+            }
         };
 
-        log::info!(
-            "Connected to {} - Node ID: {}",
-            ln.get_info().alias,
-            ln.get_info().pubkey
-        );
+        // {
+        //     let info: &NodeInfo = ln.lock().await.get_info();
+        //     log::info!("Connected to {} - Node ID: {}", info.alias, info.pubkey);
+        // }
 
-        clients.insert(id, Arc::new(Mutex::new(ln)));
+        clients.insert(id, ln);
     }
 
     let sim = Simulation::new(clients, activity, cli.total_time);
