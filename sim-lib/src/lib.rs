@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use csv::WriterBuilder;
-use lightning::events::PaymentFailureReason;
 use lightning::ln::PaymentHash;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -17,6 +16,7 @@ use tokio::time::Duration;
 use triggered::{Listener, Trigger};
 
 pub mod lnd;
+mod serializers;
 
 const KEYSEND_OPTIONAL: u32 = 55;
 
@@ -117,10 +117,22 @@ enum NodeAction {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentResult {
-    pub settled: bool,
     pub htlc_count: usize,
-    #[serde(skip)]
-    pub failure_reason: Option<PaymentFailureReason>,
+    pub payment_outcome: PaymentOutcome,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PaymentOutcome {
+    Success,
+    RecipientRejected,
+    UserAbandoned,
+    RetriesExhausted,
+    PaymentExpired,
+    RouteNotFound,
+    UnexpectedError,
+    IncorrectPaymentDetails,
+    InsufficientBalance,
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -129,34 +141,13 @@ struct DispatchedPayment {
     source: PublicKey,
     destination: PublicKey,
     #[serde(
-        serialize_with = "serialize_payment_hash",
-        deserialize_with = "deserialize_payment_hash"
+        serialize_with = "serializers::serialize_payment_hash",
+        deserialize_with = "serializers::deserialize_payment_hash"
     )]
     hash: PaymentHash,
     amount_msat: u64,
     #[serde(with = "serde_millis")]
     dispatch_time: SystemTime,
-}
-
-fn serialize_payment_hash<S>(hash: &PaymentHash, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    serializer.serialize_str(&hex::encode(hash.0))
-}
-
-fn deserialize_payment_hash<'de, D>(deserializer: D) -> Result<PaymentHash, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let s = String::deserialize(deserializer)?;
-    let bytes = hex::decode(s).map_err(serde::de::Error::custom)?;
-    let slice: [u8; 32] = bytes
-        .as_slice()
-        .try_into()
-        .map_err(serde::de::Error::custom)?;
-
-    Ok(PaymentHash(slice))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -558,9 +549,9 @@ impl PaymentResultLogger {
     }
 
     fn report_result(&mut self, details: &DispatchedPayment, result: &PaymentResult) {
-        match result.failure_reason {
-            Some(_) => self.failed_payment += 1,
-            None => self.success_payment += 1,
+        match result.payment_outcome {
+            PaymentOutcome::Success => self.success_payment += 1,
+            _ => self.failed_payment += 1,
         }
 
         self.total_sent += details.amount_msat;

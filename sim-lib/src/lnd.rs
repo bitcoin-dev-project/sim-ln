@@ -1,14 +1,13 @@
 use std::{collections::HashMap, str::FromStr};
 
-use crate::{LightningError, LightningNode, NodeInfo, PaymentResult};
+use crate::{LightningError, LightningNode, NodeInfo, PaymentOutcome, PaymentResult};
 use async_trait::async_trait;
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::PublicKey;
-use lightning::events::PaymentFailureReason;
 use lightning::ln::{PaymentHash, PaymentPreimage};
 use std::collections::HashSet;
-use tonic_lnd::lnrpc::NodeInfoRequest;
 use tonic_lnd::lnrpc::{payment::PaymentStatus, GetInfoRequest, GetInfoResponse};
+use tonic_lnd::lnrpc::{NodeInfoRequest, PaymentFailureReason};
 use tonic_lnd::routerrpc::TrackPaymentRequest;
 use tonic_lnd::{routerrpc::SendPaymentRequest, Client};
 use triggered::Listener;
@@ -127,18 +126,28 @@ impl LightningNode for LndNode {
                 let payment = stream.map_err(|err| LightningError::TrackPaymentError(err.to_string()))?;
                 match payment {
                     Some(payment) => {
-                        let payment_status = PaymentStatus::from_i32(payment.status).unwrap();
+                        let payment_status = PaymentStatus::from_i32(payment.status)
+                            .ok_or(LightningError::TrackPaymentError("Invalid payment status".to_string()))?;
+                        let failure_reason = PaymentFailureReason::from_i32(payment.failure_reason)
+                            .ok_or(LightningError::TrackPaymentError("Invalid failure reason".to_string()))?;
+
+                        let payment_outcome = match payment_status {
+                            PaymentStatus::Succeeded => PaymentOutcome::Success,
+                            PaymentStatus::Failed => match failure_reason {
+                                PaymentFailureReason::FailureReasonTimeout => PaymentOutcome::PaymentExpired,
+                                PaymentFailureReason::FailureReasonNoRoute => PaymentOutcome::RouteNotFound,
+                                PaymentFailureReason::FailureReasonError => PaymentOutcome::UnexpectedError,
+                                PaymentFailureReason::FailureReasonIncorrectPaymentDetails => PaymentOutcome::IncorrectPaymentDetails,
+                                PaymentFailureReason::FailureReasonInsufficientBalance => PaymentOutcome::InsufficientBalance,
+                                // Payment status is Failed, but failure reason is None or unknown
+                                _ => return Err(LightningError::TrackPaymentError("Unexpected failure reason".to_string())),
+                            },
+                            // PaymentStatus::InFlight or PaymentStatus::Unknown
+                            _ => PaymentOutcome::Unknown,
+                        };
                         return Ok(PaymentResult {
-                            settled: payment_status == PaymentStatus::Succeeded || payment_status == PaymentStatus::Failed,
                             htlc_count: payment.htlcs.len(),
-                            failure_reason: match payment.failure_reason {
-                            1 => Some(PaymentFailureReason::PaymentExpired),
-                            2 => Some(PaymentFailureReason::RouteNotFound),
-                            3 => Some(PaymentFailureReason::UnexpectedError),
-                            4 => Some(PaymentFailureReason::UnexpectedError), // TODO: Capture failure reasons for incorrect payment
-                            5 => Some(PaymentFailureReason::UnexpectedError), // TODO: Capture failure reasons for insufficient balance
-                            _ => None,
-                        },
+                            payment_outcome
                         });
                     },
                     None => {
