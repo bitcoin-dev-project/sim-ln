@@ -11,6 +11,8 @@ jobs:
     name: Check code formatting
     runs-on: ubuntu-latest
     steps:
+      - name: Install protoc
+        run: sudo apt install -y protobuf-compiler
       - uses: actions/checkout@v3
       - uses: actions-rs/cargo@v1
         name: cargo fmt
@@ -27,6 +29,8 @@ jobs:
     name: Build and test
     runs-on: ubuntu-latest
     steps:
+      - name: Install protoc
+        run: sudo apt install -y protobuf-compiler
       - uses: actions/checkout@v3
       - uses: actions-rs/toolchain@v1
         with:
