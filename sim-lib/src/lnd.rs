@@ -6,14 +6,15 @@ use crate::{
 use async_trait::async_trait;
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::PublicKey;
+use lightning::ln::features::NodeFeatures;
 use lightning::ln::{PaymentHash, PaymentPreimage};
-use std::collections::HashSet;
 use tonic_lnd::lnrpc::{payment::PaymentStatus, GetInfoRequest, GetInfoResponse};
 use tonic_lnd::lnrpc::{NodeInfoRequest, PaymentFailureReason};
 use tonic_lnd::routerrpc::TrackPaymentRequest;
 use tonic_lnd::{routerrpc::SendPaymentRequest, Client};
 use triggered::Listener;
 
+const KEYSEND_OPTIONAL: u32 = 55;
 const KEYSEND_KEY: u64 = 5482373484;
 const SEND_PAYMENT_TIMEOUT_SECS: i32 = 300;
 
@@ -158,11 +159,10 @@ impl LightningNode for LndNode {
         }
     }
 
-    async fn get_node_announcement(&self, node: PublicKey) -> Result<HashSet<u32>, LightningError> {
-        let mut client = self.client.clone();
-        let lightning_client = client.lightning();
-
-        let node_info = lightning_client
+    async fn get_node_features(&mut self, node: PublicKey) -> Result<NodeFeatures, LightningError> {
+        let node_info = self
+            .client
+            .lightning()
             .get_node_info(NodeInfoRequest {
                 pub_key: node.to_string(),
                 include_channels: false,
@@ -171,11 +171,18 @@ impl LightningNode for LndNode {
             .map_err(|err| LightningError::GetNodeInfoError(err.to_string()))?
             .into_inner();
 
+        let mut nf = NodeFeatures::empty();
+
         if let Some(node_info) = node_info.node {
-            Ok(node_info.features.into_keys().collect())
+            // FIXME: We only care about the keysend feature now, but we should parse the whole feature vector
+            // into LDK's feature bitvector and properly construct NodeFeatures.
+            if node_info.features.contains_key(&KEYSEND_OPTIONAL) {
+                nf.set_keysend_optional()
+            }
+            Ok(nf)
         } else {
             Err(LightningError::GetNodeInfoError(
-                "node not found".to_string(),
+                "Node not found".to_string(),
             ))
         }
     }

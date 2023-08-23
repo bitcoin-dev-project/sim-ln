@@ -35,6 +35,7 @@ async fn main() -> anyhow::Result<()> {
     let mut clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>> = HashMap::new();
 
     for connection in nodes {
+        // TODO: We should simplify this into two minimal branches plus shared logging and inserting into the list
         match connection {
             NodeConnection::LND(c) => {
                 let node_id = c.id;
@@ -49,7 +50,16 @@ async fn main() -> anyhow::Result<()> {
                 clients.insert(node_id, Arc::new(Mutex::new(lnd)));
             }
             NodeConnection::CLN(c) => {
-                todo!();
+                let node_id = c.id;
+                let cln = ClnNode::new(c).await?;
+
+                log::info!(
+                    "Connected to {} - Node ID: {}",
+                    cln.get_info().alias,
+                    cln.get_info().pubkey
+                );
+
+                clients.insert(node_id, Arc::new(Mutex::new(cln)));
             }
         }
     }
