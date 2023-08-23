@@ -15,17 +15,35 @@ use tokio::time;
 use tokio::time::Duration;
 use triggered::{Listener, Trigger};
 
+pub mod cln;
 pub mod lnd;
 mod serializers;
 
 const KEYSEND_OPTIONAL: u32 = 55;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct NodeConnection {
+pub enum NodeConnection {
+    #[serde(alias = "lnd", alias = "Lnd")]
+    LND(LndConnection),
+    #[serde(alias = "cln", alias = "Cln")]
+    CLN(ClnConnection),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct LndConnection {
     pub id: PublicKey,
     pub address: String,
     pub macaroon: String,
     pub cert: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ClnConnection {
+    pub id: PublicKey,
+    pub address: String,
+    pub ca_cert: String,
+    pub client_cert: String,
+    pub client_key: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

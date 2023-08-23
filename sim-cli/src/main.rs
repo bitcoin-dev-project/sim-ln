@@ -6,7 +6,7 @@ use tokio::sync::Mutex;
 
 use clap::Parser;
 use log::LevelFilter;
-use sim_lib::{lnd::LndNode, Config, LightningNode, Simulation};
+use sim_lib::{cln::ClnNode, lnd::LndNode, Config, LightningNode, NodeConnection, Simulation};
 use simple_logger::SimpleLogger;
 
 #[derive(Parser)]
@@ -34,16 +34,24 @@ async fn main() -> anyhow::Result<()> {
 
     let mut clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>> = HashMap::new();
 
-    for node in nodes {
-        let lnd = LndNode::new(node.address, node.macaroon, node.cert).await?;
+    for connection in nodes {
+        match connection {
+            NodeConnection::LND(c) => {
+                let node_id = c.id;
+                let lnd = LndNode::new(c).await?;
 
-        log::info!(
-            "Connected to {} - Node ID: {}",
-            lnd.get_info().alias,
-            lnd.get_info().pubkey
-        );
+                log::info!(
+                    "Connected to {} - Node ID: {}",
+                    lnd.get_info().alias,
+                    lnd.get_info().pubkey
+                );
 
-        clients.insert(node.id, Arc::new(Mutex::new(lnd)));
+                clients.insert(node_id, Arc::new(Mutex::new(lnd)));
+            }
+            NodeConnection::CLN(c) => {
+                todo!();
+            }
+        }
     }
 
     let sim = Simulation::new(clients, activity, cli.total_time);

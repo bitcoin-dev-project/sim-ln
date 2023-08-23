@@ -1,6 +1,8 @@
 use std::{collections::HashMap, str::FromStr};
 
-use crate::{LightningError, LightningNode, NodeInfo, PaymentOutcome, PaymentResult};
+use crate::{
+    LightningError, LightningNode, LndConnection, NodeInfo, PaymentOutcome, PaymentResult,
+};
 use async_trait::async_trait;
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::PublicKey;
@@ -22,12 +24,8 @@ pub struct LndNode {
 }
 
 impl LndNode {
-    pub async fn new(
-        address: String,
-        macaroon: String,
-        cert: String,
-    ) -> Result<Self, LightningError> {
-        let mut client = tonic_lnd::connect(address, cert, macaroon)
+    pub async fn new(conn_data: LndConnection) -> Result<Self, LightningError> {
+        let mut client = tonic_lnd::connect(conn_data.address, conn_data.cert, conn_data.macaroon)
             .await
             .map_err(|err| LightningError::ConnectionError(err.to_string()))?;
 
