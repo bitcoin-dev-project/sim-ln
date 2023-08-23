@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use cln_grpc::pb::{
     node_client::NodeClient, Amount, GetinfoRequest, GetinfoResponse, KeysendRequest,
-    KeysendResponse,
+    KeysendResponse, ListnodesRequest, ListnodesResponse,
 };
 use lightning::ln::PaymentHash;
 use tokio::fs::File;
@@ -103,11 +103,41 @@ impl LightningNode for ClnNode {
         ))
     }
 
-    async fn get_node_announcement(
-        &mut self,
-        _node: PublicKey,
-    ) -> Result<HashSet<u32>, LightningError> {
-        // equivalent rpc for getting node announcement?
+    async fn get_node_features(&mut self, node: PublicKey) -> Result<HashSet<u32>, LightningError> {
+        let node_id = node.serialize().to_vec();
+        let ListnodesResponse { nodes } = self
+            .client
+            .list_nodes(ListnodesRequest {
+                id: Some(node_id.clone()),
+            })
+            .await
+            .map_err(|err| LightningError::GetNodeInfoError(err.to_string()))?
+            .into_inner();
+        if nodes.is_empty() {
+            return Err(LightningError::GetNodeInfoError(
+                "Node not found".to_string(),
+            ));
+        }
+
+        for node in nodes {
+            if node.nodeid == node_id {
+                match node.features {
+                    Some(features) => {
+                        // TODO: features need bitshifts for validation to work
+                        let featureset = features.iter().map(|&x| x as u32).collect();
+                        // println!(
+                        //     "node id : {} features: {:?}",
+                        //     PublicKey::from_slice(node_id.as_slice().try_into().unwrap()).unwrap(),
+                        //     featureset
+                        // );
+                        return Ok(featureset);
+                    }
+                    None => continue,
+                }
+            }
+        }
+
+        println!("Node not found");
         Ok(HashSet::new())
     }
 }

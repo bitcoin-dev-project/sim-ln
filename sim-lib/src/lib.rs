@@ -128,7 +128,7 @@ pub trait LightningNode {
     ) -> Result<PaymentResult, LightningError>;
     /// Looks up a node's announcement in the graph. This function currently only returns features, as they're all we
     /// need, but may be updated to include any other node announcement fields if required.
-    async fn get_node_announcement(
+    async fn get_node_features(
         &mut self,
         node: PublicKey,
     ) -> Result<HashSet<u32>, LightningError>;
@@ -238,7 +238,7 @@ impl Simulation {
             let features = source_node
                 .lock()
                 .await
-                .get_node_announcement(payment_flow.destination)
+                .get_node_features(payment_flow.destination)
                 .await
                 .map_err(|err| LightningError::GetNodeInfoError(err.to_string()))?;
 

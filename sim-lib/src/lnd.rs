@@ -152,7 +152,7 @@ impl LightningNode for LndNode {
         }
     }
 
-    async fn get_node_announcement(
+    async fn get_node_features(
         &mut self,
         node: PublicKey,
     ) -> Result<HashSet<u32>, LightningError> {
@@ -168,7 +168,9 @@ impl LightningNode for LndNode {
             .into_inner();
 
         if let Some(node_info) = node_info.node {
-            Ok(node_info.features.into_keys().collect())
+            let features = node_info.features.into_keys().collect();
+            // println!("node id : {} features: {:?}", node_info.pub_key, features);
+            Ok(features)
         } else {
             Err(LightningError::GetNodeInfoError(
                 "node not found".to_string(),
