@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use csv::WriterBuilder;
+use lightning::ln::features::NodeFeatures;
 use lightning::ln::PaymentHash;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -15,17 +16,33 @@ use tokio::time;
 use tokio::time::Duration;
 use triggered::{Listener, Trigger};
 
+pub mod cln;
 pub mod lnd;
 mod serializers;
 
-const KEYSEND_OPTIONAL: u32 = 55;
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum NodeConnection {
+    #[serde(alias = "lnd", alias = "Lnd")]
+    LND(LndConnection),
+    #[serde(alias = "cln", alias = "Cln")]
+    CLN(ClnConnection),
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct NodeConnection {
+pub struct LndConnection {
     pub id: PublicKey,
     pub address: String,
     pub macaroon: String,
     pub cert: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ClnConnection {
+    pub id: PublicKey,
+    pub address: String,
+    pub ca_cert: String,
+    pub client_cert: String,
+    pub client_key: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -104,9 +121,8 @@ pub trait LightningNode {
         hash: PaymentHash,
         shutdown: Listener,
     ) -> Result<PaymentResult, LightningError>;
-    /// Looks up a node's announcement in the graph. This function currently only returns features, as they're all we
-    /// need, but may be updated to include any other node announcement fields if required.
-    async fn get_node_announcement(&self, node: PublicKey) -> Result<HashSet<u32>, LightningError>;
+    /// Gets the list of features of a given node
+    async fn get_node_features(&mut self, node: PublicKey) -> Result<NodeFeatures, LightningError>;
 }
 
 #[derive(Clone, Copy)]
@@ -204,11 +220,11 @@ impl Simulation {
             let features = source_node
                 .lock()
                 .await
-                .get_node_announcement(payment_flow.destination)
+                .get_node_features(payment_flow.destination)
                 .await
                 .map_err(|err| LightningError::GetNodeInfoError(err.to_string()))?;
 
-            if !features.contains(&KEYSEND_OPTIONAL) {
+            if !features.supports_keysend() {
                 return Err(LightningError::ValidationError(format!(
                     "destination node does not support keysend {}",
                     payment_flow.destination,
