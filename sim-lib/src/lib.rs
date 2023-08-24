@@ -182,13 +182,18 @@ pub struct Simulation {
     shutdown_listener: Listener,
     // Total simulation time. The simulation will run forever if undefined.
     total_time: Option<time::Duration>,
+    /// The number of activity results to batch before printing in CSV.
+    print_batch_size: u32,
 }
+
+const DEFAULT_PRINT_BATCH_SIZE: u32 = 500;
 
 impl Simulation {
     pub fn new(
         nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>>,
         activity: Vec<ActivityDefinition>,
         total_time: Option<u32>,
+        print_batch_size: Option<u32>,
     ) -> Self {
         let (shutdown_trigger, shutdown_listener) = triggered::trigger();
         Self {
@@ -197,6 +202,7 @@ impl Simulation {
             shutdown_trigger,
             shutdown_listener,
             total_time: total_time.map(|x| Duration::from_secs(x as u64)),
+            print_batch_size: print_batch_size.unwrap_or(DEFAULT_PRINT_BATCH_SIZE),
         }
     }
 
@@ -305,6 +311,7 @@ impl Simulation {
         tasks: &mut JoinSet<()>,
     ) {
         let listener = self.shutdown_listener.clone();
+        let print_batch_size = self.print_batch_size;
         log::debug!("Simulator data recording starting.");
 
         // Create a sender/receiver pair that will be used to report final results of action outcomes.
@@ -317,7 +324,11 @@ impl Simulation {
             listener.clone(),
         ));
 
-        tasks.spawn(consume_simulation_results(results_receiver, listener));
+        tasks.spawn(consume_simulation_results(
+            results_receiver,
+            listener,
+            print_batch_size,
+        ));
         log::debug!("Simulator data recording exiting.");
     }
 
@@ -486,10 +497,11 @@ async fn produce_events(
 async fn consume_simulation_results(
     receiver: Receiver<(DispatchedPayment, PaymentResult)>,
     listener: Listener,
+    print_batch_size: u32,
 ) {
     log::debug!("Simulation results consumer started.");
 
-    if let Err(e) = write_payment_results(receiver, listener).await {
+    if let Err(e) = write_payment_results(receiver, listener, print_batch_size).await {
         log::error!("Error while reporting payment results: {:?}", e);
     }
 
@@ -499,6 +511,7 @@ async fn consume_simulation_results(
 async fn write_payment_results(
     mut receiver: Receiver<(DispatchedPayment, PaymentResult)>,
     listener: Listener,
+    print_batch_size: u32,
 ) -> Result<(), SimulationError> {
     let mut writer = WriterBuilder::new().from_path(format!(
         "simulation_{:?}.csv",
@@ -510,9 +523,7 @@ async fn write_payment_results(
 
     let mut result_logger = PaymentResultLogger::new();
 
-    let print_batch_size = 500;
     let mut counter = 1;
-
     loop {
         tokio::select! {
             biased;
