@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::{collections::HashMap, str::FromStr};
 
 use crate::{
@@ -14,7 +15,6 @@ use tonic_lnd::routerrpc::TrackPaymentRequest;
 use tonic_lnd::{routerrpc::SendPaymentRequest, Client};
 use triggered::Listener;
 
-const KEYSEND_OPTIONAL: u32 = 55;
 const KEYSEND_KEY: u64 = 5482373484;
 const SEND_PAYMENT_TIMEOUT_SECS: i32 = 300;
 
@@ -22,6 +22,24 @@ const SEND_PAYMENT_TIMEOUT_SECS: i32 = 300;
 pub struct LndNode {
     client: Client,
     info: NodeInfo,
+}
+
+// TODO: We could even generalize this to parse any type of Features
+/// Parses the node features from the format returned by LND gRPC to LDK NodeFeatures
+fn parse_node_features(features: HashSet<u32>) -> NodeFeatures {
+    let mut flags = vec![0; 256];
+
+    for f in features.into_iter() {
+        let byte_offset = (f / 8) as usize;
+        let mask = 1 << (f - 8 * byte_offset as u32);
+        if flags.len() <= byte_offset {
+            flags.resize(byte_offset + 1, 0u8);
+        }
+
+        flags[byte_offset] |= mask
+    }
+
+    NodeFeatures::from_le_bytes(flags)
 }
 
 impl LndNode {
@@ -47,7 +65,7 @@ impl LndNode {
             info: NodeInfo {
                 pubkey: PublicKey::from_str(&identity_pubkey)
                     .map_err(|err| LightningError::GetInfoError(err.to_string()))?,
-                features: features.keys().copied().collect(),
+                features: parse_node_features(features.keys().cloned().collect()),
                 alias,
             },
         })
@@ -171,15 +189,10 @@ impl LightningNode for LndNode {
             .map_err(|err| LightningError::GetNodeInfoError(err.to_string()))?
             .into_inner();
 
-        let mut nf = NodeFeatures::empty();
-
         if let Some(node_info) = node_info.node {
-            // FIXME: We only care about the keysend feature now, but we should parse the whole feature vector
-            // into LDK's feature bitvector and properly construct NodeFeatures.
-            if node_info.features.contains_key(&KEYSEND_OPTIONAL) {
-                nf.set_keysend_optional()
-            }
-            Ok(nf)
+            Ok(parse_node_features(
+                node_info.features.keys().cloned().collect(),
+            ))
         } else {
             Err(LightningError::GetNodeInfoError(
                 "Node not found".to_string(),

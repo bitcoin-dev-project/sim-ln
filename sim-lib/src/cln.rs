@@ -21,49 +21,60 @@ pub struct ClnNode {
 
 impl ClnNode {
     pub async fn new(connection: ClnConnection) -> Result<Self, LightningError> {
-        let ca_pem = reader(&connection.ca_cert).await.map_err(|_| {
-            LightningError::ConnectionError("Cannot loads CA certificate".to_string())
-        })?;
-        let client_pem = reader(&connection.client_cert).await.map_err(|_| {
-            LightningError::ConnectionError("Cannot loads client certificate".to_string())
-        })?;
-        let client_key = reader(&connection.client_key)
-            .await
-            .map_err(|_| LightningError::ConnectionError("Cannot loads client key".to_string()))?;
-
-        let ca = Certificate::from_pem(ca_pem);
-        let ident = Identity::from_pem(client_pem, client_key);
-
         let tls = ClientTlsConfig::new()
             .domain_name("cln")
-            .identity(ident)
-            .ca_certificate(ca);
+            .identity(Identity::from_pem(
+                reader(&connection.client_cert).await.map_err(|_| {
+                    LightningError::ConnectionError("Cannot loads client certificate".to_string())
+                })?,
+                reader(&connection.client_key).await.map_err(|_| {
+                    LightningError::ConnectionError("Cannot loads client key".to_string())
+                })?,
+            ))
+            .ca_certificate(Certificate::from_pem(
+                reader(&connection.ca_cert).await.map_err(|_| {
+                    LightningError::ConnectionError("Cannot loads CA certificate".to_string())
+                })?,
+            ));
 
-        let channel = Channel::from_shared(connection.address.to_string())
-            .map_err(|err| LightningError::ConnectionError(err.to_string()))?
-            .tls_config(tls)
-            .map_err(|_| {
-                LightningError::ConnectionError("Cannot establish tls connection".to_string())
-            })?
-            .connect()
-            .await
-            .map_err(|_| {
-                LightningError::ConnectionError("Cannot connect to gRPC server".to_string())
-            })?;
-        let mut client = NodeClient::new(channel);
+        let mut client = NodeClient::new(
+            Channel::from_shared(connection.address.to_string())
+                .map_err(|err| LightningError::ConnectionError(err.to_string()))?
+                .tls_config(tls)
+                .map_err(|_| {
+                    LightningError::ConnectionError("Cannot establish tls connection".to_string())
+                })?
+                .connect()
+                .await
+                .map_err(|_| {
+                    LightningError::ConnectionError("Cannot connect to gRPC server".to_string())
+                })?,
+        );
 
-        let GetinfoResponse { id, alias, .. } = client
+        let GetinfoResponse {
+            id,
+            alias,
+            our_features,
+            ..
+        } = client
             .getinfo(GetinfoRequest {})
             .await
             .map_err(|err| LightningError::GetInfoError(err.to_string()))?
             .into_inner();
+
+        //FIXME: our_features is returning None, but it should not :S
+        let features = if let Some(features) = our_features {
+            NodeFeatures::from_le_bytes(features.node)
+        } else {
+            NodeFeatures::empty()
+        };
 
         Ok(Self {
             client,
             info: NodeInfo {
                 pubkey: PublicKey::from_slice(&id)
                     .map_err(|err| LightningError::GetInfoError(err.to_string()))?,
-                features: vec![],
+                features,
                 alias,
             },
         })
