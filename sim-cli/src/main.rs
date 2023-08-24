@@ -16,18 +16,34 @@ struct Cli {
     config: PathBuf,
     #[clap(long, short)]
     total_time: Option<u32>,
+    #[clap(long, short)]
+    debug: bool,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+
     SimpleLogger::new()
         .with_level(LevelFilter::Warn)
-        .with_module_level("sim_lib", LevelFilter::Info)
-        .with_module_level("sim_cli", LevelFilter::Debug)
+        .with_module_level(
+            "sim_lib",
+            if cli.debug {
+                LevelFilter::Debug
+            } else {
+                LevelFilter::Info
+            },
+        )
+        .with_module_level(
+            "sim_cli",
+            if cli.debug {
+                LevelFilter::Debug
+            } else {
+                LevelFilter::Info
+            },
+        )
         .init()
         .unwrap();
-
-    let cli = Cli::parse();
 
     let config_str = std::fs::read_to_string(cli.config)?;
     let Config { nodes, activity } = serde_json::from_str(&config_str)?;

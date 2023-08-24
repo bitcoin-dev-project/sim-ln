@@ -490,11 +490,8 @@ async fn consume_simulation_results(
 ) {
     log::debug!("Simulation results consumer started.");
 
-    match write_payment_results(receiver, listener).await {
-        Ok(_) => {
-            log::debug!("Simulation results ok but exiting!!!");
-        }
-        Err(e) => log::error!("Error while reporting payment results: {:?}", e),
+    if let Err(e) = write_payment_results(receiver, listener).await {
+        log::error!("Error while reporting payment results: {:?}", e);
     }
 
     log::debug!("Simulation results consumer exiting");
@@ -659,7 +656,10 @@ async fn track_outcome(
                         log::debug!("Could not send payment result for {:?}.", payment.hash);
                     }
                 }
-                Err(e) => log::error!("Track payment failed for {:?}: {e}", payment.hash),
+                Err(e) => log::error!(
+                    "Track payment failed for {}: {e}",
+                    hex::encode(payment.hash.0)
+                ),
             }
         }
     }
