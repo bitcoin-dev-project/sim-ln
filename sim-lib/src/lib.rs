@@ -6,7 +6,6 @@ use lightning::ln::PaymentHash;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::marker::Send;
-use std::mem::size_of;
 use std::{collections::HashMap, sync::Arc, time::SystemTime};
 use thiserror::Error;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
@@ -501,17 +500,18 @@ async fn write_payment_results(
     mut receiver: Receiver<(DispatchedPayment, PaymentResult)>,
     listener: Listener,
 ) -> Result<(), SimulationError> {
-    let mut writer = WriterBuilder::new()
-        .buffer_capacity(size_of::<(DispatchedPayment, PaymentResult)>() * 5)
-        .from_path(format!(
-            "simulation_{:?}.csv",
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_secs()
-        ))?;
+    let mut writer = WriterBuilder::new().from_path(format!(
+        "simulation_{:?}.csv",
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    ))?;
 
     let mut result_logger = PaymentResultLogger::new();
+
+    let print_batch_size = 500;
+    let mut counter = 1;
 
     loop {
         tokio::select! {
@@ -530,6 +530,13 @@ async fn write_payment_results(
                             let _ = writer.flush();
                             SimulationError::CsvError(e)
                         })?;
+
+                        if print_batch_size == counter {
+                            writer.flush().map_err(|_| SimulationError::FileError)?;
+                            counter = 1;
+                        } else {
+                            counter += 1;
+                        }
                         continue;
                     },
                     None => {
