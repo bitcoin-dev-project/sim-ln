@@ -194,8 +194,8 @@ impl Display for DispatchedPayment {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-enum ActionOutcome {
+/// SimulationOutput provides the output of a simulation event.
+enum SimulationOutput {
     // The payment hash that results from a SendPayment SimulationEvent being triggered.
     PaymentSent(DispatchedPayment),
 }
@@ -336,7 +336,7 @@ impl Simulation {
     // it generates. The simulation should report actions via the receiver that is passed in.
     fn run_data_collection(
         &self,
-        action_receiver: Receiver<ActionOutcome>,
+        action_receiver: Receiver<SimulationOutput>,
         tasks: &mut JoinSet<()>,
     ) {
         let listener = self.shutdown_listener.clone();
@@ -363,7 +363,7 @@ impl Simulation {
 
     async fn generate_activity(
         &self,
-        executed_actions: Sender<ActionOutcome>,
+        executed_actions: Sender<SimulationOutput>,
         tasks: &mut JoinSet<()>,
     ) -> Result<(), SimulationError> {
         let shutdown = self.shutdown_trigger.clone();
@@ -420,7 +420,7 @@ impl Simulation {
 async fn consume_events(
     node: Arc<Mutex<dyn LightningNode + Send>>,
     mut receiver: Receiver<SimulationEvent>,
-    sender: Sender<ActionOutcome>,
+    sender: Sender<SimulationOutput>,
 ) {
     let node_id = node.lock().await.get_info().pubkey;
     log::debug!("Started consumer for {}.", node_id);
@@ -441,7 +441,7 @@ async fn consume_events(
                         );
 
                         log::debug!("Sending action for {}.", hex::encode(payment_hash.0));
-                        let outcome = ActionOutcome::PaymentSent(DispatchedPayment {
+                        let outcome = SimulationOutput::PaymentSent(DispatchedPayment {
                             source: node.get_info().pubkey,
                             hash: payment_hash,
                             amount_msat: amt_msat,
@@ -640,7 +640,7 @@ impl PaymentResultLogger {
 /// consumer will not exit and a trigger is required.
 async fn produce_simulation_results(
     nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>>,
-    mut outcomes: Receiver<ActionOutcome>,
+    mut outcomes: Receiver<SimulationOutput>,
     results: Sender<(DispatchedPayment, PaymentResult)>,
     shutdown: Listener,
 ) {
@@ -656,7 +656,7 @@ async fn produce_simulation_results(
                 match outcome{
                     Some(action_outcome) => {
                         match action_outcome{
-                            ActionOutcome::PaymentSent(dispatched_payment) => {
+                            SimulationOutput::PaymentSent(dispatched_payment) => {
                                 let source_node = nodes.get(&dispatched_payment.source).unwrap().clone();
 
                                 log::debug!("Tracking payment outcome for: {}.", hex::encode(dispatched_payment.hash.0));
@@ -686,7 +686,7 @@ async fn produce_simulation_results(
 async fn track_outcome(
     node: Arc<Mutex<dyn LightningNode + Send>>,
     results: Sender<(DispatchedPayment, PaymentResult)>,
-    outcome: ActionOutcome,
+    outcome: SimulationOutput,
     shutdown: Listener,
 ) {
     log::trace!("Outcome tracker starting.");
@@ -694,7 +694,7 @@ async fn track_outcome(
     let mut node = node.lock().await;
 
     match outcome {
-        ActionOutcome::PaymentSent(payment) => {
+        SimulationOutput::PaymentSent(payment) => {
             let track_payment = node.track_payment(payment.hash, shutdown.clone());
 
             match track_payment.await {
