@@ -131,8 +131,10 @@ pub trait LightningNode {
     async fn get_node_features(&mut self, node: PublicKey) -> Result<NodeFeatures, LightningError>;
 }
 
+/// SimulationEvent describes the set of actions that the simulator can run on nodes that it has execution permissions 
+/// on.
 #[derive(Clone, Copy)]
-enum NodeAction {
+enum SimulationEvent {
     // Dispatch a payment of the specified amount to the public key provided.
     SendPayment(PublicKey, u64),
 }
@@ -194,7 +196,7 @@ impl Display for DispatchedPayment {
 
 #[derive(Debug, Clone, Copy)]
 enum ActionOutcome {
-    // The payment hash that results from a SendPayment NodeAction being triggered.
+    // The payment hash that results from a SendPayment SimulationEvent being triggered.
     PaymentSent(DispatchedPayment),
 }
 
@@ -417,7 +419,7 @@ impl Simulation {
 // exit.
 async fn consume_events(
     node: Arc<Mutex<dyn LightningNode + Send>>,
-    mut receiver: Receiver<NodeAction>,
+    mut receiver: Receiver<SimulationEvent>,
     sender: Sender<ActionOutcome>,
 ) {
     let node_id = node.lock().await.get_info().pubkey;
@@ -425,7 +427,7 @@ async fn consume_events(
 
     while let Some(action) = receiver.recv().await {
         match action {
-            NodeAction::SendPayment(dest, amt_msat) => {
+            SimulationEvent::SendPayment(dest, amt_msat) => {
                 let mut node = node.lock().await;
                 let payment = node.send_payment(dest, amt_msat);
 
@@ -474,11 +476,11 @@ async fn consume_events(
 // exit if other threads signal that they have errored out.
 async fn produce_events(
     act: ActivityDefinition,
-    sender: Sender<NodeAction>,
+    sender: Sender<SimulationEvent>,
     shutdown: Trigger,
     listener: Listener,
 ) {
-    let e: NodeAction = NodeAction::SendPayment(act.destination, act.amount_msat);
+    let e: SimulationEvent = SimulationEvent::SendPayment(act.destination, act.amount_msat);
     let interval = time::Duration::from_secs(act.interval as u64);
 
     log::debug!(
