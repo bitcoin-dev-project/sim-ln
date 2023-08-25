@@ -17,7 +17,7 @@ struct Cli {
     #[clap(long, short)]
     total_time: Option<u32>,
     #[clap(long, short)]
-    debug: bool,
+    log_level: LevelFilter,
 }
 
 #[tokio::main]
@@ -26,22 +26,8 @@ async fn main() -> anyhow::Result<()> {
 
     SimpleLogger::new()
         .with_level(LevelFilter::Warn)
-        .with_module_level(
-            "sim_lib",
-            if cli.debug {
-                LevelFilter::Debug
-            } else {
-                LevelFilter::Info
-            },
-        )
-        .with_module_level(
-            "sim_cli",
-            if cli.debug {
-                LevelFilter::Debug
-            } else {
-                LevelFilter::Info
-            },
-        )
+        .with_module_level("sim_lib", cli.log_level)
+        .with_module_level("sim_cli", cli.log_level)
         .init()
         .unwrap();
 
