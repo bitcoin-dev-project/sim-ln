@@ -16,6 +16,9 @@ struct Cli {
     config: PathBuf,
     #[clap(long, short)]
     total_time: Option<u32>,
+    /// Number of activity results to batch together before printing to csv file
+    #[clap(long, short)]
+    print_batch_size: Option<u32>,
     #[clap(long, short)]
     log_level: LevelFilter,
 }
@@ -66,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let sim = Simulation::new(clients, activity, cli.total_time);
+    let sim = Simulation::new(clients, activity, cli.total_time, cli.print_batch_size);
     let sim2 = sim.clone();
 
     ctrlc::set_handler(move || {
