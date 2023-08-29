@@ -32,36 +32,58 @@ json:
   like to generate.
 
 The example config below sets up the following simulation:
-* Connect to a single node `Alice` to generate activity.
+* Connect to `Alice` running LND to generate activity.
+* Connect to `Bob` running CLN to generate activity.
 * Dispatch 100 msat payments from `Alice` to `Carol` every 10 seconds.
-* Dispatch 100000 msat payments from `Alice` to `Eve` every 5 minutes.
+* Dispatch 100000 msat payments from `Bob` to `Alice` every 5 minutes.
+* Dispatch 1000 msat payments from `Bob` to `Dave` every 2 seconds.
 ```
 {
-    "nodes": [ 
+  "nodes": [
     {
-        // Alice
+      "LND": {
         "id": "0257956239efc55dd6be91eff40c47749314ccf79cb15f79e30ca12f8622b6de9e",
         "address": "https://localhost:10011",
         "macaroon": "/path/admin.macaroon",
         "cert": "/path/tls.cert"
-    }],
-    "activity": [ 
-    {
-        // Alice -> Carol
-        "source": "0257956239efc55dd6be91eff40c47749314ccf79cb15f79e30ca12f8622b6de9e",
-        "destination": "02d804ad31429c8cc29e20ec43b4129553eb97623801e534ab5a66cdcd2149dbed",
-        "interval_secs": 10,
-        "amount_msat": 100
+      }
     },
-	{
-        // Alice -> Eve
-        "source": "0257956239efc55dd6be91eff40c47749314ccf79cb15f79e30ca12f8622b6de9e",
-        "destination": "03232e245059a2e7f6e32d6c4bca97fc4cda935c553ea3693adb3265a19050c3bf",
-        "interval_secs": 300,
-        "amount_msat": 100000
-    }]
+    {
+      "CLN": {
+        "id": "0230a16a05c5ca120136b3a770a2adfdad88a68d526e63448a9eef88bddd6a30d8",
+        "address": "https://localhost:10013",
+        "ca_cert": "/path/client.cert",
+        "client_cert": "/path/client.cert",
+        "client_key": "/path/client.key"
+      }
+    }
+  ],
+  "activity": [
+    {
+      "source": "0257956239efc55dd6be91eff40c47749314ccf79cb15f79e30ca12f8622b6de9e",
+      "destination": "02d804ad31429c8cc29e20ec43b4129553eb97623801e534ab5a66cdcd2149dbed",
+      "interval_secs": 1,
+      "amount_msat": 2000
+    },
+    {
+      "source": "0230a16a05c5ca120136b3a770a2adfdad88a68d526e63448a9eef88bddd6a30d8",
+      "destination": "0257956239efc55dd6be91eff40c47749314ccf79cb15f79e30ca12f8622b6de9e",
+      "interval_secs": 50,
+      "amount_msat": 140000
+    },
+    {
+      "source": "0230a16a05c5ca120136b3a770a2adfdad88a68d526e63448a9eef88bddd6a30d8",
+      "destination": "03232e245059a2e7f6e32d6c4bca97fc4cda935c553ea3693adb3265a19050c3bf",
+      "interval_secs": 2,
+      "amount_msat": 1000
+    }
+  ]
 }
 ```
+
+Note that you do not need to have execution permissions on the destination 
+nodes for keysend payments. This allows execution in environments such as 
+signets, where not every node is under your control.
 
 ## Getting Started
 Clone the repo: 
