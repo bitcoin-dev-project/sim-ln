@@ -20,8 +20,14 @@ on. You will need:
 * Access to execute commands on _at least_ one node in the network.
 * Rust compiler [installed](https://www.rust-lang.org/tools/install).
 
-This tool currently only supports LND nodes, but [will support](https://github.com/bitcoin-dev-project/sim-ln/issues/26)
-all major implementations in future versions.
+## LN Implementation Support
+* LND ✅ 
+* CLN ✅ 
+* Eclair 🏗️
+* LDK-node 🏗️
+
+See our [tracking issue](https://github.com/bitcoin-dev-project/sim-ln/issues/26)
+for updates on implementation support (contributions welcome!).
 
 ## Configuration
 The simulator is configured with two sets of information expressed in 
