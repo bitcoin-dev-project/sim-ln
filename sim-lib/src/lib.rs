@@ -674,6 +674,11 @@ async fn track_outcome(
 
             match track_payment.await {
                 Ok(res) => {
+                    log::debug!(
+                        "Track payment {} result: {:?}",
+                        hex::encode(payment.hash.0),
+                        res.payment_outcome
+                    );
                     if results.clone().send((payment, res)).await.is_err() {
                         log::debug!("Could not send payment result for {:?}.", payment.hash);
                     }
