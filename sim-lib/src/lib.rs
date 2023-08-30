@@ -100,7 +100,7 @@ pub enum LightningError {
 pub struct NodeInfo {
     pub pubkey: PublicKey,
     pub alias: String,
-    pub features: Vec<u32>,
+    pub features: NodeFeatures,
 }
 
 /// LightningNode represents the functionality that is required to execute events on a lightning node.
