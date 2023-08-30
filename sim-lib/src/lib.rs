@@ -680,7 +680,10 @@ async fn track_outcome(
                         res.payment_outcome
                     );
                     if results.clone().send((payment, res)).await.is_err() {
-                        log::debug!("Could not send payment result for {:?}.", payment.hash);
+                        log::debug!(
+                            "Could not send payment result for {}.",
+                            hex::encode(payment.hash.0)
+                        );
                     }
                 }
                 Err(e) => log::error!(
