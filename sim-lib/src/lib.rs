@@ -316,7 +316,7 @@ impl Simulation {
     ) {
         let listener = self.shutdown_listener.clone();
         let print_batch_size = self.print_batch_size;
-        log::debug!("Simulator data recording starting.");
+        log::debug!("Setting up simulator data collection.");
 
         // Create a sender/receiver pair that will be used to report final results of action outcomes.
         let (results_sender, results_receiver) = channel(1);
@@ -333,7 +333,7 @@ impl Simulation {
             listener,
             print_batch_size,
         ));
-        log::debug!("Simulator data recording exiting.");
+        log::debug!("Simulator data collection set up.");
     }
 
     async fn generate_activity(
