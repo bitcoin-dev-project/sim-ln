@@ -47,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
                 let lnd = LndNode::new(c).await?;
 
                 log::info!(
-                    "Connected to {} - Node ID: {}",
+                    "Connected to {} - Node ID: {}.",
                     lnd.get_info().alias,
                     lnd.get_info().pubkey
                 );
@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
                 let cln = ClnNode::new(c).await?;
 
                 log::info!(
-                    "Connected to {} - Node ID: {}",
+                    "Connected to {} - Node ID: {}.",
                     cln.get_info().alias,
                     cln.get_info().pubkey
                 );
@@ -73,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
     let sim2 = sim.clone();
 
     ctrlc::set_handler(move || {
-        log::info!("Shutting down simulation...");
+        log::info!("Shutting down simulation.");
         sim2.shutdown();
     })?;
 

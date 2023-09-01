@@ -246,15 +246,15 @@ impl Simulation {
 
     pub async fn run(&self) -> Result<(), SimulationError> {
         if let Some(total_time) = self.total_time {
-            log::info!("Running the simulation for {}s", total_time.as_secs());
+            log::info!("Running the simulation for {}s.", total_time.as_secs());
         } else {
-            log::info!("Running the simulation forever");
+            log::info!("Running the simulation forever.");
         }
 
         self.validate_activity().await?;
 
         log::info!(
-            "Simulating {} activity on {} nodes",
+            "Simulating {} activity on {} nodes.",
             self.activity.len(),
             self.nodes.len()
         );
@@ -281,7 +281,7 @@ impl Simulation {
             tasks.spawn(async move {
                 if time::timeout(total_time, l).await.is_err() {
                     log::info!(
-                        "Simulation run for {}s. Shutting down",
+                        "Simulation run for {}s. Shutting down.",
                         total_time.as_secs()
                     );
                     t.trigger()
@@ -295,7 +295,7 @@ impl Simulation {
         let mut success = true;
         while let Some(res) = tasks.join_next().await {
             if let Err(e) = res {
-                log::error!("Task exited with error: {e}");
+                log::error!("Task exited with error: {e}.");
                 success = false;
             }
         }
@@ -398,7 +398,7 @@ async fn consume_events(
     sender: Sender<ActionOutcome>,
 ) {
     let node_id = node.lock().await.get_info().pubkey;
-    log::debug!("Started consumer for {}", node_id);
+    log::debug!("Started consumer for {}.", node_id);
 
     while let Some(action) = receiver.recv().await {
         match action {
@@ -409,13 +409,13 @@ async fn consume_events(
                 match payment.await {
                     Ok(payment_hash) => {
                         log::debug!(
-                            "Send payment: {} -> {}: ({})",
+                            "Send payment: {} -> {}: ({}).",
                             node_id,
                             dest,
                             hex::encode(payment_hash.0)
                         );
 
-                        log::debug!("Sending action for {}", hex::encode(payment_hash.0));
+                        log::debug!("Sending action for {}.", hex::encode(payment_hash.0));
                         let outcome = ActionOutcome::PaymentSent(DispatchedPayment {
                             source: node.get_info().pubkey,
                             hash: payment_hash,
@@ -427,14 +427,14 @@ async fn consume_events(
                         match sender.send(outcome).await {
                             Ok(_) => {}
                             Err(e) => {
-                                log::error!("Error sending action outcome: {:?}", e);
+                                log::error!("Error sending action outcome: {:?}.", e);
                                 break;
                             }
                         }
                     }
                     Err(e) => {
                         log::error!(
-                            "Error while sending payment {} -> {}. Terminating consumer. {}",
+                            "Error while sending payment {} -> {}. Terminating consumer. {}.",
                             node_id,
                             dest,
                             e
@@ -459,7 +459,7 @@ async fn produce_events(
     let interval = time::Duration::from_secs(act.interval as u64);
 
     log::debug!(
-        "Started producer for {} every {}s: {} -> {}",
+        "Started producer for {} every {}s: {} -> {}.",
         act.amount_msat,
         act.interval,
         act.source,
@@ -473,7 +473,7 @@ async fn produce_events(
             // Consumer was dropped
             if sender.send(e).await.is_err() {
                 log::debug!(
-                    "Stopped producer for {}: {} -> {}. Consumer cannot be reached",
+                    "Stopped producer for {}: {} -> {}. Consumer cannot be reached.",
                     act.amount_msat,
                     act.source,
                     act.destination
@@ -484,7 +484,7 @@ async fn produce_events(
         _ = listener.clone() => {
             // Shutdown was signaled
             log::debug!(
-                    "Stopped producer for {}: {} -> {}. Received shutdown signal",
+                    "Stopped producer for {}: {} -> {}. Received shutdown signal.",
                     act.amount_msat,
                     act.source,
                     act.destination
@@ -506,10 +506,10 @@ async fn consume_simulation_results(
     log::debug!("Simulation results consumer started.");
 
     if let Err(e) = write_payment_results(receiver, listener, print_batch_size).await {
-        log::error!("Error while reporting payment results: {:?}", e);
+        log::error!("Error while reporting payment results: {:?}.", e);
     }
 
-    log::debug!("Simulation results consumer exiting");
+    log::debug!("Simulation results consumer exiting.");
 }
 
 async fn write_payment_results(
@@ -539,7 +539,7 @@ async fn write_payment_results(
                 match payment_report {
                     Some((details, result)) => {
                         result_logger.report_result(&details, &result);
-                        log::trace!("Resolved payment received: ({:?}, {:?})", details, result);
+                        log::trace!("Resolved payment received: ({:?}, {:?}).", details, result);
 
                         writer.serialize((details, result)).map_err(|e| {
                             let _ = writer.flush();
@@ -595,7 +595,7 @@ impl PaymentResultLogger {
         if self.call_count % self.log_interval == 0 || self.call_count == 0 {
             let total_payments = self.success_payment + self.failed_payment;
             log::info!(
-                "Processed {} payments sending {} msat total with {}% success rate",
+                "Processed {} payments sending {} msat total with {}% success rate.",
                 total_payments,
                 self.total_sent,
                 (self.success_payment * 100 / total_payments)
@@ -634,7 +634,7 @@ async fn produce_simulation_results(
                             ActionOutcome::PaymentSent(dispatched_payment) => {
                                 let source_node = nodes.get(&dispatched_payment.source).unwrap().clone();
 
-                                log::debug!("Tracking payment outcome for: {}", hex::encode(dispatched_payment.hash.0));
+                                log::debug!("Tracking payment outcome for: {}.", hex::encode(dispatched_payment.hash.0));
                                 set.spawn(track_outcome(
                                     source_node,results.clone(),action_outcome, shutdown.clone(),
                                 ));
@@ -653,7 +653,7 @@ async fn produce_simulation_results(
     log::debug!("Simulation results producer exiting.");
     while let Some(res) = set.join_next().await {
         if let Err(e) = res {
-            log::error!("Simulation results producer task exited with error: {e}");
+            log::error!("Simulation results producer task exited with error: {e}.");
         }
     }
 }
@@ -675,7 +675,7 @@ async fn track_outcome(
             match track_payment.await {
                 Ok(res) => {
                     log::debug!(
-                        "Track payment {} result: {:?}",
+                        "Track payment {} result: {:?}.",
                         hex::encode(payment.hash.0),
                         res.payment_outcome
                     );
@@ -687,7 +687,7 @@ async fn track_outcome(
                     }
                 }
                 Err(e) => log::error!(
-                    "Track payment failed for {}: {e}",
+                    "Track payment failed for {}: {e}.",
                     hex::encode(payment.hash.0)
                 ),
             }
