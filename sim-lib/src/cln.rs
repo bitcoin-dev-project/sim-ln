@@ -79,7 +79,7 @@ impl ClnNode {
                 pubkey: PublicKey::from_slice(&id)
                     .map_err(|err| LightningError::GetInfoError(err.to_string()))?,
                 features,
-                alias,
+                alias: alias.unwrap_or("".to_string()),
             },
         })
     }
