@@ -1,18 +1,22 @@
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use cln_grpc::pb::{
-    node_client::NodeClient, Amount, GetinfoRequest, GetinfoResponse, KeysendRequest,
-    KeysendResponse, ListnodesRequest,
+    listpays_pays::ListpaysPaysStatus, node_client::NodeClient, Amount, GetinfoRequest,
+    GetinfoResponse, KeysendRequest, KeysendResponse, ListnodesRequest, ListpaysRequest,
+    ListpaysResponse,
 };
 use lightning::ln::features::NodeFeatures;
 use lightning::ln::PaymentHash;
 
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, Error};
+use tokio::time::{self, Duration};
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 use triggered::Listener;
 
-use crate::{ClnConnection, LightningError, LightningNode, NodeInfo, PaymentResult};
+use crate::{
+    ClnConnection, LightningError, LightningNode, NodeInfo, PaymentOutcome, PaymentResult,
+};
 
 pub struct ClnNode {
     pub client: NodeClient<Channel>,
@@ -112,10 +116,45 @@ impl LightningNode for ClnNode {
 
     async fn track_payment(
         &mut self,
-        _hash: PaymentHash,
-        _shutdown: Listener,
+        hash: PaymentHash,
+        shutdown: Listener,
     ) -> Result<PaymentResult, LightningError> {
-        unimplemented!()
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown.clone() => {
+                    return Err(LightningError::TrackPaymentError("Shutdown before tracking results".to_string()));
+                },
+                _ = time::sleep(Duration::from_millis(500)) => {
+                    let ListpaysResponse { pays } = self
+                        .client
+                        .list_pays(ListpaysRequest {
+                            payment_hash: Some(hash.0.to_vec()),
+                            ..Default::default()
+                        })
+                        .await
+                        .map_err(|err| LightningError::TrackPaymentError(err.to_string()))?
+                        .into_inner();
+
+                    if let Some(pay) = pays.first() {
+                        let payment_status = ListpaysPaysStatus::from_i32(pay.status)
+                            .ok_or(LightningError::TrackPaymentError("Invalid payment status".to_string()))?;
+
+                        let payment_outcome = match payment_status {
+                            ListpaysPaysStatus::Pending => continue,
+                            ListpaysPaysStatus::Complete => PaymentOutcome::Success,
+                            // Task: https://github.com/bitcoin-dev-project/sim-ln/issues/26#issuecomment-1691780018
+                            ListpaysPaysStatus::Failed => PaymentOutcome::UnexpectedError,
+                        };
+                        let htlc_count = pay.number_of_parts.unwrap_or(1).try_into().map_err(|_| LightningError::TrackPaymentError("Invalid number of parts".to_string()))?;
+                        return Ok(PaymentResult {
+                            htlc_count,
+                            payment_outcome,
+                        });
+                    }
+                },
+            }
+        }
     }
 
     async fn get_node_features(&mut self, node: PublicKey) -> Result<NodeFeatures, LightningError> {
