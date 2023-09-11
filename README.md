@@ -105,7 +105,7 @@ cargo install --path sim-cli/
 
 Run Simulation with Config: 
 ```
-sim-cli --config config.json
+sim-cli --log-level debug --config config.json
 ```
 
 A summary of the results will be logged by the simulator, and a full 
