@@ -105,13 +105,13 @@ cargo install --path sim-cli/
 
 Run Simulation with Config: 
 ```
-sim-cli --log-level debug --config config.json
+sim-cli --config config.json
 ```
 
 A summary of the results will be logged by the simulator, and a full 
 list of payments made with their outcomes is available in 
 `simulation_{timestamp}.csv` in the directory that the simulation was 
-executed in.
+executed in. For more detailed logs, use the `--log-level` cli flag.
 
 ## Lightning Environments
 If you're looking to get started with local lightning development, we
