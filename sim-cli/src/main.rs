@@ -19,7 +19,7 @@ struct Cli {
     /// Number of activity results to batch together before printing to csv file
     #[clap(long, short)]
     print_batch_size: Option<u32>,
-    #[clap(long, short)]
+    #[clap(long, short, default_value = "info")]
     log_level: LevelFilter,
 }
 
