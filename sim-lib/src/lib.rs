@@ -31,7 +31,9 @@ pub enum NodeConnection {
 pub struct LndConnection {
     pub id: PublicKey,
     pub address: String,
+    #[serde(deserialize_with = "serializers::deserialize_path")]
     pub macaroon: String,
+    #[serde(deserialize_with = "serializers::deserialize_path")]
     pub cert: String,
 }
 
@@ -39,8 +41,11 @@ pub struct LndConnection {
 pub struct ClnConnection {
     pub id: PublicKey,
     pub address: String,
+    #[serde(deserialize_with = "serializers::deserialize_path")]
     pub ca_cert: String,
+    #[serde(deserialize_with = "serializers::deserialize_path")]
     pub client_cert: String,
+    #[serde(deserialize_with = "serializers::deserialize_path")]
     pub client_key: String,
 }
 
