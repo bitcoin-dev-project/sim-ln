@@ -151,7 +151,6 @@ pub enum PaymentOutcome {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[allow(dead_code)]
 struct DispatchedPayment {
     source: PublicKey,
     destination: PublicKey,

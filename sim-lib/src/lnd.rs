@@ -18,7 +18,6 @@ use triggered::Listener;
 const KEYSEND_KEY: u64 = 5482373484;
 const SEND_PAYMENT_TIMEOUT_SECS: i32 = 300;
 
-#[allow(dead_code)]
 pub struct LndNode {
     client: Client,
     info: NodeInfo,
