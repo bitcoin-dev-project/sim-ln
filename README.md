@@ -40,8 +40,8 @@ json:
 The example config below sets up the following simulation:
 * Connect to `Alice` running LND to generate activity.
 * Connect to `Bob` running CLN to generate activity.
-* Dispatch 100 msat payments from `Alice` to `Carol` every 10 seconds.
-* Dispatch 100000 msat payments from `Bob` to `Alice` every 5 minutes.
+* Dispatch 2000 msat payments from `Alice` to `Carol` every 1 seconds.
+* Dispatch 140000 msat payments from `Bob` to `Alice` every 50 seconds.
 * Dispatch 1000 msat payments from `Bob` to `Dave` every 2 seconds.
 ```
 {
@@ -58,9 +58,9 @@ The example config below sets up the following simulation:
       "CLN": {
         "id": "0230a16a05c5ca120136b3a770a2adfdad88a68d526e63448a9eef88bddd6a30d8",
         "address": "https://localhost:10013",
-        "ca_cert": "/path/client.cert",
-        "client_cert": "/path/client.cert",
-        "client_key": "/path/client.key"
+        "ca_cert": "/path/ca.pem",
+        "client_cert": "/path/client.pem",
+        "client_key": "/path/client-key.pem"
       }
     }
   ],
