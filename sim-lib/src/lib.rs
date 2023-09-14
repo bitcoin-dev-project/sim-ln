@@ -565,7 +565,7 @@ async fn write_payment_results(
                 match payment_report {
                     Some((details, result)) => {
                         result_logger.report_result(&details, &result);
-                        log::trace!("Resolved payment received: ({:?}, {:?}).", details, result);
+                        log::trace!("Resolved dispatched payment: {} with: {}.", details, result);
 
                         writer.serialize((details, result)).map_err(|e| {
                             let _ = writer.flush();
