@@ -171,10 +171,7 @@ pub enum PaymentOutcome {
 struct DispatchedPayment {
     source: PublicKey,
     destination: PublicKey,
-    #[serde(
-        serialize_with = "serializers::serialize_payment_hash",
-        deserialize_with = "serializers::deserialize_payment_hash"
-    )]
+    #[serde(with = "serializers::serde_payment_hash")]
     hash: PaymentHash,
     amount_msat: u64,
     #[serde(with = "serde_millis")]
