@@ -143,6 +143,16 @@ pub struct PaymentResult {
     pub payment_outcome: PaymentOutcome,
 }
 
+impl Display for PaymentResult {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Payment outcome: {:?} with {} htlcs",
+            self.payment_outcome, self.htlc_count
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PaymentOutcome {
     Success,
