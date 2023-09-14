@@ -1,3 +1,4 @@
+use expanduser::expanduser;
 use lightning::ln::PaymentHash;
 use serde::Deserialize;
 
@@ -20,4 +21,15 @@ where
         .map_err(serde::de::Error::custom)?;
 
     Ok(PaymentHash(slice))
+}
+
+pub fn deserialize_path<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    Ok(expanduser(s)
+        .map_err(serde::de::Error::custom)?
+        .display()
+        .to_string())
 }
