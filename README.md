@@ -100,7 +100,7 @@ cd sim-ln
 
 Install the CLI: 
 ```
-cargo install --path sim-cli/
+cargo install --locked --path sim-cli/
 ```
 
 Run Simulation with Config: 
