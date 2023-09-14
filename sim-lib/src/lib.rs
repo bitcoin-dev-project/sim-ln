@@ -5,7 +5,9 @@ use lightning::ln::features::NodeFeatures;
 use lightning::ln::PaymentHash;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::fmt::{Display, Formatter};
 use std::marker::Send;
+use std::time::UNIX_EPOCH;
 use std::{collections::HashMap, sync::Arc, time::SystemTime};
 use thiserror::Error;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
@@ -167,6 +169,20 @@ struct DispatchedPayment {
     amount_msat: u64,
     #[serde(with = "serde_millis")]
     dispatch_time: SystemTime,
+}
+
+impl Display for DispatchedPayment {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Payment {} dispatched at {:?} sending {} msat from {} -> {}",
+            hex::encode(self.hash.0),
+            self.dispatch_time.duration_since(UNIX_EPOCH).unwrap(),
+            self.amount_msat,
+            self.source,
+            self.destination,
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
