@@ -6,7 +6,9 @@ use tokio::sync::Mutex;
 
 use clap::Parser;
 use log::LevelFilter;
-use sim_lib::{cln::ClnNode, lnd::LndNode, Config, LightningNode, NodeConnection, Simulation};
+use sim_lib::{
+    cln::ClnNode, lnd::LndNode, Config, LightningError, LightningNode, NodeConnection, Simulation,
+};
 use simple_logger::SimpleLogger;
 
 #[derive(Parser)]
@@ -38,6 +40,7 @@ async fn main() -> anyhow::Result<()> {
     let Config { nodes, activity } = serde_json::from_str(&config_str)?;
 
     let mut clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>> = HashMap::new();
+    let mut alias_node_map = HashMap::new();
 
     for connection in nodes {
         // TODO: Feels like there should be a better way of doing this without having to Arc<Mutex<T>>> it at this time.
@@ -56,6 +59,21 @@ async fn main() -> anyhow::Result<()> {
             node_info.pubkey
         );
 
+        if clients.contains_key(&node_info.pubkey) {
+            anyhow::bail!(LightningError::ValidationError(format!(
+                "duplicated node: {}.",
+                node_info.pubkey
+            )));
+        }
+
+        if alias_node_map.contains_key(&node_info.alias) {
+            anyhow::bail!(LightningError::ValidationError(format!(
+                "duplicated node: {}.",
+                node_info.alias
+            )));
+        }
+
+        alias_node_map.insert(node_info.alias.clone(), node_info.pubkey);
         clients.insert(node_info.pubkey, node);
     }
 

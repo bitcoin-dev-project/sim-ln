@@ -3,8 +3,8 @@ use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
 use cln_grpc::pb::{
     listpays_pays::ListpaysPaysStatus, node_client::NodeClient, Amount, GetinfoRequest,
-    GetinfoResponse, KeysendRequest, KeysendResponse, ListchannelsRequest, ListnodesRequest,
-    ListpaysRequest, ListpaysResponse,
+    KeysendRequest, KeysendResponse, ListchannelsRequest, ListnodesRequest, ListpaysRequest,
+    ListpaysResponse,
 };
 use lightning::ln::features::NodeFeatures;
 use lightning::ln::PaymentHash;
@@ -16,11 +16,14 @@ use tokio::time::{self, Duration};
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 use triggered::Listener;
 
-use crate::{serializers, LightningError, LightningNode, NodeInfo, PaymentOutcome, PaymentResult};
+use crate::{
+    serializers, LightningError, LightningNode, NodeId, NodeInfo, PaymentOutcome, PaymentResult,
+};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ClnConnection {
-    pub id: PublicKey,
+    #[serde(with = "serializers::serde_node_id")]
+    pub id: NodeId,
     pub address: String,
     #[serde(deserialize_with = "serializers::deserialize_path")]
     pub ca_cert: String,
@@ -67,16 +70,22 @@ impl ClnNode {
                 })?,
         );
 
-        let GetinfoResponse {
-            id,
-            alias,
-            our_features,
-            ..
-        } = client
+        let (id, mut alias, our_features) = client
             .getinfo(GetinfoRequest {})
             .await
-            .map_err(|err| LightningError::GetInfoError(err.to_string()))?
-            .into_inner();
+            .map(|r| {
+                let inner = r.into_inner();
+                (
+                    inner.id,
+                    inner.alias.unwrap_or_default(),
+                    inner.our_features,
+                )
+            })
+            .map_err(|err| LightningError::GetInfoError(err.to_string()))?;
+
+        let pubkey = PublicKey::from_slice(&id)
+            .map_err(|err| LightningError::GetInfoError(err.to_string()))?;
+        connection.id.validate(&pubkey, &mut alias)?;
 
         //FIXME: our_features is returning None, but it should not :S
         let features = if let Some(features) = our_features {
@@ -88,10 +97,9 @@ impl ClnNode {
         Ok(Self {
             client,
             info: NodeInfo {
-                pubkey: PublicKey::from_slice(&id)
-                    .map_err(|err| LightningError::GetInfoError(err.to_string()))?,
+                pubkey,
                 features,
-                alias: alias.unwrap_or("".to_string()),
+                alias,
             },
         })
     }

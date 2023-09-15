@@ -1,7 +1,9 @@
 use std::collections::HashSet;
 use std::{collections::HashMap, str::FromStr};
 
-use crate::{serializers, LightningError, LightningNode, NodeInfo, PaymentOutcome, PaymentResult};
+use crate::{
+    serializers, LightningError, LightningNode, NodeId, NodeInfo, PaymentOutcome, PaymentResult,
+};
 use async_trait::async_trait;
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::PublicKey;
@@ -22,7 +24,8 @@ const SEND_PAYMENT_TIMEOUT_SECS: i32 = 300;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LndConnection {
-    pub id: PublicKey,
+    #[serde(with = "serializers::serde_node_id")]
+    pub id: NodeId,
     pub address: String,
     #[serde(deserialize_with = "serializers::deserialize_path")]
     pub macaroon: String,
@@ -54,15 +57,16 @@ fn parse_node_features(features: HashSet<u32>) -> NodeFeatures {
 }
 
 impl LndNode {
-    pub async fn new(conn_data: LndConnection) -> Result<Self, LightningError> {
-        let mut client = tonic_lnd::connect(conn_data.address, conn_data.cert, conn_data.macaroon)
-            .await
-            .map_err(|err| LightningError::ConnectionError(err.to_string()))?;
+    pub async fn new(connection: LndConnection) -> Result<Self, LightningError> {
+        let mut client =
+            tonic_lnd::connect(connection.address, connection.cert, connection.macaroon)
+                .await
+                .map_err(|err| LightningError::ConnectionError(err.to_string()))?;
 
         let GetInfoResponse {
             identity_pubkey,
             features,
-            alias,
+            mut alias,
             ..
         } = client
             .lightning()
@@ -71,11 +75,14 @@ impl LndNode {
             .map_err(|err| LightningError::GetInfoError(err.to_string()))?
             .into_inner();
 
+        let pubkey = PublicKey::from_str(&identity_pubkey)
+            .map_err(|err| LightningError::GetInfoError(err.to_string()))?;
+        connection.id.validate(&pubkey, &mut alias)?;
+
         Ok(Self {
             client,
             info: NodeInfo {
-                pubkey: PublicKey::from_str(&identity_pubkey)
-                    .map_err(|err| LightningError::GetInfoError(err.to_string()))?,
+                pubkey,
                 features: parse_node_features(features.keys().cloned().collect()),
                 alias,
             },

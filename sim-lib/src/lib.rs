@@ -38,6 +38,32 @@ pub enum NodeConnection {
     CLN(cln::ClnConnection),
 }
 
+#[derive(Serialize, Debug, Clone)]
+pub enum NodeId {
+    PublicKey(PublicKey),
+    Alias(String),
+}
+
+impl NodeId {
+    pub fn validate(&self, node_id: &PublicKey, alias: &mut String) -> Result<(), LightningError> {
+        match self {
+            crate::NodeId::PublicKey(pk) => {
+                if pk != node_id {
+                    return Err(LightningError::ValidationError(format!(
+                    "the provided node id does not match the one returned by the backend ({} != {}).", pk, node_id)));
+                }
+            }
+            crate::NodeId::Alias(a) => {
+                if alias != a {
+                    log::warn!("The provided alias does not match the one returned by the backend ({} != {}).", a, alias)
+                }
+                *alias = a.to_string();
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     pub nodes: Vec<NodeConnection>,
