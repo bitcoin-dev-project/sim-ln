@@ -12,6 +12,8 @@ use lightning::ln::{PaymentHash, PaymentPreimage};
 use tonic_lnd::lnrpc::{payment::PaymentStatus, GetInfoRequest, GetInfoResponse};
 use tonic_lnd::lnrpc::{NodeInfoRequest, PaymentFailureReason};
 use tonic_lnd::routerrpc::TrackPaymentRequest;
+use tonic_lnd::tonic::Code::Unavailable;
+use tonic_lnd::tonic::Status;
 use tonic_lnd::{routerrpc::SendPaymentRequest, Client};
 use triggered::Listener;
 
@@ -107,11 +109,12 @@ impl LightningNode for LndNode {
                 fee_limit_msat: i64::max_value(),
                 ..Default::default()
             })
-            .await?;
+            .await
+            .map_err(status_to_lightning_error)?;
 
         let mut stream = response.into_inner();
 
-        let payment_hash = match stream.message().await? {
+        let payment_hash = match stream.message().await.map_err(status_to_lightning_error)? {
             Some(payment) => string_to_payment_hash(&payment.payment_hash)?,
             None => return Err(LightningError::SendPaymentError("No payment".to_string())),
         };
@@ -208,4 +211,13 @@ fn string_to_payment_hash(hash: &str) -> Result<PaymentHash, LightningError> {
         .try_into()
         .map_err(|_| LightningError::InvalidPaymentHash)?;
     Ok(PaymentHash(slice))
+}
+
+fn status_to_lightning_error(s: Status) -> LightningError {
+    let code = s.code();
+    let message = s.message();
+    match code {
+        Unavailable => LightningError::SendPaymentError(format!("Node unavailable: {message}")),
+        _ => LightningError::PermanentError(message.to_string()),
+    }
 }
