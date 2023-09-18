@@ -104,6 +104,7 @@ impl LightningNode for LndNode {
                 dest_custom_records,
                 payment_hash,
                 timeout_seconds: SEND_PAYMENT_TIMEOUT_SECS,
+                fee_limit_msat: i64::max_value(),
                 ..Default::default()
             })
             .await?;
