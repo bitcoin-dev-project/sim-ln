@@ -333,22 +333,22 @@ impl Simulation {
     }
 
     // run_data_collection starts the tasks required for the simulation to report of the outcomes of the activity that
-    // it generates. The simulation should report actions via the receiver that is passed in.
+    // it generates. The simulation should report outputs via the receiver that is passed in.
     fn run_data_collection(
         &self,
-        action_receiver: Receiver<SimulationOutput>,
+        output_receiver: Receiver<SimulationOutput>,
         tasks: &mut JoinSet<()>,
     ) {
         let listener = self.shutdown_listener.clone();
         let print_batch_size = self.print_batch_size;
         log::debug!("Setting up simulator data collection.");
 
-        // Create a sender/receiver pair that will be used to report final results of action outcomes.
+        // Create a sender/receiver pair that will be used to report final results of simulation outcomes.
         let (results_sender, results_receiver) = channel(1);
 
         tasks.spawn(produce_simulation_results(
             self.nodes.clone(),
-            action_receiver,
+            output_receiver,
             results_sender,
             listener.clone(),
         ));
@@ -363,7 +363,7 @@ impl Simulation {
 
     async fn generate_activity(
         &self,
-        executed_actions: Sender<SimulationOutput>,
+        output_sender: Sender<SimulationOutput>,
         tasks: &mut JoinSet<()>,
     ) -> Result<(), SimulationError> {
         let shutdown = self.shutdown_trigger.clone();
@@ -390,7 +390,7 @@ impl Simulation {
             tasks.spawn(consume_events(
                 node.clone(),
                 receiver,
-                executed_actions.clone(),
+                output_sender.clone(),
             ));
 
             // Add the producer channel to our map so that various activity descriptions can use it. We may have multiple
@@ -440,8 +440,8 @@ async fn consume_events(
                             hex::encode(payment_hash.0)
                         );
 
-                        log::debug!("Sending action for {}.", hex::encode(payment_hash.0));
-                        let outcome = SimulationOutput::PaymentSent(DispatchedPayment {
+                        log::debug!("Sending output for {}.", hex::encode(payment_hash.0));
+                        let output = SimulationOutput::PaymentSent(DispatchedPayment {
                             source: node.get_info().pubkey,
                             hash: payment_hash,
                             amount_msat: amt_msat,
@@ -449,10 +449,10 @@ async fn consume_events(
                             dispatch_time: SystemTime::now(),
                         });
 
-                        match sender.send(outcome).await {
+                        match sender.send(output).await {
                             Ok(_) => {}
                             Err(e) => {
-                                log::error!("Error sending action outcome: {:?}.", e);
+                                log::error!("Error sending simulation output: {:?}.", e);
                                 break;
                             }
                         }
@@ -629,8 +629,8 @@ impl PaymentResultLogger {
     }
 }
 
-/// produce_results is responsible for receiving the outcomes of events that the simulator has taken and
-/// spinning up a producer that will report the results to our main result consumer. We handle each outcome
+/// produce_results is responsible for receiving the outputs of events that the simulator has taken and
+/// spinning up a producer that will report the results to our main result consumer. We handle each output
 /// separately because they can take a long time to resolve (eg, a payment that ends up on chain will take a long
 /// time to resolve).
 ///
@@ -640,7 +640,7 @@ impl PaymentResultLogger {
 /// consumer will not exit and a trigger is required.
 async fn produce_simulation_results(
     nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>>,
-    mut outcomes: Receiver<SimulationOutput>,
+    mut output_receiver: Receiver<SimulationOutput>,
     results: Sender<(DispatchedPayment, PaymentResult)>,
     shutdown: Listener,
 ) {
@@ -652,16 +652,16 @@ async fn produce_simulation_results(
         tokio::select! {
             biased;
             _ = shutdown.clone() => break,
-            outcome = outcomes.recv() => {
-                match outcome{
-                    Some(action_outcome) => {
-                        match action_outcome{
+            output = output_receiver.recv() => {
+                match output{
+                    Some(simulation_output) => {
+                        match simulation_output{
                             SimulationOutput::PaymentSent(dispatched_payment) => {
                                 let source_node = nodes.get(&dispatched_payment.source).unwrap().clone();
 
                                 log::debug!("Tracking payment outcome for: {}.", hex::encode(dispatched_payment.hash.0));
                                 set.spawn(track_outcome(
-                                    source_node,results.clone(),action_outcome, shutdown.clone(),
+                                    source_node,results.clone(),simulation_output, shutdown.clone(),
                                 ));
                             },
                         };
@@ -686,14 +686,14 @@ async fn produce_simulation_results(
 async fn track_outcome(
     node: Arc<Mutex<dyn LightningNode + Send>>,
     results: Sender<(DispatchedPayment, PaymentResult)>,
-    outcome: SimulationOutput,
+    output: SimulationOutput,
     shutdown: Listener,
 ) {
     log::trace!("Outcome tracker starting.");
 
     let mut node = node.lock().await;
 
-    match outcome {
+    match output {
         SimulationOutput::PaymentSent(payment) => {
             let track_payment = node.track_payment(payment.hash, shutdown.clone());
 
