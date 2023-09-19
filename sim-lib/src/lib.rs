@@ -59,14 +59,14 @@ pub struct Config {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct ActivityDefinition {
-    // The source of the action.
+    // The source of the payment.
     pub source: PublicKey,
-    // The destination of the action.
+    // The destination of the payment.
     pub destination: PublicKey,
-    // The interval of the action, as in every how many seconds the action is performed.
+    // The interval of the event, as in every how many seconds the payment is performed.
     #[serde(alias = "interval_secs")]
     pub interval: u16,
-    // The amount of m_sat to used in this action.
+    // The amount of m_sat to used in this payment.
     pub amount_msat: u64,
 }
 
@@ -131,7 +131,7 @@ pub trait LightningNode {
     async fn get_node_features(&mut self, node: PublicKey) -> Result<NodeFeatures, LightningError>;
 }
 
-/// SimulationEvent describes the set of actions that the simulator can run on nodes that it has execution permissions 
+/// SimulationEvent describes the set of actions that the simulator can run on nodes that it has execution permissions
 /// on.
 #[derive(Clone, Copy)]
 enum SimulationEvent {
@@ -240,7 +240,7 @@ impl Simulation {
     async fn validate_activity(&self) -> Result<(), LightningError> {
         for payment_flow in self.activity.iter() {
             // We need every source node that is configured to execute some activity to be included in our set of
-            // nodes so that we can execute actions on it.
+            // nodes so that we can execute events on it.
             let source_node =
                 self.nodes
                     .get(&payment_flow.source)
@@ -250,7 +250,7 @@ impl Simulation {
                     )))?;
 
             // Destinations must support keysend to be able to receive payments.
-            // Note: validation should be update with a different check if an action is not a payment.
+            // Note: validation should be update with a different check if an event is not a payment.
             let features = source_node
                 .lock()
                 .await
@@ -286,18 +286,18 @@ impl Simulation {
         let mut tasks = JoinSet::new();
 
         // Before we start the simulation up, start tasks that will be responsible for gathering simulation data.
-        // The action channels are shared across our functionality:
-        // - Action Sender: used by the simulation to inform data reporting that it needs to start tracking the
-        //   final outcome of the action that it has taken.
-        // - Action Receiver: used by data reporting to receive events that have been simulated that need to be
+        // The event channels are shared across our functionality:
+        // - Event Sender: used by the simulation to inform data reporting that it needs to start tracking the
+        //   final outcome of the event that it has taken.
+        // - Event Receiver: used by data reporting to receive events that have been simulated that need to be
         //   tracked and recorded.
-        let (action_sender, action_receiver) = channel(1);
-        self.run_data_collection(action_receiver, &mut tasks);
+        let (event_sender, event_receiver) = channel(1);
+        self.run_data_collection(event_receiver, &mut tasks);
 
         // Next, we'll spin up our actual activity generator that will be responsible for triggering the activity that
-        // has been configured, passing in the channel that is used to notify data collection that actions  have been
+        // has been configured, passing in the channel that is used to notify data collection that events  have been
         // generated.
-        self.generate_activity(action_sender, &mut tasks).await?;
+        self.generate_activity(event_sender, &mut tasks).await?;
 
         if let Some(total_time) = self.total_time {
             let t = self.shutdown_trigger.clone();
@@ -412,8 +412,8 @@ impl Simulation {
     }
 }
 
-// consume_events processes events that are crated for a lightning node that we can execute actions on. Any output
-// that is generated from the action being taken is piped into a channel to handle the result of the action. If it
+// consume_events processes events that are crated for a lightning node that we can execute events on. Any output
+// that is generated from the event being executed is piped into a channel to handle the result of the event. If it
 // exits, it will use the trigger provided to trigger shutdown in other threads. If an error occurs elsewhere, we
 // expect the senders corresponding to our receiver to be dropped, which will cause the receiver to error out and
 // exit.
@@ -425,8 +425,8 @@ async fn consume_events(
     let node_id = node.lock().await.get_info().pubkey;
     log::debug!("Started consumer for {}.", node_id);
 
-    while let Some(action) = receiver.recv().await {
-        match action {
+    while let Some(event) = receiver.recv().await {
+        match event {
             SimulationEvent::SendPayment(dest, amt_msat) => {
                 let mut node = node.lock().await;
                 let payment = node.send_payment(dest, amt_msat);
@@ -629,7 +629,7 @@ impl PaymentResultLogger {
     }
 }
 
-/// produce_results is responsible for receiving the outcomes of actions that the simulator has taken and
+/// produce_results is responsible for receiving the outcomes of events that the simulator has taken and
 /// spinning up a producer that will report the results to our main result consumer. We handle each outcome
 /// separately because they can take a long time to resolve (eg, a payment that ends up on chain will take a long
 /// time to resolve).
