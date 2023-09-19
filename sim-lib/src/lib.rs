@@ -256,7 +256,13 @@ impl Simulation {
                 .await
                 .get_node_features(payment_flow.destination)
                 .await
-                .map_err(|err| LightningError::GetNodeInfoError(err.to_string()))?;
+                .map_err(|e| {
+                    log::debug!("{}", e);
+                    LightningError::ValidationError(format!(
+                        "could not get node features for destination node {}",
+                        payment_flow.destination,
+                    ))
+                })?;
 
             if !features.supports_keysend() {
                 return Err(LightningError::ValidationError(format!(
