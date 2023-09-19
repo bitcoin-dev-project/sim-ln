@@ -288,7 +288,7 @@ impl Simulation {
         // Before we start the simulation up, start tasks that will be responsible for gathering simulation data.
         // The event channels are shared across our functionality:
         // - Event Sender: used by the simulation to inform data reporting that it needs to start tracking the
-        //   final outcome of the event that it has taken.
+        //   final result of the event that it has taken.
         // - Event Receiver: used by data reporting to receive events that have been simulated that need to be
         //   tracked and recorded.
         let (event_sender, event_receiver) = channel(1);
@@ -332,7 +332,7 @@ impl Simulation {
         self.shutdown_trigger.trigger()
     }
 
-    // run_data_collection starts the tasks required for the simulation to report of the outcomes of the activity that
+    // run_data_collection starts the tasks required for the simulation to report of the results of the activity that
     // it generates. The simulation should report outputs via the receiver that is passed in.
     fn run_data_collection(
         &self,
@@ -343,7 +343,7 @@ impl Simulation {
         let print_batch_size = self.print_batch_size;
         log::debug!("Setting up simulator data collection.");
 
-        // Create a sender/receiver pair that will be used to report final results of simulation outcomes.
+        // Create a sender/receiver pair that will be used to report final results of simulation.
         let (results_sender, results_receiver) = channel(1);
 
         tasks.spawn(produce_simulation_results(
@@ -659,8 +659,8 @@ async fn produce_simulation_results(
                             SimulationOutput::PaymentSent(dispatched_payment) => {
                                 let source_node = nodes.get(&dispatched_payment.source).unwrap().clone();
 
-                                log::debug!("Tracking payment outcome for: {}.", hex::encode(dispatched_payment.hash.0));
-                                set.spawn(track_outcome(
+                                log::debug!("Tracking payment result for: {}.", hex::encode(dispatched_payment.hash.0));
+                                set.spawn(track_payment_result(
                                     source_node,results.clone(),simulation_output, shutdown.clone(),
                                 ));
                             },
@@ -683,13 +683,13 @@ async fn produce_simulation_results(
     }
 }
 
-async fn track_outcome(
+async fn track_payment_result(
     node: Arc<Mutex<dyn LightningNode + Send>>,
     results: Sender<(DispatchedPayment, PaymentResult)>,
     output: SimulationOutput,
     shutdown: Listener,
 ) {
-    log::trace!("Outcome tracker starting.");
+    log::trace!("Payment result tracker starting.");
 
     let mut node = node.lock().await;
 
@@ -719,5 +719,5 @@ async fn track_outcome(
         }
     }
 
-    log::trace!("Outcome tracker exiting.");
+    log::trace!("Payment result tracker exiting.");
 }
