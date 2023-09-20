@@ -85,19 +85,19 @@ pub enum SimulationError {
 // Phase 2: Event Queue
 #[derive(Debug, Error)]
 pub enum LightningError {
-    #[error("Node connection error {0}")]
+    #[error("Node connection error: {0}")]
     ConnectionError(String),
-    #[error("Get info error {0}")]
+    #[error("Get info error: {0}")]
     GetInfoError(String),
-    #[error("Send payment error {0}")]
+    #[error("Send payment error: {0}")]
     SendPaymentError(String),
-    #[error("Track payment error {0}")]
+    #[error("Track payment error: {0}")]
     TrackPaymentError(String),
     #[error("Invalid payment hash")]
     InvalidPaymentHash,
-    #[error("Get node info error {0}")]
+    #[error("Get node info error: {0}")]
     GetNodeInfoError(String),
-    #[error("Config validation failed {0}")]
+    #[error("Config validation failed: {0}")]
     ValidationError(String),
     #[error("RPC error: {0:?}")]
     RpcError(#[from] tonic_lnd::tonic::Status),
@@ -245,7 +245,7 @@ impl Simulation {
                 self.nodes
                     .get(&payment_flow.source)
                     .ok_or(LightningError::ValidationError(format!(
-                        "source node not found {}",
+                        "Source node not found, {}",
                         payment_flow.source,
                     )))?;
 
@@ -259,14 +259,14 @@ impl Simulation {
                 .map_err(|e| {
                     log::debug!("{}", e);
                     LightningError::ValidationError(format!(
-                        "could not get node features for destination node {}",
+                        "Destination node unknown or invalid, {}",
                         payment_flow.destination,
                     ))
                 })?;
 
             if !features.supports_keysend() {
                 return Err(LightningError::ValidationError(format!(
-                    "destination node does not support keysend {}",
+                    "Destination node does not support keysend, {}",
                     payment_flow.destination,
                 )));
             }
