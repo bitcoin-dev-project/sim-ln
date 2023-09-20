@@ -7,7 +7,8 @@ use tokio::sync::Mutex;
 use clap::Parser;
 use log::LevelFilter;
 use sim_lib::{
-    cln::ClnNode, lnd::LndNode, Config, LightningError, LightningNode, NodeConnection, Simulation,
+    cln::ClnNode, lnd::LndNode, ActivityDefinition, Config, LightningError, LightningNode,
+    NodeConnection, NodeId, Simulation,
 };
 use simple_logger::SimpleLogger;
 
@@ -37,7 +38,10 @@ async fn main() -> anyhow::Result<()> {
         .unwrap();
 
     let config_str = std::fs::read_to_string(cli.config)?;
-    let Config { nodes, activity } = serde_json::from_str(&config_str)?;
+    let Config {
+        nodes,
+        mut activity,
+    } = serde_json::from_str(&config_str)?;
 
     let mut clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>> = HashMap::new();
     let mut alias_node_map = HashMap::new();
@@ -77,7 +81,40 @@ async fn main() -> anyhow::Result<()> {
         clients.insert(node_info.pubkey, node);
     }
 
-    let sim = Simulation::new(clients, activity, cli.total_time, cli.print_batch_size);
+    let mut validated_activities = vec![];
+    // Make all the activities identifiable by PK internally
+    for act in activity.iter_mut() {
+        // We can only map aliases to nodes we control, so if either the source or destination alias
+        // is not in alias_node_map, we fail
+        if let NodeId::Alias(a) = &act.source {
+            if let Some(pk) = alias_node_map.get(a) {
+                act.source = NodeId::PublicKey(*pk);
+            } else {
+                anyhow::bail!(LightningError::ValidationError(format!(
+                    "activity source alias {} not found in nodes.",
+                    act.source
+                )));
+            }
+        }
+        if let NodeId::Alias(a) = &act.destination {
+            if let Some(pk) = alias_node_map.get(a) {
+                act.destination = NodeId::PublicKey(*pk);
+            } else {
+                anyhow::bail!(LightningError::ValidationError(format!(
+                    "unknown activity destination: {}.",
+                    act.destination
+                )));
+            }
+        }
+        validated_activities.push(ActivityDefinition::try_from(act)?);
+    }
+
+    let sim = Simulation::new(
+        clients,
+        validated_activities,
+        cli.total_time,
+        cli.print_batch_size,
+    );
     let sim2 = sim.clone();
 
     ctrlc::set_handler(move || {

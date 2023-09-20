@@ -62,25 +62,83 @@ impl NodeId {
         }
         Ok(())
     }
+
+    pub fn get_pk(&self) -> Result<&PublicKey, String> {
+        if let NodeId::PublicKey(pk) = self {
+            Ok(pk)
+        } else {
+            Err("NodeId is not a PublicKey".to_string())
+        }
+    }
+}
+
+impl std::fmt::Display for NodeId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                NodeId::PublicKey(pk) => pk.to_string(),
+                NodeId::Alias(a) => a.to_owned(),
+            }
+        )
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     pub nodes: Vec<NodeConnection>,
-    pub activity: Option<Vec<ActivityDefinition>>,
+    #[serde(default)]
+    pub activity: Vec<ActivityParser>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+/// Data structure used to parse information from the simulation file. It allows source and destination to be
+/// [NodeId], which enables the use of public keys and aliases in the simulation description.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityParser {
+    // The source of the payment.
+    #[serde(with = "serializers::serde_node_id")]
+    pub source: NodeId,
+    // The destination of the payment.
+    #[serde(with = "serializers::serde_node_id")]
+    pub destination: NodeId,
+    // The interval of the event, as in every how many seconds the payment is performed.
+    pub interval_secs: u16,
+    // The amount of m_sat to used in this payment.
+    pub amount_msat: u64,
+}
+
+/// Data structure used internally by the simulator. Both source and destination are represented as [PublicKey] here.
+/// This is constructed during activity validation and passed along to the [Simulation].
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActivityDefinition {
     // The source of the payment.
     pub source: PublicKey,
     // The destination of the payment.
     pub destination: PublicKey,
     // The interval of the event, as in every how many seconds the payment is performed.
-    #[serde(alias = "interval_secs")]
-    pub interval: u16,
+    pub interval_secs: u16,
     // The amount of m_sat to used in this payment.
     pub amount_msat: u64,
+}
+
+impl TryFrom<&mut ActivityParser> for ActivityDefinition {
+    type Error = LightningError;
+
+    fn try_from(a: &mut ActivityParser) -> Result<Self, Self::Error> {
+        let source = *a.source.get_pk().map_err(Self::Error::ValidationError)?;
+        let destination = *a
+            .destination
+            .get_pk()
+            .map_err(Self::Error::ValidationError)?;
+
+        Ok(Self {
+            source,
+            destination,
+            interval_secs: a.interval_secs,
+            amount_msat: a.amount_msat,
+        })
+    }
 }
 
 #[derive(Debug, Error)]
@@ -290,14 +348,14 @@ const DEFAULT_PRINT_BATCH_SIZE: u32 = 500;
 impl Simulation {
     pub fn new(
         nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>>,
-        activity: Option<Vec<ActivityDefinition>>,
+        activity: Vec<ActivityDefinition>,
         total_time: Option<u32>,
         print_batch_size: Option<u32>,
     ) -> Self {
         let (shutdown_trigger, shutdown_listener) = triggered::trigger();
         Self {
             nodes,
-            activity: activity.unwrap_or_default(),
+            activity,
             shutdown_trigger,
             shutdown_listener,
             total_time: total_time.map(|x| Duration::from_secs(x as u64)),
@@ -574,7 +632,7 @@ impl Simulation {
         for description in self.activity.iter() {
             let sender_chan = producer_channels.get(&description.source).unwrap();
             tasks.spawn(produce_events(
-                *description,
+                description.clone(),
                 sender_chan.clone(),
                 self.shutdown_trigger.clone(),
                 self.shutdown_listener.clone(),
@@ -706,12 +764,12 @@ async fn produce_events(
     listener: Listener,
 ) {
     let e: SimulationEvent = SimulationEvent::SendPayment(act.destination, act.amount_msat);
-    let interval = time::Duration::from_secs(act.interval as u64);
+    let interval = time::Duration::from_secs(act.interval_secs as u64);
 
     log::debug!(
         "Started producer for {} every {}s: {} -> {}.",
         act.amount_msat,
-        act.interval,
+        act.interval_secs,
         act.source,
         act.destination
     );
