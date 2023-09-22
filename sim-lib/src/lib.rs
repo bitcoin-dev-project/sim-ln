@@ -366,11 +366,21 @@ impl Simulation {
         let (event_sender, event_receiver) = channel(1);
         self.run_data_collection(event_receiver, &mut tasks);
 
+        // Create consumers for every source node that is listed in our activity.
+        let collecting_nodes = self
+            .activity
+            .iter()
+            .map(|activity| activity.source)
+            .collect();
+
+        let producer_senders =
+            self.dispatch_consumers(collecting_nodes, event_sender.clone(), &mut tasks);
+
         // Next, we'll spin up our actual activity generator that will be responsible for triggering the activity that
         // has been configured, passing in the channel that is used to notify data collection that events  have been
         // generated.
-        self.dispatch_activity_producers(event_sender, &mut tasks)
-            .await?;
+        self.dispatch_activity_producers(producer_senders, &mut tasks)
+            .await;
 
         if let Some(total_time) = self.total_time {
             let t = self.shutdown_trigger.clone();
@@ -434,29 +444,26 @@ impl Simulation {
         log::debug!("Simulator data collection set up.");
     }
 
-    async fn dispatch_activity_producers(
+    /// Responsible for spinning up consumer tasks for each node specified in consuming_nodes. Assumes that validation
+    /// has already ensured that we have execution on every nodes listed in consuming_nodes.
+    fn dispatch_consumers(
         &self,
+        consuming_nodes: HashSet<PublicKey>,
         output_sender: Sender<SimulationOutput>,
         tasks: &mut JoinSet<()>,
-    ) -> Result<(), SimulationError> {
-        let shutdown = self.shutdown_trigger.clone();
-        let listener = self.shutdown_listener.clone();
+    ) -> HashMap<PublicKey, Sender<SimulationEvent>> {
+        let mut channels = HashMap::new();
 
-        // Before we start the simulation, we'll spin up the infrastructure that we need to record data:
-        // We only need to spin up producers for nodes that are contained in our activity description, as there will be
-        // no events for nodes that are not source nodes.
-        let mut producer_channels = HashMap::new();
-
-        for (id, node) in self.nodes.iter().filter(|(pk, _)| {
-            self.activity
-                .iter()
-                .map(|a| a.source)
-                .collect::<HashSet<PublicKey>>()
-                .contains(pk)
-        }) {
-            // For each active node, we'll create a sender and receiver channel to produce and consumer
-            // events. We do not buffer channels as we expect events to clear quickly.
+        for (id, node) in self
+            .nodes
+            .iter()
+            .filter(|(id, _)| consuming_nodes.contains(id))
+        {
+            // For each node we have execution on, we'll create a sender and receiver channel to produce and consumer
+            // events and insert producer in our tracking map. We do not buffer channels as we expect events to clear
+            // quickly.
             let (sender, receiver) = channel(1);
+            channels.insert(*id, sender.clone());
 
             // Generate a consumer for the receiving end of the channel. It takes the event receiver that it'll pull
             // events from and the results sender to report the events it has triggered for further monitoring.
@@ -464,25 +471,28 @@ impl Simulation {
                 node.clone(),
                 receiver,
                 output_sender.clone(),
-                shutdown.clone(),
+                self.shutdown_trigger.clone(),
             ));
-
-            // Add the producer channel to our map so that various activity descriptions can use it. We may have multiple
-            // activity descriptions that have the same source node.
-            producer_channels.insert(id, sender);
         }
 
+        channels
+    }
+
+    /// Responsible for spinning up producers for a set of activity descriptions.
+    async fn dispatch_activity_producers(
+        &self,
+        producer_channels: HashMap<PublicKey, Sender<SimulationEvent>>,
+        tasks: &mut JoinSet<()>,
+    ) {
         for description in self.activity.iter() {
             let sender_chan = producer_channels.get(&description.source).unwrap();
             tasks.spawn(produce_events(
                 *description,
                 sender_chan.clone(),
-                shutdown.clone(),
-                listener.clone(),
+                self.shutdown_trigger.clone(),
+                self.shutdown_listener.clone(),
             ));
         }
-
-        Ok(())
     }
 }
 
