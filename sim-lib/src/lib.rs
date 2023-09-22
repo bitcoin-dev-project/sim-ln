@@ -369,7 +369,8 @@ impl Simulation {
         // Next, we'll spin up our actual activity generator that will be responsible for triggering the activity that
         // has been configured, passing in the channel that is used to notify data collection that events  have been
         // generated.
-        self.generate_activity(event_sender, &mut tasks).await?;
+        self.dispatch_activity_producers(event_sender, &mut tasks)
+            .await?;
 
         if let Some(total_time) = self.total_time {
             let t = self.shutdown_trigger.clone();
@@ -433,7 +434,7 @@ impl Simulation {
         log::debug!("Simulator data collection set up.");
     }
 
-    async fn generate_activity(
+    async fn dispatch_activity_producers(
         &self,
         output_sender: Sender<SimulationOutput>,
         tasks: &mut JoinSet<()>,
