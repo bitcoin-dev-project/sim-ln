@@ -146,6 +146,14 @@ pub trait NetworkGenerator {
     fn sample_node_by_capacity(&self, source: PublicKey) -> (PublicKey, u64);
 }
 
+pub trait PaymentGenerator {
+    // Returns the number of seconds that a node should wait until firing its next payment.
+    fn next_payment_wait(&self) -> time::Duration;
+
+    // Returns a payment amount based on the capacity of the sending and receiving node.
+    fn payment_amount(&self, destination_capacity: u64) -> Result<u64, SimulationError>;
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentResult {
     pub htlc_count: usize,
