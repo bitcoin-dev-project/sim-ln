@@ -101,6 +101,8 @@ pub enum LightningError {
     ValidationError(String),
     #[error("Permanent error: {0:?}")]
     PermanentError(String),
+    #[error("List channels error: {0}")]
+    ListChannelsError(String),
 }
 
 #[derive(Debug, Clone)]
@@ -130,6 +132,9 @@ pub trait LightningNode {
     ) -> Result<PaymentResult, LightningError>;
     /// Gets the list of features of a given node
     async fn get_node_features(&mut self, node: PublicKey) -> Result<NodeFeatures, LightningError>;
+    /// Lists all channels, at present only returns a vector of channel capacities in msat because no further
+    /// information is required.
+    async fn list_channels(&mut self) -> Result<Vec<u64>, LightningError>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
