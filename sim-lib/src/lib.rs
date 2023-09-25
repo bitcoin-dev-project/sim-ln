@@ -62,7 +62,7 @@ pub struct ClnConnection {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     pub nodes: Vec<NodeConnection>,
-    pub activity: Vec<ActivityDefinition>,
+    pub activity: Option<Vec<ActivityDefinition>>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -284,14 +284,14 @@ const DEFAULT_PRINT_BATCH_SIZE: u32 = 500;
 impl Simulation {
     pub fn new(
         nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>>,
-        activity: Vec<ActivityDefinition>,
+        activity: Option<Vec<ActivityDefinition>>,
         total_time: Option<u32>,
         print_batch_size: Option<u32>,
     ) -> Self {
         let (shutdown_trigger, shutdown_listener) = triggered::trigger();
         Self {
             nodes,
-            activity,
+            activity: activity.unwrap_or_default(),
             shutdown_trigger,
             shutdown_listener,
             total_time: total_time.map(|x| Duration::from_secs(x as u64)),
@@ -302,8 +302,15 @@ impl Simulation {
     }
 
     /// validate_activity validates that the user-provided activity description is achievable for the network that
-    /// we're working with.
+    /// we're working with. If no activity description is provided, then it ensures that we have configured a network
+    /// that is suitable for random activity generation.
     async fn validate_activity(&self) -> Result<(), LightningError> {
+        if self.activity.is_empty() && self.nodes.len() <= 1 {
+            return Err(LightningError::ValidationError(
+                "At least two nodes required for random activity generation.".to_string(),
+            ));
+        }
+
         for payment_flow in self.activity.iter() {
             // We need every source node that is configured to execute some activity to be included in our set of
             // nodes so that we can execute events on it.
