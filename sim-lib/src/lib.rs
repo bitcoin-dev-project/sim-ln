@@ -19,6 +19,7 @@ use triggered::{Listener, Trigger};
 
 pub mod cln;
 pub mod lnd;
+mod random_activity;
 mod serializers;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -80,6 +81,8 @@ pub enum SimulationError {
     CsvError(#[from] csv::Error),
     #[error("File Error")]
     FileError,
+    #[error("Random activity Error: {0}")]
+    RandomActivityError(String),
 }
 
 // Phase 2: Event Queue
@@ -135,6 +138,12 @@ pub trait LightningNode {
     /// Lists all channels, at present only returns a vector of channel capacities in msat because no further
     /// information is required.
     async fn list_channels(&mut self) -> Result<Vec<u64>, LightningError>;
+}
+
+pub trait NetworkGenerator {
+    // sample_node_by_capacity randomly picks a node within the network weighted by its capacity deployed to the
+    // network in channels. It returns the node's public key and its capacity in millisatoshis.
+    fn sample_node_by_capacity(&self, source: PublicKey) -> (PublicKey, u64);
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
