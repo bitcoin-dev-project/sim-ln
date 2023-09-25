@@ -40,33 +40,23 @@ async fn main() -> anyhow::Result<()> {
     let mut clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>> = HashMap::new();
 
     for connection in nodes {
-        // TODO: We should simplify this into two minimal branches plus shared logging and inserting into the list
-        match connection {
-            NodeConnection::LND(c) => {
-                let node_id = c.id;
-                let lnd = LndNode::new(c).await?;
+        // TODO: Feels like there should be a better way of doing this without having to Arc<Mutex<T>>> it at this time.
+        // Box sort of works, but we won't know the size of the dyn LightningNode at compile time so the compiler will
+        // scream at us when trying to create the Arc<Mutex>> later on while adding the node to the clients map
+        let node: Arc<Mutex<dyn LightningNode + Send>> = match connection {
+            NodeConnection::LND(c) => Arc::new(Mutex::new(LndNode::new(c).await?)),
+            NodeConnection::CLN(c) => Arc::new(Mutex::new(ClnNode::new(c).await?)),
+        };
 
-                log::info!(
-                    "Connected to {} - Node ID: {}.",
-                    lnd.get_info().alias,
-                    lnd.get_info().pubkey
-                );
+        let node_info = node.lock().await.get_info().clone();
 
-                clients.insert(node_id, Arc::new(Mutex::new(lnd)));
-            }
-            NodeConnection::CLN(c) => {
-                let node_id = c.id;
-                let cln = ClnNode::new(c).await?;
+        log::info!(
+            "Connected to {} - Node ID: {}.",
+            node_info.alias,
+            node_info.pubkey
+        );
 
-                log::info!(
-                    "Connected to {} - Node ID: {}.",
-                    cln.get_info().alias,
-                    cln.get_info().pubkey
-                );
-
-                clients.insert(node_id, Arc::new(Mutex::new(cln)));
-            }
-        }
+        clients.insert(node_info.pubkey, node);
     }
 
     let sim = Simulation::new(clients, activity, cli.total_time, cli.print_batch_size);
