@@ -1,15 +1,14 @@
 use std::collections::HashSet;
 use std::{collections::HashMap, str::FromStr};
 
-use crate::{
-    LightningError, LightningNode, LndConnection, NodeInfo, PaymentOutcome, PaymentResult,
-};
+use crate::{serializers, LightningError, LightningNode, NodeInfo, PaymentOutcome, PaymentResult};
 use async_trait::async_trait;
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
 use lightning::ln::features::NodeFeatures;
 use lightning::ln::{PaymentHash, PaymentPreimage};
+use serde::{Deserialize, Serialize};
 use tonic_lnd::lnrpc::{payment::PaymentStatus, GetInfoRequest, GetInfoResponse};
 use tonic_lnd::lnrpc::{ListChannelsRequest, NodeInfoRequest, PaymentFailureReason};
 use tonic_lnd::routerrpc::TrackPaymentRequest;
@@ -20,6 +19,16 @@ use triggered::Listener;
 
 const KEYSEND_KEY: u64 = 5482373484;
 const SEND_PAYMENT_TIMEOUT_SECS: i32 = 300;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct LndConnection {
+    pub id: PublicKey,
+    pub address: String,
+    #[serde(deserialize_with = "serializers::deserialize_path")]
+    pub macaroon: String,
+    #[serde(deserialize_with = "serializers::deserialize_path")]
+    pub cert: String,
+}
 
 pub struct LndNode {
     client: Client,

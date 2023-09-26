@@ -33,31 +33,9 @@ pub const ACTIVITY_MULTIPLIER: f64 = 2.0;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum NodeConnection {
     #[serde(alias = "lnd", alias = "Lnd")]
-    LND(LndConnection),
+    LND(lnd::LndConnection),
     #[serde(alias = "cln", alias = "Cln")]
-    CLN(ClnConnection),
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct LndConnection {
-    pub id: PublicKey,
-    pub address: String,
-    #[serde(deserialize_with = "serializers::deserialize_path")]
-    pub macaroon: String,
-    #[serde(deserialize_with = "serializers::deserialize_path")]
-    pub cert: String,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct ClnConnection {
-    pub id: PublicKey,
-    pub address: String,
-    #[serde(deserialize_with = "serializers::deserialize_path")]
-    pub ca_cert: String,
-    #[serde(deserialize_with = "serializers::deserialize_path")]
-    pub client_cert: String,
-    #[serde(deserialize_with = "serializers::deserialize_path")]
-    pub client_key: String,
+    CLN(cln::ClnConnection),
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

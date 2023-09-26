@@ -9,15 +9,26 @@ use cln_grpc::pb::{
 use lightning::ln::features::NodeFeatures;
 use lightning::ln::PaymentHash;
 
+use serde::{Deserialize, Serialize};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, Error};
 use tokio::time::{self, Duration};
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 use triggered::Listener;
 
-use crate::{
-    ClnConnection, LightningError, LightningNode, NodeInfo, PaymentOutcome, PaymentResult,
-};
+use crate::{serializers, LightningError, LightningNode, NodeInfo, PaymentOutcome, PaymentResult};
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ClnConnection {
+    pub id: PublicKey,
+    pub address: String,
+    #[serde(deserialize_with = "serializers::deserialize_path")]
+    pub ca_cert: String,
+    #[serde(deserialize_with = "serializers::deserialize_path")]
+    pub client_cert: String,
+    #[serde(deserialize_with = "serializers::deserialize_path")]
+    pub client_key: String,
+}
 
 pub struct ClnNode {
     pub client: NodeClient<Channel>,
