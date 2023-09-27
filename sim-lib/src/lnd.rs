@@ -109,12 +109,14 @@ impl LightningNode for LndNode {
             .into_inner();
 
         if info.chains.is_empty() {
-            return Err(LightningError::ValidationError(
-                "LND node is not connected any chain".to_string(),
-            ));
+            return Err(LightningError::ValidationError(format!(
+                "{} is not connected any chain",
+                self.get_info()
+            )));
         } else if info.chains.len() > 1 {
             return Err(LightningError::ValidationError(format!(
-                "LND node is connected to more than one chain: {:?}",
+                "{} is connected to more than one chain: {:?}",
+                self.get_info(),
                 info.chains.iter().map(|c| c.chain.to_string())
             )));
         }
@@ -229,12 +231,12 @@ impl LightningNode for LndNode {
         }
     }
 
-    async fn get_node_features(&mut self, node: PublicKey) -> Result<NodeFeatures, LightningError> {
+    async fn get_node_info(&mut self, node_id: &PublicKey) -> Result<NodeInfo, LightningError> {
         let node_info = self
             .client
             .lightning()
             .get_node_info(NodeInfoRequest {
-                pub_key: node.to_string(),
+                pub_key: node_id.to_string(),
                 include_channels: false,
             })
             .await
@@ -242,9 +244,11 @@ impl LightningNode for LndNode {
             .into_inner();
 
         if let Some(node_info) = node_info.node {
-            Ok(parse_node_features(
-                node_info.features.keys().cloned().collect(),
-            ))
+            Ok(NodeInfo {
+                pubkey: *node_id,
+                alias: node_info.alias,
+                features: parse_node_features(node_info.features.keys().cloned().collect()),
+            })
         } else {
             Err(LightningError::GetNodeInfoError(
                 "Node not found".to_string(),

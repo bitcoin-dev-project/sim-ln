@@ -38,12 +38,10 @@ async fn main() -> anyhow::Result<()> {
         .unwrap();
 
     let config_str = std::fs::read_to_string(cli.config)?;
-    let Config {
-        nodes,
-        mut activity,
-    } = serde_json::from_str(&config_str)?;
+    let Config { nodes, activity } = serde_json::from_str(&config_str)?;
 
     let mut clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>> = HashMap::new();
+    let mut pk_node_map = HashMap::new();
     let mut alias_node_map = HashMap::new();
 
     for connection in nodes {
@@ -77,36 +75,67 @@ async fn main() -> anyhow::Result<()> {
             )));
         }
 
-        alias_node_map.insert(node_info.alias.clone(), node_info.pubkey);
         clients.insert(node_info.pubkey, node);
+        pk_node_map.insert(node_info.pubkey, node_info.clone());
+        alias_node_map.insert(node_info.alias.clone(), node_info);
     }
 
     let mut validated_activities = vec![];
     // Make all the activities identifiable by PK internally
-    for act in activity.iter_mut() {
+    for act in activity.into_iter() {
         // We can only map aliases to nodes we control, so if either the source or destination alias
         // is not in alias_node_map, we fail
-        if let NodeId::Alias(a) = &act.source {
-            if let Some(pk) = alias_node_map.get(a) {
-                act.source = NodeId::PublicKey(*pk);
-            } else {
-                anyhow::bail!(LightningError::ValidationError(format!(
-                    "activity source alias {} not found in nodes.",
-                    act.source
-                )));
+        let source = if let Some(source) = match &act.source {
+            NodeId::PublicKey(pk) => pk_node_map.get(pk),
+            NodeId::Alias(a) => alias_node_map.get(a),
+        } {
+            source.clone()
+        } else {
+            anyhow::bail!(LightningError::ValidationError(format!(
+                "activity source {} not found in nodes.",
+                act.source
+            )));
+        };
+
+        let destination = match &act.destination {
+            NodeId::Alias(a) => {
+                if let Some(info) = alias_node_map.get(a) {
+                    info.clone()
+                } else {
+                    anyhow::bail!(LightningError::ValidationError(format!(
+                        "unknown activity destination: {}.",
+                        act.destination
+                    )));
+                }
             }
-        }
-        if let NodeId::Alias(a) = &act.destination {
-            if let Some(pk) = alias_node_map.get(a) {
-                act.destination = NodeId::PublicKey(*pk);
-            } else {
-                anyhow::bail!(LightningError::ValidationError(format!(
-                    "unknown activity destination: {}.",
-                    act.destination
-                )));
+            NodeId::PublicKey(pk) => {
+                if let Some(info) = pk_node_map.get(pk) {
+                    info.clone()
+                } else {
+                    clients
+                        .get(&source.pubkey)
+                        .unwrap()
+                        .lock()
+                        .await
+                        .get_node_info(pk)
+                        .await
+                        .map_err(|e| {
+                            log::debug!("{}", e);
+                            LightningError::ValidationError(format!(
+                                "Destination node unknown or invalid: {}.",
+                                pk,
+                            ))
+                        })?
+                }
             }
-        }
-        validated_activities.push(ActivityDefinition::try_from(act)?);
+        };
+
+        validated_activities.push(ActivityDefinition {
+            source,
+            destination,
+            interval_secs: act.interval_secs,
+            amount_msat: act.amount_msat,
+        });
     }
 
     let sim = Simulation::new(

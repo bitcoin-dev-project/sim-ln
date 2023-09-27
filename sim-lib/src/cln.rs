@@ -230,12 +230,11 @@ impl LightningNode for ClnNode {
         }
     }
 
-    async fn get_node_features(&mut self, node: PublicKey) -> Result<NodeFeatures, LightningError> {
-        let node_id = node.serialize().to_vec();
-        let nodes: Vec<cln_grpc::pb::ListnodesNodes> = self
+    async fn get_node_info(&mut self, node_id: &PublicKey) -> Result<NodeInfo, LightningError> {
+        let mut nodes: Vec<cln_grpc::pb::ListnodesNodes> = self
             .client
             .list_nodes(ListnodesRequest {
-                id: Some(node_id.clone()),
+                id: Some(node_id.serialize().to_vec()),
             })
             .await
             .map_err(|err| LightningError::GetNodeInfoError(err.to_string()))?
@@ -243,15 +242,19 @@ impl LightningNode for ClnNode {
             .nodes;
 
         // We are filtering `list_nodes` to a single node, so we should get either an empty vector or one with a single element
-        if let Some(node) = nodes.first() {
-            Ok(node
-                .features
-                .clone()
-                .map_or(NodeFeatures::empty(), |mut f| {
-                    // We need to reverse this given it has the CLN wire encoding which is BE
-                    f.reverse();
-                    NodeFeatures::from_le_bytes(f)
-                }))
+        if let Some(node) = nodes.pop() {
+            Ok(NodeInfo {
+                pubkey: *node_id,
+                alias: node.alias.unwrap_or(String::new()),
+                features: node
+                    .features
+                    .clone()
+                    .map_or(NodeFeatures::empty(), |mut f| {
+                        // We need to reverse this given it has the CLN wire encoding which is BE
+                        f.reverse();
+                        NodeFeatures::from_le_bytes(f)
+                    }),
+            })
         } else {
             Err(LightningError::GetNodeInfoError(
                 "Node not found".to_string(),
