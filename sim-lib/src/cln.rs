@@ -59,6 +59,7 @@ impl ClnNode {
             id,
             alias,
             our_features,
+            network,
             ..
         } = client
             .getinfo(GetinfoRequest {})
@@ -80,6 +81,7 @@ impl ClnNode {
                     .map_err(|err| LightningError::GetInfoError(err.to_string()))?,
                 features,
                 alias: alias.unwrap_or("".to_string()),
+                network,
             },
         })
     }

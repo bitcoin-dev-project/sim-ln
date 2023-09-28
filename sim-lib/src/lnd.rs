@@ -51,6 +51,7 @@ impl LndNode {
             identity_pubkey,
             features,
             alias,
+            chains,
             ..
         } = client
             .lightning()
@@ -59,6 +60,12 @@ impl LndNode {
             .map_err(|err| LightningError::GetInfoError(err.to_string()))?
             .into_inner();
 
+        if chains.len() != 1 {
+            return Err(LightningError::GetInfoError(
+                "LND node is not connected to a single chain".to_string(),
+            ));
+        }
+
         Ok(Self {
             client,
             info: NodeInfo {
@@ -66,6 +73,7 @@ impl LndNode {
                     .map_err(|err| LightningError::GetInfoError(err.to_string()))?,
                 features: parse_node_features(features.keys().cloned().collect()),
                 alias,
+                network: chains[0].network.clone(),
             },
         })
     }

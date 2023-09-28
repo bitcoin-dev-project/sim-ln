@@ -108,6 +108,7 @@ pub struct NodeInfo {
     pub pubkey: PublicKey,
     pub alias: String,
     pub features: NodeFeatures,
+    pub network: String,
 }
 
 /// LightningNode represents the functionality that is required to execute events on a lightning node.
@@ -275,6 +276,41 @@ impl Simulation {
         Ok(())
     }
 
+    // it validates that the nodes are all on the same network and ensures that we're not running on mainnet.
+    async fn validate_node_network(&self) -> Result<(), LightningError> {
+        let mut valid_network = Option::None;
+        let unsupported_networks: HashSet<String> = vec!["mainnet", "bitcoin"]
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        for node in self.nodes.values() {
+            let network = node.lock().await.get_info().network.clone();
+            if unsupported_networks.contains(&network) {
+                return Err(LightningError::ValidationError(
+                    "mainnet is not supported".to_string(),
+                ));
+            }
+
+            valid_network = valid_network.take().or_else(|| Some(network.clone()));
+            if let Some(valid) = &valid_network {
+                if valid != &network {
+                    return Err(LightningError::ValidationError(format!(
+                        "nodes are not on the same network {}.",
+                        network,
+                    )));
+                }
+            }
+        }
+
+        log::info!(
+            "Simulation is running on the network: {}.",
+            valid_network.as_ref().unwrap()
+        );
+
+        Ok(())
+    }
+
     pub async fn run(&self) -> Result<(), SimulationError> {
         if let Some(total_time) = self.total_time {
             log::info!("Running the simulation for {}s.", total_time.as_secs());
@@ -282,6 +318,7 @@ impl Simulation {
             log::info!("Running the simulation forever.");
         }
 
+        self.validate_node_network().await?;
         self.validate_activity().await?;
 
         log::info!(
