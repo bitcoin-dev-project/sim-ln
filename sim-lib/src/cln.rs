@@ -106,7 +106,18 @@ impl LightningNode for ClnNode {
                 ..Default::default()
             })
             .await
-            .map_err(|err| LightningError::SendPaymentError(err.to_string()))?
+            .map_err(|s| {
+                let message = s.message();
+                // REF: https://docs.corelightning.org/reference/lightning-keysend#return-value
+
+                if message.contains("Some(-1") | message.contains("Some(203") {
+                    // Error codes -1 and 203 indicate permanent errors
+                    LightningError::PermanentError(format!("{:?}", message))
+                } else {
+                    // Error codes, 205, 206 and 210 indicate temporary errors that can be retried
+                    LightningError::SendPaymentError(format!("{:?}", message))
+                }
+            })?
             .into_inner();
         let slice: [u8; 32] = payment_hash
             .as_slice()
