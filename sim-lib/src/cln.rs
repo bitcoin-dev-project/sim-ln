@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use cln_grpc::pb::{
     listpays_pays::ListpaysPaysStatus, node_client::NodeClient, Amount, GetinfoRequest,
-    GetinfoResponse, KeysendRequest, KeysendResponse, ListnodesRequest, ListpaysRequest,
-    ListpaysResponse,
+    GetinfoResponse, KeysendRequest, KeysendResponse, ListchannelsRequest, ListnodesRequest,
+    ListpaysRequest, ListpaysResponse,
 };
 use lightning::ln::features::NodeFeatures;
 use lightning::ln::PaymentHash;
@@ -84,6 +84,36 @@ impl ClnNode {
                 network,
             },
         })
+    }
+
+    /// Fetch channels belonging to the local node, initiated locally if is_source is true, and initiated remotely if
+    /// is_source is false. Introduced as a helper function because CLN doesn't have a single API to list all of our
+    /// node's channels.
+    async fn node_channels(&mut self, is_source: bool) -> Result<Vec<u64>, LightningError> {
+        let req = if is_source {
+            ListchannelsRequest {
+                source: Some(self.info.pubkey.serialize().to_vec()),
+                ..Default::default()
+            }
+        } else {
+            ListchannelsRequest {
+                destination: Some(self.info.pubkey.serialize().to_vec()),
+                ..Default::default()
+            }
+        };
+
+        let resp = self
+            .client
+            .list_channels(req)
+            .await
+            .map_err(|err| LightningError::ListChannelsError(err.to_string()))?
+            .into_inner();
+
+        Ok(resp
+            .channels
+            .into_iter()
+            .map(|channel| channel.amount_msat.unwrap_or_default().msat)
+            .collect())
     }
 }
 
@@ -197,6 +227,12 @@ impl LightningNode for ClnNode {
                 "Node not found".to_string(),
             ))
         }
+    }
+
+    async fn list_channels(&mut self) -> Result<Vec<u64>, LightningError> {
+        let mut node_channels = self.node_channels(true).await?;
+        node_channels.extend(self.node_channels(false).await?);
+        Ok(node_channels)
     }
 }
 

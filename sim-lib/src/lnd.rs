@@ -10,7 +10,7 @@ use bitcoin::secp256k1::PublicKey;
 use lightning::ln::features::NodeFeatures;
 use lightning::ln::{PaymentHash, PaymentPreimage};
 use tonic_lnd::lnrpc::{payment::PaymentStatus, GetInfoRequest, GetInfoResponse};
-use tonic_lnd::lnrpc::{NodeInfoRequest, PaymentFailureReason};
+use tonic_lnd::lnrpc::{ListChannelsRequest, NodeInfoRequest, PaymentFailureReason};
 use tonic_lnd::routerrpc::TrackPaymentRequest;
 use tonic_lnd::tonic::Code::Unavailable;
 use tonic_lnd::tonic::Status;
@@ -209,6 +209,25 @@ impl LightningNode for LndNode {
                 "Node not found".to_string(),
             ))
         }
+    }
+
+    async fn list_channels(&mut self) -> Result<Vec<u64>, LightningError> {
+        let channels = self
+            .client
+            .lightning()
+            .list_channels(ListChannelsRequest {
+                ..Default::default()
+            })
+            .await
+            .map_err(|err| LightningError::ListChannelsError(err.to_string()))?
+            .into_inner();
+
+        // Capacity is returned in satoshis, so we convert to msat.
+        Ok(channels
+            .channels
+            .iter()
+            .map(|channel| 1000 * channel.capacity as u64)
+            .collect())
     }
 }
 
