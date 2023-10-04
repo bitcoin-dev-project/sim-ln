@@ -29,15 +29,92 @@ on. You will need:
 See our [tracking issue](https://github.com/bitcoin-dev-project/sim-ln/issues/26)
 for updates on implementation support (contributions welcome!).
 
-## Configuration
-The simulator is configured with two sets of information expressed in 
-json: 
-* `nodes`: a set of nodes that you have permission to execute 
-  commands on.
-* `activity`: a description of the payment activity that you would 
-  like to generate.
+## Getting Started
+Clone the repo: 
+```
+git clone https://github.com/bitcoin-dev-project/sim-ln
+cd sim-ln
+```
 
-The example config below sets up the following simulation:
+Install the CLI: 
+```
+cargo install --locked --path sim-cli/
+```
+
+Run with Simulation File (see [setup instructions](#simulation-file-setup) for details):
+ ```
+sim-cli sim.json
+```
+
+### Simulation File Setup
+The simulator requires access details for a set of `nodes` that you 
+have permission to execute commands on. Note that the current version 
+of the simulator uses keysend to execute payments, which must be 
+enabled in LND using `--accept-keysend`.
+
+Payment activity can be simulated in two different ways:
+* Random activity: generate random activity on the `nodes` provided, 
+  using the graph topology to determine payment frequency and size.
+* Defined activity: provide descriptions of specific payments that 
+  you would like the generator to execute.
+
+### Setup - Random Activity
+
+To run the simulator with random activity generation, you just need to 
+provide a set of nodes and the simulator will generate activity based 
+on the topology of the underlying graph. Note that payments will only 
+be sent between the `nodes` that are provided so that liquidity does 
+not "drain" from the simulation.
+
+```
+{
+  "nodes": [
+    {
+      "LND": {
+        "id": "Alice",
+        "address": "https://localhost:10011",
+        "macaroon": "/path/admin.macaroon",
+        "cert": "/path/tls.cert"
+      }
+    },
+    {
+      "CLN": {
+        "id": "0230a16a05c5ca120136b3a770a2adfdad88a68d526e63448a9eef88bddd6a30d8",
+        "address": "https://localhost:10013",
+        "ca_cert": "/path/ca.pem",
+        "client_cert": "/path/client.pem",
+        "client_key": "/path/client-key.pem"
+      }
+    }
+  ]
+}
+```
+
+Nodes can be identified by an arbitrary string ("Alice", "CLN1", etc) or
+by their node public key. If a valid public key is provided it *must* 
+match the public key reported by the node.
+
+There are a few cli flags that can be used to toggle the characteristics 
+of the random activity that is generated: 
+* `--expected-payment-amount`: the approximate average amount that 
+  will be sent by nodes, randomness will be introduced such that larger
+  nodes send a wider variety of payment sizes around this expectation.
+* `--capacity-multiplier`: the number of times over that each node in 
+  the network sends their capacity in a calendar month, for example:
+  * `capacity-multiplier=2` means that each node sends double their 
+     capacity in a month.
+  * `capacity-multiplier=0.5` means that each node sends half their 
+    capacity in a month.
+
+### Setup - Defined Activity
+If you would like SimLN to generate a specific payments between source 
+and destination nodes, you can provide `activity` descriptions of the 
+source, destination, frequency and amount for payments that you'd like 
+to execute. Note that `source` nodes *must* be contained in `nodes`, 
+but destination nodes can be any public node in the network (though 
+this may result in liquidity draining over time).
+
+The example simulation file below sets up the following simulation:
 * Connect to `Alice` running LND to generate activity.
 * Connect to `Bob` running CLN to generate activity.
 * Dispatch 2000 msat payments from `Alice` to `Carol` every 1 seconds.
@@ -48,7 +125,7 @@ The example config below sets up the following simulation:
   "nodes": [
     {
       "LND": {
-        "id": "0257956239efc55dd6be91eff40c47749314ccf79cb15f79e30ca12f8622b6de9e",
+        "id": "Alice",
         "address": "https://localhost:10011",
         "macaroon": "/path/admin.macaroon",
         "cert": "/path/tls.cert"
@@ -66,14 +143,14 @@ The example config below sets up the following simulation:
   ],
   "activity": [
     {
-      "source": "0257956239efc55dd6be91eff40c47749314ccf79cb15f79e30ca12f8622b6de9e",
+      "source": "Alice",
       "destination": "02d804ad31429c8cc29e20ec43b4129553eb97623801e534ab5a66cdcd2149dbed",
       "interval_secs": 1,
       "amount_msat": 2000
     },
     {
       "source": "0230a16a05c5ca120136b3a770a2adfdad88a68d526e63448a9eef88bddd6a30d8",
-      "destination": "0257956239efc55dd6be91eff40c47749314ccf79cb15f79e30ca12f8622b6de9e",
+      "destination": "Alice",
       "interval_secs": 50,
       "amount_msat": 140000
     },
@@ -87,27 +164,12 @@ The example config below sets up the following simulation:
 }
 ```
 
-Note that you do not need to have execution permissions on the destination 
-nodes for keysend payments. This allows execution in environments such as 
-signets, where not every node is under your control.
+Nodes can be identified by their public key or an id string (as 
+described above). Activity sources and destinations may reference the 
+`id` defined in `nodes`, but destinations that are not listed in `nodes` 
+*must* provide a valid public key.
 
-## Getting Started
-Clone the repo: 
-```
-git clone https://github.com/bitcoin-dev-project/sim-ln
-cd sim-ln
-```
-
-Install the CLI: 
-```
-cargo install --locked --path sim-cli/
-```
-
-Run Simulation with Config: 
-```
-sim-cli --config config.json
-```
-
+### Simulation Output
 A summary of the results will be logged by the simulator, and a full 
 list of payments made with their outcomes is available in 
 `simulation_{timestamp}.csv` in the directory that the simulation was 
