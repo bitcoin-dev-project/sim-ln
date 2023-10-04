@@ -7,6 +7,7 @@ use crate::{
 use async_trait::async_trait;
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::PublicKey;
+use bitcoin::Network;
 use lightning::ln::features::NodeFeatures;
 use lightning::ln::{PaymentHash, PaymentPreimage};
 use tonic_lnd::lnrpc::{payment::PaymentStatus, GetInfoRequest, GetInfoResponse};
@@ -53,7 +54,6 @@ impl LndNode {
             identity_pubkey,
             features,
             alias,
-            chains,
             ..
         } = client
             .lightning()
@@ -62,12 +62,6 @@ impl LndNode {
             .map_err(|err| LightningError::GetInfoError(err.to_string()))?
             .into_inner();
 
-        if chains.len() != 1 {
-            return Err(LightningError::GetInfoError(
-                "LND node is not connected to a single chain".to_string(),
-            ));
-        }
-
         Ok(Self {
             client,
             info: NodeInfo {
@@ -75,7 +69,6 @@ impl LndNode {
                     .map_err(|err| LightningError::GetInfoError(err.to_string()))?,
                 features: parse_node_features(features.keys().cloned().collect()),
                 alias,
-                network: chains[0].network.clone(),
             },
         })
     }
@@ -88,6 +81,38 @@ impl LightningNode for LndNode {
     /// if we end up storing some other info returned by the RPC call, such as the block height
     fn get_info(&self) -> &NodeInfo {
         &self.info
+    }
+
+    async fn get_network(&mut self) -> Result<Network, LightningError> {
+        let info = self
+            .client
+            .lightning()
+            .get_info(GetInfoRequest {})
+            .await
+            .map_err(|err| LightningError::GetInfoError(err.to_string()))?
+            .into_inner();
+
+        if info.chains.is_empty() {
+            return Err(LightningError::ValidationError(
+                "LND node is not connected any chain".to_string(),
+            ));
+        } else if info.chains.len() > 1 {
+            return Err(LightningError::ValidationError(format!(
+                "LND node is connected to more than one chain: {:?}",
+                info.chains.iter().map(|c| c.chain.to_string())
+            )));
+        }
+
+        Ok(Network::from_str(match info.chains[0].network.as_str() {
+            "mainnet" => "bitcoin",
+            "simnet" => {
+                return Err(LightningError::ValidationError(
+                    "simnet is not supported".to_string(),
+                ))
+            }
+            x => x,
+        })
+        .map_err(|err| LightningError::ValidationError(err.to_string()))?)
     }
 
     async fn send_payment(

@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
+use bitcoin::Network;
 use cln_grpc::pb::{
     listpays_pays::ListpaysPaysStatus, node_client::NodeClient, Amount, GetinfoRequest,
     GetinfoResponse, KeysendRequest, KeysendResponse, ListchannelsRequest, ListnodesRequest,
@@ -59,7 +60,6 @@ impl ClnNode {
             id,
             alias,
             our_features,
-            network,
             ..
         } = client
             .getinfo(GetinfoRequest {})
@@ -81,7 +81,6 @@ impl ClnNode {
                     .map_err(|err| LightningError::GetInfoError(err.to_string()))?,
                 features,
                 alias: alias.unwrap_or("".to_string()),
-                network,
             },
         })
     }
@@ -121,6 +120,18 @@ impl ClnNode {
 impl LightningNode for ClnNode {
     fn get_info(&self) -> &NodeInfo {
         &self.info
+    }
+
+    async fn get_network(&mut self) -> Result<Network, LightningError> {
+        let info = self
+            .client
+            .getinfo(GetinfoRequest {})
+            .await
+            .map_err(|err| LightningError::GetInfoError(err.to_string()))?
+            .into_inner();
+
+        Ok(Network::from_core_arg(&info.network)
+            .map_err(|err| LightningError::ValidationError(err.to_string()))?)
     }
 
     async fn send_payment(

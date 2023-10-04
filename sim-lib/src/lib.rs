@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
+use bitcoin::Network;
 use csv::WriterBuilder;
 use lightning::ln::features::NodeFeatures;
 use lightning::ln::PaymentHash;
@@ -120,7 +121,6 @@ pub struct NodeInfo {
     pub pubkey: PublicKey,
     pub alias: String,
     pub features: NodeFeatures,
-    pub network: String,
 }
 
 /// LightningNode represents the functionality that is required to execute events on a lightning node.
@@ -128,6 +128,8 @@ pub struct NodeInfo {
 pub trait LightningNode {
     /// Get information about the node.
     fn get_info(&self) -> &NodeInfo;
+    /// Get the network this node is running at
+    async fn get_network(&mut self) -> Result<Network, LightningError>;
     /// Keysend payment worth `amount_msat` from a source node to the destination node.
     async fn send_payment(
         &mut self,
@@ -348,37 +350,34 @@ impl Simulation {
         Ok(())
     }
 
-    // it validates that the nodes are all on the same network and ensures that we're not running on mainnet.
+    // validates that the nodes are all on the same network and ensures that we're not running on mainnet.
     async fn validate_node_network(&self) -> Result<(), LightningError> {
-        let mut valid_network = Option::None;
-        let unsupported_networks: HashSet<String> = vec!["mainnet", "bitcoin"]
-            .into_iter()
-            .map(|s| s.to_string())
-            .collect();
+        if self.nodes.is_empty() {
+            return Err(LightningError::ValidationError(
+                "we don't control any nodes. Specify at least one node in your config file"
+                    .to_string(),
+            ));
+        }
+        let mut running_network = Option::None;
 
         for node in self.nodes.values() {
-            let network = node.lock().await.get_info().network.clone();
-            if unsupported_networks.contains(&network) {
+            let network = node.lock().await.get_network().await?;
+            if network == Network::Bitcoin {
                 return Err(LightningError::ValidationError(
                     "mainnet is not supported".to_string(),
                 ));
             }
 
-            valid_network = valid_network.take().or_else(|| Some(network.clone()));
-            if let Some(valid) = &valid_network {
-                if valid != &network {
-                    return Err(LightningError::ValidationError(format!(
-                        "nodes are not on the same network {}.",
-                        network,
-                    )));
-                }
+            running_network = running_network.take().or(Some(network));
+            if running_network != Some(network) {
+                return Err(LightningError::ValidationError(format!(
+                    "nodes are not on the same network {}.",
+                    network,
+                )));
             }
         }
 
-        log::info!(
-            "Simulation is running on the network: {}.",
-            valid_network.as_ref().unwrap()
-        );
+        log::info!("Simulation is running on {}.", running_network.unwrap());
 
         Ok(())
     }
