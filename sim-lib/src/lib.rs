@@ -362,10 +362,20 @@ impl Simulation {
     /// we're working with. If no activity description is provided, then it ensures that we have configured a network
     /// that is suitable for random activity generation.
     async fn validate_activity(&self) -> Result<(), LightningError> {
-        if self.activity.is_empty() && self.nodes.len() <= 1 {
-            return Err(LightningError::ValidationError(
-                "At least two nodes required for random activity generation.".to_string(),
-            ));
+        // For now, empty activity signals random activity generation
+        if self.activity.is_empty() {
+            if self.nodes.len() <= 1 {
+                return Err(LightningError::ValidationError(
+                    "At least two nodes required for random activity generation.".to_string(),
+                ));
+            } else {
+                for node in self.nodes.values() {
+                    let node = node.lock().await;
+                    if !node.get_info().features.supports_keysend() {
+                        return Err(LightningError::ValidationError(format!("All nodes eligible for random activity generation must support keysend, {} does not", node.get_info())));
+                    }
+                }
+            }
         }
 
         for payment_flow in self.activity.iter() {
@@ -819,32 +829,32 @@ async fn produce_random_events<N: NetworkGenerator, A: PaymentGenerator + Displa
             // Wait until our time to next payment has elapsed then execute a random amount payment to a random
             // destination.
             _ = time::sleep(wait) => {
-                let destination = network_generator.lock().await.sample_node_by_capacity(source.pubkey);
+                let (destination, capacity) = network_generator.lock().await.sample_node_by_capacity(source.pubkey);
 
                 // Only proceed with a payment if the amount is non-zero, otherwise skip this round. If we can't get
                 // a payment amount something has gone wrong (because we should have validated that we can always
                 // generate amounts), so we exit.
-                let amount = match node_generator.payment_amount(destination.1) {
+                let amount = match node_generator.payment_amount(capacity) {
                     Ok(amt) => {
                         if amt == 0 {
-                            log::debug!("Skipping zero amount payment for {source} -> {}.", destination.0);
+                            log::debug!("Skipping zero amount payment for {source} -> {destination}.");
                             continue;
                         }
                         amt
                     },
                     Err(e) => {
-                        log::error!("Could not get amount for {source} -> {}: {e}. Please report a bug!", destination.0);
+                        log::error!("Could not get amount for {source} -> {destination}: {e}. Please report a bug!");
                         break;
                     },
                 };
 
-                log::debug!("Generated random payment: {source} -> {}: {amount} msat.", destination.0);
+                log::debug!("Generated random payment: {source} -> {}: {amount} msat.", destination);
 
                 // Send the payment, exiting if we can no longer send to the consumer.
-                let event = SimulationEvent::SendPayment(destination.0.clone(), amount);
+                let event = SimulationEvent::SendPayment(destination.clone(), amount);
                 if let Err(e) = sender.send(event).await {
                     log::debug!(
-                        "Stopped random producer for {amount}: {source} -> {}. Consumer error: {e}.", destination.0,
+                        "Stopped random producer for {amount}: {source} -> {destination}. Consumer error: {e}.",
                     );
                     break;
                 }
