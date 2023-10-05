@@ -344,6 +344,8 @@ impl Simulation {
         activity: Vec<ActivityDefinition>,
         total_time: Option<u32>,
         print_batch_size: Option<u32>,
+        expected_payment_amount: Option<u64>,
+        activity_multiplier: Option<f64>,
     ) -> Self {
         let (shutdown_trigger, shutdown_listener) = triggered::trigger();
         Self {
@@ -353,8 +355,8 @@ impl Simulation {
             shutdown_listener,
             total_time: total_time.map(|x| Duration::from_secs(x as u64)),
             print_batch_size: print_batch_size.unwrap_or(DEFAULT_PRINT_BATCH_SIZE),
-            expected_payment_msat: EXPECTED_PAYMENT_AMOUNT,
-            activity_multiplier: ACTIVITY_MULTIPLIER,
+            expected_payment_msat: expected_payment_amount.unwrap_or(EXPECTED_PAYMENT_AMOUNT),
+            activity_multiplier: activity_multiplier.unwrap_or(ACTIVITY_MULTIPLIER),
         }
     }
 

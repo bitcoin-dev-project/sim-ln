@@ -24,6 +24,10 @@ struct Cli {
     print_batch_size: Option<u32>,
     #[clap(long, short, default_value = "info")]
     log_level: LevelFilter,
+    #[clap(long, short)]
+    expected_pmt_amt: Option<u64>,
+    #[clap(long, short)]
+    capacity_multiplier: Option<f64>,
 }
 
 #[tokio::main]
@@ -143,6 +147,8 @@ async fn main() -> anyhow::Result<()> {
         validated_activities,
         cli.total_time,
         cli.print_batch_size,
+        cli.expected_pmt_amt,
+        cli.capacity_multiplier,
     );
     let sim2 = sim.clone();
 
