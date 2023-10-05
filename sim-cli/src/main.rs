@@ -7,16 +7,16 @@ use tokio::sync::Mutex;
 use clap::Parser;
 use log::LevelFilter;
 use sim_lib::{
-    cln::ClnNode, lnd::LndNode, ActivityDefinition, Config, LightningError, LightningNode,
-    NodeConnection, NodeId, Simulation,
+    cln::ClnNode, lnd::LndNode, ActivityDefinition, LightningError, LightningNode, NodeConnection,
+    NodeId, SimParams, Simulation,
 };
 use simple_logger::SimpleLogger;
 
 #[derive(Parser)]
 #[command(version)]
 struct Cli {
-    #[clap(long, short)]
-    config: PathBuf,
+    #[clap(index = 1)]
+    sim_file: PathBuf,
     #[clap(long, short)]
     total_time: Option<u32>,
     /// Number of activity results to batch together before printing to csv file
@@ -37,8 +37,8 @@ async fn main() -> anyhow::Result<()> {
         .init()
         .unwrap();
 
-    let config_str = std::fs::read_to_string(cli.config)?;
-    let Config { nodes, activity } = serde_json::from_str(&config_str)?;
+    let SimParams { nodes, activity } =
+        serde_json::from_str(&std::fs::read_to_string(cli.sim_file)?)?;
 
     let mut clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>> = HashMap::new();
     let mut pk_node_map = HashMap::new();
