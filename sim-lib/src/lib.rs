@@ -86,7 +86,7 @@ impl std::fmt::Display for NodeId {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Config {
+pub struct SimParams {
     pub nodes: Vec<NodeConnection>,
     #[serde(default)]
     pub activity: Vec<ActivityParser>,
