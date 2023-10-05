@@ -33,48 +33,91 @@ pub const ACTIVITY_MULTIPLIER: f64 = 2.0;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum NodeConnection {
     #[serde(alias = "lnd", alias = "Lnd")]
-    LND(LndConnection),
+    LND(lnd::LndConnection),
     #[serde(alias = "cln", alias = "Cln")]
-    CLN(ClnConnection),
+    CLN(cln::ClnConnection),
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct LndConnection {
-    pub id: PublicKey,
-    pub address: String,
-    #[serde(deserialize_with = "serializers::deserialize_path")]
-    pub macaroon: String,
-    #[serde(deserialize_with = "serializers::deserialize_path")]
-    pub cert: String,
+#[derive(Serialize, Debug, Clone)]
+pub enum NodeId {
+    PublicKey(PublicKey),
+    Alias(String),
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct ClnConnection {
-    pub id: PublicKey,
-    pub address: String,
-    #[serde(deserialize_with = "serializers::deserialize_path")]
-    pub ca_cert: String,
-    #[serde(deserialize_with = "serializers::deserialize_path")]
-    pub client_cert: String,
-    #[serde(deserialize_with = "serializers::deserialize_path")]
-    pub client_key: String,
+impl NodeId {
+    pub fn validate(&self, node_id: &PublicKey, alias: &mut String) -> Result<(), LightningError> {
+        match self {
+            crate::NodeId::PublicKey(pk) => {
+                if pk != node_id {
+                    return Err(LightningError::ValidationError(format!(
+                    "the provided node id does not match the one returned by the backend ({} != {}).", pk, node_id)));
+                }
+            }
+            crate::NodeId::Alias(a) => {
+                if alias != a {
+                    log::warn!("The provided alias does not match the one returned by the backend ({} != {}).", a, alias)
+                }
+                *alias = a.to_string();
+            }
+        }
+        Ok(())
+    }
+
+    pub fn get_pk(&self) -> Result<&PublicKey, String> {
+        if let NodeId::PublicKey(pk) = self {
+            Ok(pk)
+        } else {
+            Err("NodeId is not a PublicKey".to_string())
+        }
+    }
+}
+
+impl std::fmt::Display for NodeId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                NodeId::PublicKey(pk) => pk.to_string(),
+                NodeId::Alias(a) => a.to_owned(),
+            }
+        )
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     pub nodes: Vec<NodeConnection>,
-    pub activity: Option<Vec<ActivityDefinition>>,
+    #[serde(default)]
+    pub activity: Vec<ActivityParser>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+/// Data structure used to parse information from the simulation file. It allows source and destination to be
+/// [NodeId], which enables the use of public keys and aliases in the simulation description.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityParser {
+    // The source of the payment.
+    #[serde(with = "serializers::serde_node_id")]
+    pub source: NodeId,
+    // The destination of the payment.
+    #[serde(with = "serializers::serde_node_id")]
+    pub destination: NodeId,
+    // The interval of the event, as in every how many seconds the payment is performed.
+    pub interval_secs: u16,
+    // The amount of m_sat to used in this payment.
+    pub amount_msat: u64,
+}
+
+/// Data structure used internally by the simulator. Both source and destination are represented as [PublicKey] here.
+/// This is constructed during activity validation and passed along to the [Simulation].
+#[derive(Debug, Clone)]
 pub struct ActivityDefinition {
     // The source of the payment.
-    pub source: PublicKey,
+    pub source: NodeInfo,
     // The destination of the payment.
-    pub destination: PublicKey,
+    pub destination: NodeInfo,
     // The interval of the event, as in every how many seconds the payment is performed.
-    #[serde(alias = "interval_secs")]
-    pub interval: u16,
+    pub interval_secs: u16,
     // The amount of m_sat to used in this payment.
     pub amount_msat: u64,
 }
@@ -123,6 +166,18 @@ pub struct NodeInfo {
     pub features: NodeFeatures,
 }
 
+impl Display for NodeInfo {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let pk = self.pubkey.to_string();
+        let pk_summary = format!("{}...{}", &pk[..6], &pk[pk.len() - 6..]);
+        if self.alias.is_empty() {
+            write!(f, "{}", pk_summary)
+        } else {
+            write!(f, "{}({})", self.alias, pk_summary)
+        }
+    }
+}
+
 /// LightningNode represents the functionality that is required to execute events on a lightning node.
 #[async_trait]
 pub trait LightningNode {
@@ -142,8 +197,8 @@ pub trait LightningNode {
         hash: PaymentHash,
         shutdown: Listener,
     ) -> Result<PaymentResult, LightningError>;
-    /// Gets the list of features of a given node
-    async fn get_node_features(&mut self, node: PublicKey) -> Result<NodeFeatures, LightningError>;
+    /// Gets information on a specific node
+    async fn get_node_info(&mut self, node_id: &PublicKey) -> Result<NodeInfo, LightningError>;
     /// Lists all channels, at present only returns a vector of channel capacities in msat because no further
     /// information is required.
     async fn list_channels(&mut self) -> Result<Vec<u64>, LightningError>;
@@ -152,7 +207,7 @@ pub trait LightningNode {
 pub trait NetworkGenerator {
     // sample_node_by_capacity randomly picks a node within the network weighted by its capacity deployed to the
     // network in channels. It returns the node's public key and its capacity in millisatoshis.
-    fn sample_node_by_capacity(&self, source: PublicKey) -> (PublicKey, u64);
+    fn sample_node_by_capacity(&self, source: PublicKey) -> (NodeInfo, u64);
 }
 
 pub trait PaymentGenerator {
@@ -244,11 +299,11 @@ impl Display for Payment {
 
 /// SimulationEvent describes the set of actions that the simulator can run on nodes that it has execution permissions
 /// on.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum SimulationEvent {
     /// Dispatch a payment of the specified amount to the public key provided.
     /// Results in `SimulationOutput::SendPaymentSuccess` or `SimulationOutput::SendPaymentFailure`.
-    SendPayment(PublicKey, u64),
+    SendPayment(NodeInfo, u64),
 }
 
 /// SimulationOutput provides the output of a simulation event.
@@ -286,14 +341,14 @@ const DEFAULT_PRINT_BATCH_SIZE: u32 = 500;
 impl Simulation {
     pub fn new(
         nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>>,
-        activity: Option<Vec<ActivityDefinition>>,
+        activity: Vec<ActivityDefinition>,
         total_time: Option<u32>,
         print_batch_size: Option<u32>,
     ) -> Self {
         let (shutdown_trigger, shutdown_listener) = triggered::trigger();
         Self {
             nodes,
-            activity: activity.unwrap_or_default(),
+            activity,
             shutdown_trigger,
             shutdown_listener,
             total_time: total_time.map(|x| Duration::from_secs(x as u64)),
@@ -307,39 +362,35 @@ impl Simulation {
     /// we're working with. If no activity description is provided, then it ensures that we have configured a network
     /// that is suitable for random activity generation.
     async fn validate_activity(&self) -> Result<(), LightningError> {
-        if self.activity.is_empty() && self.nodes.len() <= 1 {
-            return Err(LightningError::ValidationError(
-                "At least two nodes required for random activity generation.".to_string(),
-            ));
+        // For now, empty activity signals random activity generation
+        if self.activity.is_empty() {
+            if self.nodes.len() <= 1 {
+                return Err(LightningError::ValidationError(
+                    "At least two nodes required for random activity generation.".to_string(),
+                ));
+            } else {
+                for node in self.nodes.values() {
+                    let node = node.lock().await;
+                    if !node.get_info().features.supports_keysend() {
+                        return Err(LightningError::ValidationError(format!("All nodes eligible for random activity generation must support keysend, {} does not", node.get_info())));
+                    }
+                }
+            }
         }
 
         for payment_flow in self.activity.iter() {
             // We need every source node that is configured to execute some activity to be included in our set of
             // nodes so that we can execute events on it.
-            let source_node =
-                self.nodes
-                    .get(&payment_flow.source)
-                    .ok_or(LightningError::ValidationError(format!(
-                        "Source node not found, {}",
-                        payment_flow.source,
-                    )))?;
+            self.nodes
+                .get(&payment_flow.source.pubkey)
+                .ok_or(LightningError::ValidationError(format!(
+                    "Source node not found, {}",
+                    payment_flow.source,
+                )))?;
 
             // Destinations must support keysend to be able to receive payments.
             // Note: validation should be update with a different check if an event is not a payment.
-            let features = source_node
-                .lock()
-                .await
-                .get_node_features(payment_flow.destination)
-                .await
-                .map_err(|e| {
-                    log::debug!("{}", e);
-                    LightningError::ValidationError(format!(
-                        "Destination node unknown or invalid, {}",
-                        payment_flow.destination,
-                    ))
-                })?;
-
-            if !features.supports_keysend() {
+            if !payment_flow.destination.features.supports_keysend() {
                 return Err(LightningError::ValidationError(format!(
                     "Destination node does not support keysend, {}",
                     payment_flow.destination,
@@ -416,7 +467,7 @@ impl Simulation {
         let collecting_nodes = if !self.activity.is_empty() {
             self.activity
                 .iter()
-                .map(|activity| activity.source)
+                .map(|activity| activity.source.pubkey)
                 .collect()
         } else {
             random_activity_nodes.extend(self.random_activity_nodes().await?);
@@ -506,7 +557,9 @@ impl Simulation {
 
     /// Returns the list of nodes that are eligible for generating random activity on. This is the subset of nodes
     /// that have sufficient capacity to generate payments of our expected payment amount.
-    async fn random_activity_nodes(&self) -> Result<HashMap<PublicKey, u64>, SimulationError> {
+    async fn random_activity_nodes(
+        &self,
+    ) -> Result<HashMap<PublicKey, (NodeInfo, u64)>, SimulationError> {
         // Collect capacity of each node from its view of its own channels. Total capacity is divided by two to
         // avoid double counting capacity (as each node has a counterparty in the channel).
         let mut node_capacities = HashMap::new();
@@ -521,7 +574,13 @@ impl Simulation {
                 continue;
             }
 
-            node_capacities.insert(*pk, chan_capacity / 2);
+            node_capacities.insert(
+                *pk,
+                (
+                    node.lock().await.get_node_info(pk).await?,
+                    chan_capacity / 2,
+                ),
+            );
         }
 
         Ok(node_capacities)
@@ -568,9 +627,9 @@ impl Simulation {
         tasks: &mut JoinSet<()>,
     ) {
         for description in self.activity.iter() {
-            let sender_chan = producer_channels.get(&description.source).unwrap();
+            let sender_chan = producer_channels.get(&description.source.pubkey).unwrap();
             tasks.spawn(produce_events(
-                *description,
+                description.clone(),
                 sender_chan.clone(),
                 self.shutdown_trigger.clone(),
                 self.shutdown_listener.clone(),
@@ -582,12 +641,13 @@ impl Simulation {
     /// provided for each node represented in producer channels.
     async fn dispatch_random_producers(
         &self,
-        node_capacities: HashMap<PublicKey, u64>,
+        node_capacities: HashMap<PublicKey, (NodeInfo, u64)>,
         producer_channels: HashMap<PublicKey, Sender<SimulationEvent>>,
         tasks: &mut JoinSet<()>,
     ) -> Result<(), SimulationError> {
-        let network_generator =
-            Arc::new(Mutex::new(NetworkGraphView::new(node_capacities.clone())?));
+        let network_generator = Arc::new(Mutex::new(NetworkGraphView::new(
+            node_capacities.values().cloned().collect(),
+        )?));
 
         log::info!(
             "Created network generator: {}.",
@@ -595,8 +655,8 @@ impl Simulation {
         );
 
         for (pk, sender) in producer_channels.into_iter() {
-            let source_capacity = match node_capacities.get(&pk) {
-                Some(capacity) => *capacity,
+            let (info, source_capacity) = match node_capacities.get(&pk) {
+                Some((info, capacity)) => (info.clone(), *capacity),
                 None => {
                     return Err(SimulationError::RandomActivityError(format!(
                         "Random activity generator run for: {} with unknown capacity.",
@@ -612,7 +672,7 @@ impl Simulation {
             )?;
 
             tasks.spawn(produce_random_events(
-                pk,
+                info,
                 network_generator.clone(),
                 node_generator,
                 sender.clone(),
@@ -636,8 +696,7 @@ async fn consume_events(
     sender: Sender<SimulationOutput>,
     shutdown: Trigger,
 ) {
-    let node_id = node.lock().await.get_info().pubkey;
-    log::debug!("Started consumer for {}.", node_id);
+    log::debug!("Started consumer for {}.", node.lock().await.get_info());
 
     while let Some(event) = receiver.recv().await {
         match event {
@@ -648,15 +707,15 @@ async fn consume_events(
                     source: node.get_info().pubkey,
                     hash: None,
                     amount_msat: amt_msat,
-                    destination: dest,
+                    destination: dest.pubkey,
                     dispatch_time: SystemTime::now(),
                 };
 
-                let outcome = match node.send_payment(dest, amt_msat).await {
+                let outcome = match node.send_payment(dest.pubkey, amt_msat).await {
                     Ok(payment_hash) => {
                         log::debug!(
                             "Send payment: {} -> {}: ({}).",
-                            node_id,
+                            node.get_info(),
                             dest,
                             hex::encode(payment_hash.0)
                         );
@@ -665,7 +724,11 @@ async fn consume_events(
                         SimulationOutput::SendPaymentSuccess(payment)
                     }
                     Err(e) => {
-                        log::error!("Error while sending payment {} -> {}.", node_id, dest);
+                        log::error!(
+                            "Error while sending payment {} -> {}.",
+                            node.get_info(),
+                            dest
+                        );
 
                         match e {
                             LightningError::PermanentError(s) => {
@@ -701,13 +764,12 @@ async fn produce_events(
     shutdown: Trigger,
     listener: Listener,
 ) {
-    let e: SimulationEvent = SimulationEvent::SendPayment(act.destination, act.amount_msat);
-    let interval = time::Duration::from_secs(act.interval as u64);
+    let interval = time::Duration::from_secs(act.interval_secs as u64);
 
     log::debug!(
         "Started producer for {} every {}s: {} -> {}.",
         act.amount_msat,
-        act.interval,
+        act.interval_secs,
         act.source,
         act.destination
     );
@@ -717,7 +779,7 @@ async fn produce_events(
         biased;
         _ = time::sleep(interval) => {
             // Consumer was dropped
-            if sender.send(e).await.is_err() {
+            if sender.send(SimulationEvent::SendPayment(act.destination.clone(), act.amount_msat)).await.is_err() {
                 log::debug!(
                     "Stopped producer for {}: {} -> {}. Consumer cannot be reached.",
                     act.amount_msat,
@@ -745,7 +807,7 @@ async fn produce_events(
 }
 
 async fn produce_random_events<N: NetworkGenerator, A: PaymentGenerator + Display>(
-    source: PublicKey,
+    source: NodeInfo,
     network_generator: Arc<Mutex<N>>,
     node_generator: A,
     sender: Sender<SimulationEvent>,
@@ -767,32 +829,32 @@ async fn produce_random_events<N: NetworkGenerator, A: PaymentGenerator + Displa
             // Wait until our time to next payment has elapsed then execute a random amount payment to a random
             // destination.
             _ = time::sleep(wait) => {
-                let destination = network_generator.lock().await.sample_node_by_capacity(source);
+                let (destination, capacity) = network_generator.lock().await.sample_node_by_capacity(source.pubkey);
 
                 // Only proceed with a payment if the amount is non-zero, otherwise skip this round. If we can't get
                 // a payment amount something has gone wrong (because we should have validated that we can always
                 // generate amounts), so we exit.
-                let amount = match node_generator.payment_amount(destination.1) {
+                let amount = match node_generator.payment_amount(capacity) {
                     Ok(amt) => {
                         if amt == 0 {
-                            log::debug!("Skipping zero amount payment for {source} -> {}.", destination.0);
+                            log::debug!("Skipping zero amount payment for {source} -> {destination}.");
                             continue;
                         }
                         amt
                     },
                     Err(e) => {
-                        log::error!("Could not get amount for {source} -> {}: {e}. Please report a bug!", destination.0);
+                        log::error!("Could not get amount for {source} -> {destination}: {e}. Please report a bug!");
                         break;
                     },
                 };
 
-                log::debug!("Generated random payment: {source} -> {}: {amount} msat.", destination.0);
+                log::debug!("Generated random payment: {source} -> {}: {amount} msat.", destination);
 
                 // Send the payment, exiting if we can no longer send to the consumer.
-                let event = SimulationEvent::SendPayment(destination.0, amount);
+                let event = SimulationEvent::SendPayment(destination.clone(), amount);
                 if let Err(e) = sender.send(event).await {
                     log::debug!(
-                        "Stopped random producer for {amount}: {source} -> {}. Consumer error: {e}.", destination.0,
+                        "Stopped random producer for {amount}: {source} -> {destination}. Consumer error: {e}.",
                     );
                     break;
                 }

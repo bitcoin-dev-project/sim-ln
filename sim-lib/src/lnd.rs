@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::{collections::HashMap, str::FromStr};
 
 use crate::{
-    LightningError, LightningNode, LndConnection, NodeInfo, PaymentOutcome, PaymentResult,
+    serializers, LightningError, LightningNode, NodeId, NodeInfo, PaymentOutcome, PaymentResult,
 };
 use async_trait::async_trait;
 use bitcoin::hashes::{sha256, Hash};
@@ -10,6 +10,7 @@ use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
 use lightning::ln::features::NodeFeatures;
 use lightning::ln::{PaymentHash, PaymentPreimage};
+use serde::{Deserialize, Serialize};
 use tonic_lnd::lnrpc::{payment::PaymentStatus, GetInfoRequest, GetInfoResponse};
 use tonic_lnd::lnrpc::{ListChannelsRequest, NodeInfoRequest, PaymentFailureReason};
 use tonic_lnd::routerrpc::TrackPaymentRequest;
@@ -20,6 +21,17 @@ use triggered::Listener;
 
 const KEYSEND_KEY: u64 = 5482373484;
 const SEND_PAYMENT_TIMEOUT_SECS: i32 = 300;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct LndConnection {
+    #[serde(with = "serializers::serde_node_id")]
+    pub id: NodeId,
+    pub address: String,
+    #[serde(deserialize_with = "serializers::deserialize_path")]
+    pub macaroon: String,
+    #[serde(deserialize_with = "serializers::deserialize_path")]
+    pub cert: String,
+}
 
 pub struct LndNode {
     client: Client,
@@ -45,15 +57,16 @@ fn parse_node_features(features: HashSet<u32>) -> NodeFeatures {
 }
 
 impl LndNode {
-    pub async fn new(conn_data: LndConnection) -> Result<Self, LightningError> {
-        let mut client = tonic_lnd::connect(conn_data.address, conn_data.cert, conn_data.macaroon)
-            .await
-            .map_err(|err| LightningError::ConnectionError(err.to_string()))?;
+    pub async fn new(connection: LndConnection) -> Result<Self, LightningError> {
+        let mut client =
+            tonic_lnd::connect(connection.address, connection.cert, connection.macaroon)
+                .await
+                .map_err(|err| LightningError::ConnectionError(err.to_string()))?;
 
         let GetInfoResponse {
             identity_pubkey,
             features,
-            alias,
+            mut alias,
             ..
         } = client
             .lightning()
@@ -62,11 +75,14 @@ impl LndNode {
             .map_err(|err| LightningError::GetInfoError(err.to_string()))?
             .into_inner();
 
+        let pubkey = PublicKey::from_str(&identity_pubkey)
+            .map_err(|err| LightningError::GetInfoError(err.to_string()))?;
+        connection.id.validate(&pubkey, &mut alias)?;
+
         Ok(Self {
             client,
             info: NodeInfo {
-                pubkey: PublicKey::from_str(&identity_pubkey)
-                    .map_err(|err| LightningError::GetInfoError(err.to_string()))?,
+                pubkey,
                 features: parse_node_features(features.keys().cloned().collect()),
                 alias,
             },
@@ -93,12 +109,14 @@ impl LightningNode for LndNode {
             .into_inner();
 
         if info.chains.is_empty() {
-            return Err(LightningError::ValidationError(
-                "LND node is not connected any chain".to_string(),
-            ));
+            return Err(LightningError::ValidationError(format!(
+                "{} is not connected any chain",
+                self.get_info()
+            )));
         } else if info.chains.len() > 1 {
             return Err(LightningError::ValidationError(format!(
-                "LND node is connected to more than one chain: {:?}",
+                "{} is connected to more than one chain: {:?}",
+                self.get_info(),
                 info.chains.iter().map(|c| c.chain.to_string())
             )));
         }
@@ -213,12 +231,12 @@ impl LightningNode for LndNode {
         }
     }
 
-    async fn get_node_features(&mut self, node: PublicKey) -> Result<NodeFeatures, LightningError> {
+    async fn get_node_info(&mut self, node_id: &PublicKey) -> Result<NodeInfo, LightningError> {
         let node_info = self
             .client
             .lightning()
             .get_node_info(NodeInfoRequest {
-                pub_key: node.to_string(),
+                pub_key: node_id.to_string(),
                 include_channels: false,
             })
             .await
@@ -226,9 +244,11 @@ impl LightningNode for LndNode {
             .into_inner();
 
         if let Some(node_info) = node_info.node {
-            Ok(parse_node_features(
-                node_info.features.keys().cloned().collect(),
-            ))
+            Ok(NodeInfo {
+                pubkey: *node_id,
+                alias: node_info.alias,
+                features: parse_node_features(node_info.features.keys().cloned().collect()),
+            })
         } else {
             Err(LightningError::GetNodeInfoError(
                 "Node not found".to_string(),

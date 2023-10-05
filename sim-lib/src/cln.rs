@@ -3,12 +3,13 @@ use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
 use cln_grpc::pb::{
     listpays_pays::ListpaysPaysStatus, node_client::NodeClient, Amount, GetinfoRequest,
-    GetinfoResponse, KeysendRequest, KeysendResponse, ListchannelsRequest, ListnodesRequest,
-    ListpaysRequest, ListpaysResponse,
+    KeysendRequest, KeysendResponse, ListchannelsRequest, ListnodesRequest, ListpaysRequest,
+    ListpaysResponse,
 };
 use lightning::ln::features::NodeFeatures;
 use lightning::ln::PaymentHash;
 
+use serde::{Deserialize, Serialize};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, Error};
 use tokio::time::{self, Duration};
@@ -16,8 +17,21 @@ use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 use triggered::Listener;
 
 use crate::{
-    ClnConnection, LightningError, LightningNode, NodeInfo, PaymentOutcome, PaymentResult,
+    serializers, LightningError, LightningNode, NodeId, NodeInfo, PaymentOutcome, PaymentResult,
 };
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ClnConnection {
+    #[serde(with = "serializers::serde_node_id")]
+    pub id: NodeId,
+    pub address: String,
+    #[serde(deserialize_with = "serializers::deserialize_path")]
+    pub ca_cert: String,
+    #[serde(deserialize_with = "serializers::deserialize_path")]
+    pub client_cert: String,
+    #[serde(deserialize_with = "serializers::deserialize_path")]
+    pub client_key: String,
+}
 
 pub struct ClnNode {
     pub client: NodeClient<Channel>,
@@ -56,16 +70,22 @@ impl ClnNode {
                 })?,
         );
 
-        let GetinfoResponse {
-            id,
-            alias,
-            our_features,
-            ..
-        } = client
+        let (id, mut alias, our_features) = client
             .getinfo(GetinfoRequest {})
             .await
-            .map_err(|err| LightningError::GetInfoError(err.to_string()))?
-            .into_inner();
+            .map(|r| {
+                let inner = r.into_inner();
+                (
+                    inner.id,
+                    inner.alias.unwrap_or_default(),
+                    inner.our_features,
+                )
+            })
+            .map_err(|err| LightningError::GetInfoError(err.to_string()))?;
+
+        let pubkey = PublicKey::from_slice(&id)
+            .map_err(|err| LightningError::GetInfoError(err.to_string()))?;
+        connection.id.validate(&pubkey, &mut alias)?;
 
         //FIXME: our_features is returning None, but it should not :S
         let features = if let Some(features) = our_features {
@@ -77,10 +97,9 @@ impl ClnNode {
         Ok(Self {
             client,
             info: NodeInfo {
-                pubkey: PublicKey::from_slice(&id)
-                    .map_err(|err| LightningError::GetInfoError(err.to_string()))?,
+                pubkey,
                 features,
-                alias: alias.unwrap_or("".to_string()),
+                alias,
             },
         })
     }
@@ -211,12 +230,11 @@ impl LightningNode for ClnNode {
         }
     }
 
-    async fn get_node_features(&mut self, node: PublicKey) -> Result<NodeFeatures, LightningError> {
-        let node_id = node.serialize().to_vec();
-        let nodes: Vec<cln_grpc::pb::ListnodesNodes> = self
+    async fn get_node_info(&mut self, node_id: &PublicKey) -> Result<NodeInfo, LightningError> {
+        let mut nodes: Vec<cln_grpc::pb::ListnodesNodes> = self
             .client
             .list_nodes(ListnodesRequest {
-                id: Some(node_id.clone()),
+                id: Some(node_id.serialize().to_vec()),
             })
             .await
             .map_err(|err| LightningError::GetNodeInfoError(err.to_string()))?
@@ -224,15 +242,19 @@ impl LightningNode for ClnNode {
             .nodes;
 
         // We are filtering `list_nodes` to a single node, so we should get either an empty vector or one with a single element
-        if let Some(node) = nodes.first() {
-            Ok(node
-                .features
-                .clone()
-                .map_or(NodeFeatures::empty(), |mut f| {
-                    // We need to reverse this given it has the CLN wire encoding which is BE
-                    f.reverse();
-                    NodeFeatures::from_le_bytes(f)
-                }))
+        if let Some(node) = nodes.pop() {
+            Ok(NodeInfo {
+                pubkey: *node_id,
+                alias: node.alias.unwrap_or(String::new()),
+                features: node
+                    .features
+                    .clone()
+                    .map_or(NodeFeatures::empty(), |mut f| {
+                        // We need to reverse this given it has the CLN wire encoding which is BE
+                        f.reverse();
+                        NodeFeatures::from_le_bytes(f)
+                    }),
+            })
         } else {
             Err(LightningError::GetNodeInfoError(
                 "Node not found".to_string(),

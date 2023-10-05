@@ -1,12 +1,11 @@
 use core::fmt;
-use std::collections::HashMap;
 use std::fmt::Display;
 
 use bitcoin::secp256k1::PublicKey;
 use rand_distr::{Distribution, Exp, LogNormal, WeightedIndex};
 use std::time::Duration;
 
-use crate::{NetworkGenerator, PaymentGenerator, SimulationError};
+use crate::{NetworkGenerator, NodeInfo, PaymentGenerator, SimulationError};
 
 const HOURS_PER_MONTH: u64 = 30 * 24;
 const SECONDS_PER_MONTH: u64 = HOURS_PER_MONTH * 60 * 60;
@@ -17,21 +16,21 @@ const SECONDS_PER_MONTH: u64 = HOURS_PER_MONTH * 60 * 60;
 /// which has a view of the full network except for itself).
 pub struct NetworkGraphView {
     node_picker: WeightedIndex<u64>,
-    nodes: Vec<(PublicKey, u64)>,
+    nodes: Vec<(NodeInfo, u64)>,
 }
 
 impl NetworkGraphView {
     // Creates a network view for the map of node public keys to capacity (in millisatoshis) provided. Returns an error
     // if any node's capacity is zero (the node cannot receive), or there are not at least two nodes (one node can't
     // send to itself).
-    pub fn new(node_capacities: HashMap<PublicKey, u64>) -> Result<Self, SimulationError> {
-        if node_capacities.len() < 2 {
+    pub fn new(nodes: Vec<(NodeInfo, u64)>) -> Result<Self, SimulationError> {
+        if nodes.len() < 2 {
             return Err(SimulationError::RandomActivityError(
                 "at least two nodes required for activity generation".to_string(),
             ));
         }
 
-        if node_capacities.values().any(|v| *v == 0) {
+        if nodes.iter().any(|(_, v)| *v == 0) {
             return Err(SimulationError::RandomActivityError(
                 "network generator created with zero capacity node".to_string(),
             ));
@@ -39,11 +38,9 @@ impl NetworkGraphView {
 
         // To create a weighted index we're going to need a vector of nodes that we index and weights that are set
         // by their deployed capacity. To efficiently store our view of nodes capacity, we're also going to store
-        // capacity along with the node pubkey because we query the two at the same time. Zero capacity nodes are
+        // capacity along with the node info because we query the two at the same time. Zero capacity nodes are
         // filtered out because they have no chance of being selected (and wont' be able to receive payments).
-        let nodes = node_capacities.iter().map(|(k, v)| (*k, *v)).collect();
-
-        let node_picker = WeightedIndex::new(node_capacities.into_values().collect::<Vec<u64>>())
+        let node_picker = WeightedIndex::new(nodes.iter().map(|(_, v)| *v).collect::<Vec<u64>>())
             .map_err(|e| SimulationError::RandomActivityError(e.to_string()))?;
 
         Ok(NetworkGraphView { node_picker, nodes })
@@ -54,7 +51,7 @@ impl NetworkGenerator for NetworkGraphView {
     /// Randomly samples the network for a node, weighted by capacity.  Using a single graph view means that it's
     /// possible for a source node to select itself. After sufficient retries, this is highly improbable (even  with
     /// very small graphs, or those with one node significantly more capitalized than others).
-    fn sample_node_by_capacity(&self, source: PublicKey) -> (PublicKey, u64) {
+    fn sample_node_by_capacity(&self, source: PublicKey) -> (NodeInfo, u64) {
         let mut rng = rand::thread_rng();
 
         // While it's very unlikely that we can't pick a destination that is not our source, it's possible that there's
@@ -63,10 +60,11 @@ impl NetworkGenerator for NetworkGraphView {
         let mut i = 1;
         loop {
             let index = self.node_picker.sample(&mut rng);
-            let destination = self.nodes[index];
+            // Unwrapping is safe given `NetworkGraphView` has the same amount of elements for `nodes` and `node_picker`
+            let destination = self.nodes.get(index).unwrap();
 
-            if destination.0 != source {
-                return destination;
+            if destination.0.pubkey != source {
+                return destination.clone();
             }
 
             if i % 50 == 0 {
