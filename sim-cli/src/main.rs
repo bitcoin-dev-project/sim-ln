@@ -13,7 +13,7 @@ use sim_lib::{
 use simple_logger::SimpleLogger;
 
 #[derive(Parser)]
-#[command(version)]
+#[command(version, about)]
 struct Cli {
     #[clap(index = 1)]
     sim_file: PathBuf,

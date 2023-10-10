@@ -2,6 +2,9 @@
 name = "sim-lib"
 version = "0.1.0"
 edition = "2021"
+description = """
+Backend logic of the SimLN project. Contains all the functionality to build your own simulator
+"""
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
