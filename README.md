@@ -180,3 +180,6 @@ If you're looking to get started with local lightning development, we
 recommend [polar](https://lightningpolar.com/). For larger deployments, 
 see the [Scaling Lightning](https://github.com/scaling-lightning/scaling-lightning) 
 project.
+
+## Docker
+If you want to run the cli in a containerized environment, see the docker set up docs [here](./docker/README.md)
