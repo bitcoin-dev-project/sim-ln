@@ -41,8 +41,8 @@ for (( i=0; i<$NODE_COUNT; i++ )); do
     cp $NODE_MACAROON_PATH_ON_HOST $STAGING_DIR/lnd/$NODE_ID/admin.macaroon
 
     # Adjust the paths in the staging sim.json so we don't use the host path
-    sed -i '' 's|'$(dirname $NODE_TLS_PATH_ON_HOST)'/tls.cert|/data/lnd/'$NODE_ID'/tls.cert|' $STAGING_DIR/sim.json
-    sed -i '' 's|'$(dirname $NODE_MACAROON_PATH_ON_HOST)'/admin.macaroon|/data/lnd/'$NODE_ID'/admin.macaroon|' $STAGING_DIR/sim.json
+    sed -i 's|'$(dirname $NODE_TLS_PATH_ON_HOST)'/tls.cert|/data/lnd/'$NODE_ID'/tls.cert|' $STAGING_DIR/sim.json
+    sed -i 's|'$(dirname $NODE_MACAROON_PATH_ON_HOST)'/admin.macaroon|/data/lnd/'$NODE_ID'/admin.macaroon|' $STAGING_DIR/sim.json
 done
 
 # Create Docker volume and copy the data
