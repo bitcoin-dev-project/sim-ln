@@ -1,6 +1,7 @@
 /target
 node_modules
 config.json
+sim.json
 package-lock.json
 activity-generator/releases/*
 .DS_Store
