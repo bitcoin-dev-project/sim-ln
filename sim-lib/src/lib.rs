@@ -1076,3 +1076,111 @@ async fn track_payment_result(
 
     log::trace!("Payment result tracker exiting.");
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{LightningError, LightningNode, NodeInfo, PaymentResult, Simulation};
+    use async_trait::async_trait;
+    use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+    use bitcoin::Network;
+    use lightning::ln::features::NodeFeatures;
+    use lightning::ln::PaymentHash;
+    use mockall::mock;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+    use triggered::Listener;
+
+    mock! {
+                LnNode{}
+
+                #[async_trait]
+                impl LightningNode for LnNode {
+                    fn get_info(&self) -> &NodeInfo;
+                    async fn get_network(&mut self) -> Result<Network, LightningError>;
+                    async fn send_payment(&mut self,dest: PublicKey,amount_msat: u64) -> Result<PaymentHash, LightningError>;
+                    async fn track_payment(&mut self,hash: PaymentHash,shutdown: Listener,) -> Result<PaymentResult, LightningError>;
+                    async fn get_node_info(&mut self, node_id: &PublicKey) -> Result<NodeInfo, LightningError>;
+                    async fn list_channels(&mut self) -> Result<Vec<u64>, LightningError>;
+                }
+    }
+
+    /// pubkey produces a deterministic test public key with a private key based off the byte value provided.
+    fn pubkey(byte: u8) -> PublicKey {
+        let secp_ctx = Secp256k1::new();
+        PublicKey::from_secret_key(&secp_ctx, &privkey(42 + byte))
+    }
+
+    /// privkey produces a deterministic test private key based off the byte value passed.
+    fn privkey(byte: u8) -> SecretKey {
+        SecretKey::from_slice(&[byte; 32]).unwrap()
+    }
+
+    /// primes each mocked node to return its info when get_info is called.
+    async fn mock_get_info(nodes: HashMap<PublicKey, Arc<Mutex<MockLnNode>>>) {
+        for (pubkey, node) in nodes.iter() {
+            let mut features = NodeFeatures::empty();
+            features.set_keysend_optional();
+
+            node.lock().await.expect_get_info().return_const(NodeInfo {
+                pubkey: *pubkey,
+                alias: "".to_string(),
+                features,
+            });
+        }
+    }
+
+    async fn mock_get_network(nodes: HashMap<PublicKey, Arc<Mutex<MockLnNode>>>) {
+        for (_, node) in nodes.iter() {
+            node.lock()
+                .await
+                .expect_get_network()
+                .returning(|| Ok(Network::Regtest));
+        }
+    }
+
+    /// new_simulation_test sets up a test simulation with the desired node count. It returns the simulation object
+    /// and a map of public keys to mocked lightning nodes (which can be used to assert the expectations of the test).
+    fn new_simulation_test(
+        node_count: u8,
+    ) -> (Simulation, HashMap<PublicKey, Arc<Mutex<MockLnNode>>>) {
+        assert_ne!(0, node_count, "at least one node required for tests");
+
+        // For each node, create a public key and a mocked lightning node implementation.
+        let mut nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>> = HashMap::new();
+        let mut mock_nodes = HashMap::new();
+
+        for i in 0..node_count {
+            let node_pubkey = pubkey(i);
+            let mock = Arc::new(Mutex::new(MockLnNode::new()));
+
+            nodes.insert(node_pubkey, mock.clone());
+            mock_nodes.insert(node_pubkey, mock);
+        }
+
+        (
+            Simulation::new(nodes, vec![], None, None, None, None),
+            mock_nodes,
+        )
+    }
+
+    #[tokio::test]
+    async fn example_test() {
+        let (simulation, mocks) = new_simulation_test(3);
+        let shutdown = simulation.shutdown_trigger.clone();
+
+        // Prime the mock to return the function calls that we check during validation.
+        mock_get_info(mocks.clone()).await;
+        mock_get_network(mocks).await;
+
+        // TODO: need to mock out list_channels etc (called to start random activity).
+        // TODO: mock out generation traits so that we can control payments etc (will require a refactor to set mocks).
+
+        let run_task = tokio::spawn(async move { simulation.run().await });
+
+        // test logic goes here!
+
+        shutdown.trigger();
+        let _ = run_task.await.expect("task did not exit cleanly");
+    }
+}
