@@ -549,7 +549,10 @@ impl Simulation {
             listener.clone(),
         ));
 
+        let result_logger = Arc::new(Mutex::new(PaymentResultLogger::new()));
+
         tasks.spawn(consume_simulation_results(
+            result_logger,
             results_receiver,
             listener,
             self.print_batch_size,
@@ -874,6 +877,7 @@ async fn produce_random_events<N: NetworkGenerator, A: PaymentGenerator + Displa
 }
 
 async fn consume_simulation_results(
+    logger: Arc<Mutex<PaymentResultLogger>>,
     receiver: Receiver<(Payment, PaymentResult)>,
     listener: Listener,
     print_batch_size: u32,
@@ -881,7 +885,9 @@ async fn consume_simulation_results(
 ) {
     log::debug!("Simulation results consumer started.");
 
-    if let Err(e) = write_payment_results(receiver, listener, print_batch_size, no_results).await {
+    if let Err(e) =
+        write_payment_results(logger, receiver, listener, print_batch_size, no_results).await
+    {
         log::error!("Error while reporting payment results: {:?}.", e);
     }
 
@@ -889,6 +895,7 @@ async fn consume_simulation_results(
 }
 
 async fn write_payment_results(
+    logger: Arc<Mutex<PaymentResultLogger>>,
     mut receiver: Receiver<(Payment, PaymentResult)>,
     listener: Listener,
     print_batch_size: u32,
@@ -906,8 +913,7 @@ async fn write_payment_results(
         None
     };
 
-    let mut result_logger = PaymentResultLogger::new();
-    let mut counter = 0;
+    let mut counter = 1;
     loop {
         tokio::select! {
             biased;
@@ -918,7 +924,7 @@ async fn write_payment_results(
             payment_report = receiver.recv() => {
                 match payment_report {
                     Some((details, result)) => {
-                        result_logger.report_result(&details, &result);
+                        logger.lock().await.report_result(&details, &result);
                         log::trace!("Resolved dispatched payment: {} with: {}.", details, result);
 
                         if let Some(ref mut w) = writer {
