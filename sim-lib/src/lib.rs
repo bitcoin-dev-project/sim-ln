@@ -23,6 +23,8 @@ pub mod cln;
 pub mod lnd;
 mod random_activity;
 mod serializers;
+#[cfg(test)]
+mod test_utils;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]

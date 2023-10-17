@@ -29,3 +29,6 @@ hex = "0.4.3"
 csv = "1.2.2"
 serde_millis = "0.1.1"
 rand_distr = "0.4.3"
+
+[dev-dependencies]
+ntest = "0.9.0"
