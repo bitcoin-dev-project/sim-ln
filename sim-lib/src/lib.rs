@@ -18,6 +18,7 @@ use tokio::task::JoinSet;
 use tokio::{select, time, time::Duration};
 use triggered::{Listener, Trigger};
 
+use self::defined_activity::DefinedActivityGenerator;
 use self::random_activity::{NetworkGraphView, PaymentActivityGenerator};
 
 pub mod cln;
@@ -644,8 +645,16 @@ impl Simulation {
     ) {
         for description in self.activity.iter() {
             let sender_chan = producer_channels.get(&description.source.pubkey).unwrap();
+            let generator = DefinedActivityGenerator::new(
+                description.destination.clone(),
+                Duration::from_secs(description.interval_secs.into()),
+                description.amount_msat,
+            );
+
             tasks.spawn(produce_events(
-                description.clone(),
+                description.source.clone(),
+                Arc::new(Mutex::new(generator.clone())),
+                generator,
                 sender_chan.clone(),
                 self.shutdown_trigger.clone(),
                 self.shutdown_listener.clone(),
@@ -691,7 +700,7 @@ impl Simulation {
             )
             .map_err(SimulationError::RandomActivityError)?;
 
-            tasks.spawn(produce_random_events(
+            tasks.spawn(produce_events(
                 info,
                 network_generator.clone(),
                 node_generator,
@@ -776,57 +785,7 @@ async fn consume_events(
     }
 }
 
-// produce events generates events for the activity description provided. It accepts a shutdown listener so it can
-// exit if other threads signal that they have errored out.
-async fn produce_events(
-    act: ActivityDefinition,
-    sender: Sender<SimulationEvent>,
-    shutdown: Trigger,
-    listener: Listener,
-) {
-    let interval = time::Duration::from_secs(act.interval_secs as u64);
-
-    log::debug!(
-        "Started producer for {} every {}s: {} -> {}.",
-        act.amount_msat,
-        act.interval_secs,
-        act.source,
-        act.destination
-    );
-
-    loop {
-        tokio::select! {
-        biased;
-        _ = time::sleep(interval) => {
-            // Consumer was dropped
-            if sender.send(SimulationEvent::SendPayment(act.destination.clone(), act.amount_msat)).await.is_err() {
-                log::debug!(
-                    "Stopped producer for {}: {} -> {}. Consumer cannot be reached.",
-                    act.amount_msat,
-                    act.source,
-                    act.destination
-                );
-                break;
-            }
-        }
-        _ = listener.clone() => {
-            // Shutdown was signaled
-            log::debug!(
-                    "Stopped producer for {}: {} -> {}. Received shutdown signal.",
-                    act.amount_msat,
-                    act.source,
-                    act.destination
-            );
-            break;
-            }
-        }
-    }
-
-    // On exit call our shutdown trigger to inform other threads that we have exited, and they need to shut down.
-    shutdown.trigger();
-}
-
-async fn produce_random_events<N: NetworkGenerator, A: PaymentGenerator + Display>(
+async fn produce_events<N: NetworkGenerator, A: PaymentGenerator + Display>(
     source: NodeInfo,
     network_generator: Arc<Mutex<N>>,
     node_generator: A,
@@ -834,7 +793,7 @@ async fn produce_random_events<N: NetworkGenerator, A: PaymentGenerator + Displa
     shutdown: Trigger,
     listener: Listener,
 ) {
-    log::info!("Started random activity producer for {source}: {node_generator}.");
+    log::info!("Started activity producer for {source}: {node_generator}.");
 
     loop {
         let wait = node_generator.next_payment_wait();
