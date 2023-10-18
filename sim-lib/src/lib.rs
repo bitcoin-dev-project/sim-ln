@@ -22,6 +22,7 @@ use triggered::{Listener, Trigger};
 use self::random_activity::{NetworkGraphView, RandomPaymentActivity};
 
 pub mod cln;
+mod defined_activity;
 pub mod lnd;
 mod random_activity;
 mod serializers;
