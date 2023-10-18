@@ -43,6 +43,9 @@ struct Cli {
     /// Multiplier of the overall network capacity used by the random activity generator
     #[clap(long, short, default_value_t = ACTIVITY_MULTIPLIER)]
     capacity_multiplier: f64,
+    /// Do not create an output file containing the simulations results
+    #[clap(long, default_value_t = false)]
+    no_results: bool,
 }
 
 #[tokio::main]
@@ -164,6 +167,7 @@ async fn main() -> anyhow::Result<()> {
         cli.print_batch_size,
         cli.expected_pmt_amt,
         cli.capacity_multiplier,
+        cli.no_results,
     );
     let sim2 = sim.clone();
 
