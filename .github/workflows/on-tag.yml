@@ -11,11 +11,11 @@ permissions:
 
 jobs:
   test:
-    uses: ./.github/workflows/reusable/build-and-test.yml
+    uses: ./.github/workflows/build-and-test.yml
     secrets: inherit
   docker-hub-image:
     needs: [test]
-    uses: ./.github/workflows/reusable/push-docker-image.yml
+    uses: ./.github/workflows/push-docker-image.yml
     secrets: inherit
     with:
       image_name: scalingln/simln

@@ -12,5 +12,5 @@ permissions:
 jobs:
   test:
     name: Test
-    uses: ./.github/workflows/reusable/build-and-test.yml
+    uses: ./.github/workflows/build-and-test.yml
     secrets: inherit
