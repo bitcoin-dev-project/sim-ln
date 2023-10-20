@@ -2,7 +2,8 @@ name: Build, lint and test
 
 on: workflow_call
 
-permissions: read-all
+permissions:
+  contents: read
 
 jobs:
   clippy:
