@@ -6,25 +6,24 @@ FROM rust:latest AS base
 ARG TARGETARCH
 
 FROM base as builder-amd64
-ENV TARGET_RUST_ARCH = "x86_64-unknown-linux-musl"
+ENV TARGET_RUST_ARCH="x86_64-unknown-linux-musl"
 
 FROM base as builder-arm64
-ENV TARGET_RUST_ARCH = "aarch64-unknown-linux-musl"
+ENV TARGET_RUST_ARCH="aarch64-unknown-linux-musl"
 
 FROM builder-${TARGETARCH} as builder
 RUN echo "Building for architecture:  $TARGET_RUST_ARCH"
 # Copy the source code
-COPY . /tmp/sim-ln
+COPY . /sim-ln
 
 # Install the dependencies required for building sim-ln
 RUN apt-get update \
     && apt-get -y --no-install-recommends install protobuf-compiler musl-tools
 
-RUN cd /tmp/sim-ln \
-    && rustup target add ${TARGET_RUST_ARCH} \
-    && rustup component add rustfmt \
-    && RUSTFLAGS='-C target-feature=+crt-static' cargo build --locked --release --target=${TARGET_RUST_ARCH} \
-    && mv /tmp/sim-ln/target/${TARGET_RUST_ARCH}/release/sim-cli /tmp/sim-cli
+RUN rustup target add ${TARGET_RUST_ARCH}
+RUN rustup component add rustfmt
+RUN cd /sim-ln && RUSTFLAGS='-C target-feature=+crt-static' cargo build --locked --release --target=${TARGET_RUST_ARCH}
+RUN mv /sim-ln/target/${TARGET_RUST_ARCH}/release/sim-cli /sim-ln/sim-cli
 
 # Use a new stage with a smaller base image to reduce image size
 FROM alpine:latest
@@ -32,7 +31,7 @@ FROM alpine:latest
 RUN apk update && apk upgrade
 
 # Copy the sim-cli binaries from the build stage to the new stage
-COPY --from=builder /tmp/sim-cli /usr/local/bin/
+COPY --from=builder /sim-ln/sim-cli /usr/local/bin/
 
 # Copy the entrypoint script to the container
 COPY docker/entrypoint.sh /entrypoint.sh
