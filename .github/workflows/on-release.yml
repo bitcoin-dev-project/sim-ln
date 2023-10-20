@@ -1,4 +1,4 @@
-name: Release Binary
+name: Release Binary and push latest tag to docker hub
 
 on:
   release:

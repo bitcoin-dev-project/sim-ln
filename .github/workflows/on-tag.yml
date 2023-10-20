@@ -1,4 +1,4 @@
-name: Release charts, docker images and binaries
+name: Push docker image
 
 on:
   push:
