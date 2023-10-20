@@ -11,16 +11,15 @@ env:
   DOCKER_IMAGE: scalingln/simln
 
 jobs:
-  create-release:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: taiki-e/create-gh-release-action@v1
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
   upload-assets:
-    needs: create-release
-    runs-on: ubuntu-latest
+    name: Upload assets
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            features: systemd,io_uring
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: taiki-e/upload-rust-binary-action@v1
@@ -28,25 +27,15 @@ jobs:
           # (required) Comma-separated list of binary names (non-extension portion of filename) to build and upload.
           # Note that glob pattern is not supported yet.
           bin: simln
+          # (optional) On which platform to distribute the `.tar.gz` file.
+          # [default value: unix]
+          # [possible values: all, unix, windows, none]
+          tar: unix
+          # (optional) On which platform to distribute the `.zip` file.
+          # [default value: windows]
+          # [possible values: all, unix, windows, none]
+          zip: windows
+          # (optional) Build with the given set of features if any.
+          features: ${{ matrix.features || '' }}
           # (required) GitHub token for uploading assets to GitHub Releases.
           token: ${{ secrets.GITHUB_TOKEN }}
-  publish-docker-image:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - uses: olegtarasov/get-tag@v2.1.2
-        name: Get tag
-        id: tagName
-        with:
-          tagRegex: v?(.+) # Optional. Returns specified group text as tag name. Full tag string is returned if regex is not defined.
-          tagRegexGroup: 1 # Optional. Default is 1.
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v2
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Docker tag and push latest
-        run: |
-          docker pull ${{env.DOCKER_IMAGE}}:${{ steps.tagName.outputs.tag }}
-          docker tag ${{env.DOCKER_IMAGE}}:${{ steps.tagName.outputs.tag }} ${{env.DOCKER_IMAGE}}:latest
-          docker push ${{env.DOCKER_IMAGE}}:latest
