@@ -24,12 +24,6 @@ pub mod lnd;
 mod random_activity;
 mod serializers;
 
-/// The default expected payment amount for the simulation, around ~$10 at the time of writing.
-pub const EXPECTED_PAYMENT_AMOUNT: u64 = 3_800_000;
-
-/// The number of times over each node in the network sends its total deployed capacity in a calendar month.
-pub const ACTIVITY_MULTIPLIER: f64 = 2.0;
-
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum NodeConnection {
     #[serde(alias = "lnd", alias = "Lnd")]
@@ -336,16 +330,14 @@ pub struct Simulation {
     activity_multiplier: f64,
 }
 
-const DEFAULT_PRINT_BATCH_SIZE: u32 = 500;
-
 impl Simulation {
     pub fn new(
         nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>>,
         activity: Vec<ActivityDefinition>,
         total_time: Option<u32>,
-        print_batch_size: Option<u32>,
-        expected_payment_amount: Option<u64>,
-        activity_multiplier: Option<f64>,
+        print_batch_size: u32,
+        expected_payment_msat: u64,
+        activity_multiplier: f64,
     ) -> Self {
         let (shutdown_trigger, shutdown_listener) = triggered::trigger();
         Self {
@@ -354,9 +346,9 @@ impl Simulation {
             shutdown_trigger,
             shutdown_listener,
             total_time: total_time.map(|x| Duration::from_secs(x as u64)),
-            print_batch_size: print_batch_size.unwrap_or(DEFAULT_PRINT_BATCH_SIZE),
-            expected_payment_msat: expected_payment_amount.unwrap_or(EXPECTED_PAYMENT_AMOUNT),
-            activity_multiplier: activity_multiplier.unwrap_or(ACTIVITY_MULTIPLIER),
+            print_batch_size,
+            expected_payment_msat,
+            activity_multiplier,
         }
     }
 

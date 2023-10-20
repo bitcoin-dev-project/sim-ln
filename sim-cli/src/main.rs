@@ -12,22 +12,37 @@ use sim_lib::{
 };
 use simple_logger::SimpleLogger;
 
+/// The default expected payment amount for the simulation, around ~$10 at the time of writing.
+pub const EXPECTED_PAYMENT_AMOUNT: u64 = 3_800_000;
+
+/// The number of times over each node in the network sends its total deployed capacity in a calendar month.
+pub const ACTIVITY_MULTIPLIER: f64 = 2.0;
+
+/// Default batch size to flush result data to disk
+const DEFAULT_PRINT_BATCH_SIZE: u32 = 500;
+
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
+    /// Path to the simulation file to be used by the simulator
     #[clap(index = 1)]
     sim_file: PathBuf,
+    /// Total time the simulator will be running
     #[clap(long, short)]
     total_time: Option<u32>,
-    /// Number of activity results to batch together before printing to csv file
-    #[clap(long, short)]
-    print_batch_size: Option<u32>,
-    #[clap(long, short, default_value = "info")]
+    /// Number of activity results to batch together before printing to csv file [min: 1]
+    #[clap(long, short, default_value_t = DEFAULT_PRINT_BATCH_SIZE, value_parser = clap::builder::RangedU64ValueParser::<u32>::new().range(1..u32::MAX as u64))]
+    print_batch_size: u32,
+    /// Level of verbosity of the messages displayed by the simulator.
+    /// Possible values: [off, error, warn, info, debug, trace]
+    #[clap(long, short, verbatim_doc_comment, default_value = "info")]
     log_level: LevelFilter,
-    #[clap(long, short)]
-    expected_pmt_amt: Option<u64>,
-    #[clap(long, short)]
-    capacity_multiplier: Option<f64>,
+    /// Expected payment amount for the random activity generator
+    #[clap(long, short, default_value_t = EXPECTED_PAYMENT_AMOUNT)]
+    expected_pmt_amt: u64,
+    /// Multiplier of the overall network capacity used by the random activity generator
+    #[clap(long, short, default_value_t = ACTIVITY_MULTIPLIER)]
+    capacity_multiplier: f64,
 }
 
 #[tokio::main]
