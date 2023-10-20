@@ -288,7 +288,7 @@ impl Display for Payment {
         write!(
             f,
             "Payment {} dispatched at {:?} sending {} msat from {} -> {}",
-            self.hash.map(|h| hex::encode(h.0)).unwrap_or(String::new()),
+            self.hash.map(|h| hex::encode(h.0)).unwrap_or_default(),
             self.dispatch_time.duration_since(UNIX_EPOCH).unwrap(),
             self.amount_msat,
             self.source,
