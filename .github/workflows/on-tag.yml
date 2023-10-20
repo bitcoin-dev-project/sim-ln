@@ -1,0 +1,23 @@
+name: Push docker image
+
+on:
+  push:
+    tags:
+      - v[0-9]+.[0-9]+.[0-9]+*
+      - "[0-9]+.[0-9]+.[0-9]+*"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    uses: ./.github/workflows/build-and-test.yml
+    secrets: inherit
+  docker-hub-image:
+    needs: [test]
+    uses: ./.github/workflows/push-docker-image.yml
+    secrets: inherit
+    with:
+      image_name: bitcoindevproject/simln
+      artifact_name: simln-docker
+      dockerfile: ./docker/Dockerfile
