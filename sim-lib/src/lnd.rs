@@ -8,15 +8,15 @@ use async_trait::async_trait;
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
+use fedimint_tonic_lnd::lnrpc::{payment::PaymentStatus, GetInfoRequest, GetInfoResponse};
+use fedimint_tonic_lnd::lnrpc::{ListChannelsRequest, NodeInfoRequest, PaymentFailureReason};
+use fedimint_tonic_lnd::routerrpc::TrackPaymentRequest;
+use fedimint_tonic_lnd::tonic::Code::Unavailable;
+use fedimint_tonic_lnd::tonic::Status;
+use fedimint_tonic_lnd::{routerrpc::SendPaymentRequest, Client};
 use lightning::ln::features::NodeFeatures;
 use lightning::ln::{PaymentHash, PaymentPreimage};
 use serde::{Deserialize, Serialize};
-use tonic_lnd::lnrpc::{payment::PaymentStatus, GetInfoRequest, GetInfoResponse};
-use tonic_lnd::lnrpc::{ListChannelsRequest, NodeInfoRequest, PaymentFailureReason};
-use tonic_lnd::routerrpc::TrackPaymentRequest;
-use tonic_lnd::tonic::Code::Unavailable;
-use tonic_lnd::tonic::Status;
-use tonic_lnd::{routerrpc::SendPaymentRequest, Client};
 use triggered::Listener;
 
 const KEYSEND_KEY: u64 = 5482373484;
@@ -59,7 +59,7 @@ fn parse_node_features(features: HashSet<u32>) -> NodeFeatures {
 impl LndNode {
     pub async fn new(connection: LndConnection) -> Result<Self, LightningError> {
         let mut client =
-            tonic_lnd::connect(connection.address, connection.cert, connection.macaroon)
+            fedimint_tonic_lnd::connect(connection.address, connection.cert, connection.macaroon)
                 .await
                 .map_err(|err| LightningError::ConnectionError(err.to_string()))?;
 
@@ -197,10 +197,10 @@ impl LightningNode for LndNode {
                 let payment = stream.map_err(|err| LightningError::TrackPaymentError(err.to_string()))?;
                 match payment {
                     Some(payment) => {
-                        let payment_status = PaymentStatus::from_i32(payment.status)
-                            .ok_or(LightningError::TrackPaymentError("Invalid payment status".to_string()))?;
-                        let failure_reason = PaymentFailureReason::from_i32(payment.failure_reason)
-                            .ok_or(LightningError::TrackPaymentError("Invalid failure reason".to_string()))?;
+                        let payment_status: PaymentStatus =payment.status.try_into()
+                            .map_err(|_| LightningError::TrackPaymentError("Invalid payment status".to_string()))?;
+                        let failure_reason: PaymentFailureReason = payment.failure_reason.try_into()
+                            .map_err(|_| LightningError::TrackPaymentError("Invalid failure reason".to_string()))?;
 
                         let payment_outcome = match payment_status {
                             PaymentStatus::Succeeded => PaymentOutcome::Success,
