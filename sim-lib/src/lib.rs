@@ -25,10 +25,9 @@ mod random_activity;
 mod serializers;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(untagged)]
 pub enum NodeConnection {
-    #[serde(alias = "lnd", alias = "Lnd")]
     LND(lnd::LndConnection),
-    #[serde(alias = "cln", alias = "Cln")]
     CLN(cln::ClnConnection),
 }
 

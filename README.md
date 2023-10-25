@@ -70,21 +70,17 @@ not "drain" from the simulation.
 {
   "nodes": [
     {
-      "LND": {
-        "id": "Alice",
-        "address": "https://127.0.0.1:10011",
-        "macaroon": "/path/admin.macaroon",
-        "cert": "/path/tls.cert"
-      }
+      "id": "Alice",
+      "address": "https://127.0.0.1:10011",
+      "macaroon": "/path/admin.macaroon",
+      "cert": "/path/tls.cert"
     },
-    {
-      "CLN": {
-        "id": "0230a16a05c5ca120136b3a770a2adfdad88a68d526e63448a9eef88bddd6a30d8",
-        "address": "https://localhost:10013",
-        "ca_cert": "/path/ca.pem",
-        "client_cert": "/path/client.pem",
-        "client_key": "/path/client-key.pem"
-      }
+    { 
+      "id": "0230a16a05c5ca120136b3a770a2adfdad88a68d526e63448a9eef88bddd6a30d8",
+      "address": "https://localhost:10013",
+      "ca_cert": "/path/ca.pem",
+      "client_cert": "/path/client.pem",
+      "client_key": "/path/client-key.pem"
     }
   ]
 }
@@ -126,21 +122,17 @@ The example simulation file below sets up the following simulation:
 {
   "nodes": [
     {
-      "LND": {
-        "id": "Alice",
-        "address": "https://localhost:10011",
-        "macaroon": "/path/admin.macaroon",
-        "cert": "/path/tls.cert"
-      }
+      "id": "Alice",
+      "address": "https://localhost:10011",
+      "macaroon": "/path/admin.macaroon",
+      "cert": "/path/tls.cert"
     },
     {
-      "CLN": {
-        "id": "0230a16a05c5ca120136b3a770a2adfdad88a68d526e63448a9eef88bddd6a30d8",
-        "address": "https://127.0.0.1:10013",
-        "ca_cert": "/path/ca.pem",
-        "client_cert": "/path/client.pem",
-        "client_key": "/path/client-key.pem"
-      }
+      "id": "0230a16a05c5ca120136b3a770a2adfdad88a68d526e63448a9eef88bddd6a30d8",
+      "address": "https://127.0.0.1:10013",
+      "ca_cert": "/path/ca.pem",
+      "client_cert": "/path/client.pem",
+      "client_key": "/path/client-key.pem"
     }
   ],
   "activity": [
