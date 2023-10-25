@@ -45,6 +45,42 @@ pub mod serde_node_id {
     }
 }
 
+pub mod serde_value_or_range {
+    use super::*;
+    use serde::de::Error;
+
+    use crate::ValueOrRange;
+
+    pub fn serialize<S, T>(x: &ValueOrRange<T>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+        T: std::fmt::Display,
+    {
+        serializer.serialize_str(&match x {
+            ValueOrRange::Value(p) => p.to_string(),
+            ValueOrRange::Range(x, y) => format!("[{}, {}]", x, y),
+        })
+    }
+
+    pub fn deserialize<'de, D, T>(deserializer: D) -> Result<ValueOrRange<T>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+        T: serde::Deserialize<'de> + std::cmp::PartialOrd + std::fmt::Display + Copy,
+    {
+        let a = ValueOrRange::deserialize(deserializer)?;
+        if let ValueOrRange::Range(x, y) = a {
+            if x >= y {
+                return Err(D::Error::custom(format!(
+                    "Cannot parse range. Ranges must be strictly increasing (i.e. [x, y] with x > y). Received [{}, {}]",
+                    x, y
+                )));
+            }
+        }
+
+        Ok(a)
+    }
+}
+
 pub fn deserialize_path<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
