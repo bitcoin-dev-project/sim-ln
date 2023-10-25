@@ -4,6 +4,7 @@ use bitcoin::Network;
 use csv::WriterBuilder;
 use lightning::ln::features::NodeFeatures;
 use lightning::ln::PaymentHash;
+use rand::Rng;
 use random_activity::RandomActivityError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -129,6 +130,47 @@ pub struct SimParams {
     pub activity: Vec<ActivityParser>,
 }
 
+/// Either a value or a range parsed from the simulation file.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ValueOrRange<T> {
+    Value(T),
+    Range(T, T),
+}
+
+impl<T> ValueOrRange<T>
+where
+    T: std::cmp::PartialOrd + rand_distr::uniform::SampleUniform + Copy,
+{
+    /// Get the enclosed value. If value is defined as a range, sample from it uniformly at random.
+    pub fn value(&self) -> T {
+        match self {
+            ValueOrRange::Value(x) => *x,
+            ValueOrRange::Range(x, y) => {
+                let mut rng = rand::thread_rng();
+                rng.gen_range(*x..*y)
+            },
+        }
+    }
+}
+
+impl<T> Display for ValueOrRange<T>
+where
+    T: Display,
+{
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ValueOrRange::Value(x) => write!(f, "{x}"),
+            ValueOrRange::Range(x, y) => write!(f, "({x}-{y})"),
+        }
+    }
+}
+
+/// The payment amount in msat. Either a value or a range.
+type Amount = ValueOrRange<u64>;
+/// The interval of seconds between payments. Either a value or a range.
+type Interval = ValueOrRange<u16>;
+
 /// Data structure used to parse information from the simulation file. It allows source and destination to be
 /// [NodeId], which enables the use of public keys and aliases in the simulation description.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,9 +188,11 @@ pub struct ActivityParser {
     #[serde(default)]
     pub count: Option<u64>,
     /// The interval of the event, as in every how many seconds the payment is performed.
-    pub interval_secs: u16,
+    #[serde(with = "serializers::serde_value_or_range")]
+    pub interval_secs: Interval,
     /// The amount of m_sat to used in this payment.
-    pub amount_msat: u64,
+    #[serde(with = "serializers::serde_value_or_range")]
+    pub amount_msat: Amount,
 }
 
 /// Data structure used internally by the simulator. Both source and destination are represented as [PublicKey] here.
@@ -164,9 +208,9 @@ pub struct ActivityDefinition {
     /// The number of payments to send over the course of the simulation.
     pub count: Option<u64>,
     /// The interval of the event, as in every how many seconds the payment is performed.
-    pub interval_secs: u16,
+    pub interval_secs: Interval,
     /// The amount of m_sat to used in this payment.
-    pub amount_msat: u64,
+    pub amount_msat: Amount,
 }
 
 #[derive(Debug, Error)]
@@ -731,7 +775,7 @@ impl Simulation {
                     description.destination.clone(),
                     Duration::from_secs(description.start_secs.into()),
                     description.count,
-                    Duration::from_secs(description.interval_secs.into()),
+                    description.interval_secs,
                     description.amount_msat,
                 );
 
