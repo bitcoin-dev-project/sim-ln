@@ -197,10 +197,10 @@ impl LightningNode for LndNode {
                 let payment = stream.map_err(|err| LightningError::TrackPaymentError(err.to_string()))?;
                 match payment {
                     Some(payment) => {
-                        let payment_status = PaymentStatus::from_i32(payment.status)
-                            .ok_or(LightningError::TrackPaymentError("Invalid payment status".to_string()))?;
-                        let failure_reason = PaymentFailureReason::from_i32(payment.failure_reason)
-                            .ok_or(LightningError::TrackPaymentError("Invalid failure reason".to_string()))?;
+                        let payment_status: PaymentStatus = payment.status.try_into()
+                            .map_err(|_| LightningError::TrackPaymentError("Invalid payment status".to_string()))?;
+                        let failure_reason: PaymentFailureReason = payment.failure_reason.try_into()
+                            .map_err(|_| LightningError::TrackPaymentError("Invalid failure reason".to_string()))?;
 
                         let payment_outcome = match payment_status {
                             PaymentStatus::Succeeded => PaymentOutcome::Success,
