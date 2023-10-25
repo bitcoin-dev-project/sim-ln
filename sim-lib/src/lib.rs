@@ -4,6 +4,7 @@ use bitcoin::Network;
 use csv::WriterBuilder;
 use lightning::ln::features::NodeFeatures;
 use lightning::ln::PaymentHash;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
@@ -86,6 +87,52 @@ pub struct SimParams {
     pub activity: Vec<ActivityParser>,
 }
 
+/// Either a value or a range parsed from the simulation file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ValueOrRange<T> {
+    Value(T),
+    Range(T, T),
+}
+
+impl<T> ValueOrRange<T>
+where
+    T: std::cmp::PartialOrd + rand_distr::uniform::SampleUniform + Copy,
+{
+    /// Get the amount for the payment, in msats. If amount is a range, samples from it uniformly at random to ger the value.
+    pub fn value(&self) -> T {
+        match self {
+            ValueOrRange::Value(x) => *x,
+            ValueOrRange::Range(x, y) => {
+                let mut rng = rand::thread_rng();
+                rng.gen_range(*x..*y)
+            }
+        }
+    }
+
+    /// Whether this is a range or not
+    pub fn is_range(&self) -> bool {
+        matches!(self, ValueOrRange::Range(..))
+    }
+}
+
+impl<T> Display for ValueOrRange<T>
+where
+    T: Display,
+{
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ValueOrRange::Value(x) => write!(f, "{x}"),
+            ValueOrRange::Range(x, y) => write!(f, "({x}-{y})"),
+        }
+    }
+}
+
+/// The amount of m_sat to used in a payment. Either a value or a range.
+type Amount = ValueOrRange<u64>;
+/// The interval of seconds between payments. Either a value or a range.
+type Interval = ValueOrRange<u16>;
+
 /// Data structure used to parse information from the simulation file. It allows source and destination to be
 /// [NodeId], which enables the use of public keys and aliases in the simulation description.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,9 +144,10 @@ pub struct ActivityParser {
     #[serde(with = "serializers::serde_node_id")]
     pub destination: NodeId,
     // The interval of the event, as in every how many seconds the payment is performed.
-    pub interval_secs: u16,
+    pub interval_secs: Interval,
     // The amount of m_sat to used in this payment.
-    pub amount_msat: u64,
+    #[serde(with = "serializers::serde_value_or_range")]
+    pub amount_msat: Amount,
 }
 
 /// Data structure used internally by the simulator. Both source and destination are represented as [PublicKey] here.
@@ -111,9 +159,9 @@ pub struct ActivityDefinition {
     // The destination of the payment.
     pub destination: NodeInfo,
     // The interval of the event, as in every how many seconds the payment is performed.
-    pub interval_secs: u16,
+    pub interval_secs: Interval,
     // The amount of m_sat to used in this payment.
-    pub amount_msat: u64,
+    pub amount_msat: Amount,
 }
 
 #[derive(Debug, Error)]
@@ -762,7 +810,8 @@ async fn produce_events(
     shutdown: Trigger,
     listener: Listener,
 ) {
-    let interval = time::Duration::from_secs(act.interval_secs as u64);
+    let mut interval = time::Duration::from_secs(act.interval_secs.value() as u64);
+    let mut amt = act.amount_msat.value();
 
     log::debug!(
         "Started producer for {} every {}s: {} -> {}.",
@@ -776,8 +825,18 @@ async fn produce_events(
         tokio::select! {
         biased;
         _ = time::sleep(interval) => {
-            // Consumer was dropped
-            if sender.send(SimulationEvent::SendPayment(act.destination.clone(), act.amount_msat)).await.is_err() {
+            // Resample if needed
+            if act.interval_secs.is_range() {
+                interval = time::Duration::from_secs(act.interval_secs.value() as u64);
+                log::debug!("Resampling interval. New value: {}", interval.as_secs());
+            }
+
+            if act.amount_msat.is_range() {
+                amt = act.amount_msat.value();
+                log::debug!("Resampling payment amount. New value: {}", amt);
+            }
+            if sender.send(SimulationEvent::SendPayment(act.destination.clone(), amt)).await.is_err() {
+                // Consumer was dropped
                 log::debug!(
                     "Stopped producer for {}: {} -> {}. Consumer cannot be reached.",
                     act.amount_msat,
