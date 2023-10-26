@@ -50,7 +50,33 @@ sim-cli sim.json
 The simulator requires access details for a set of `nodes` that you 
 have permission to execute commands on. Note that the current version 
 of the simulator uses keysend to execute payments, which must be 
-enabled in LND using `--accept-keysend`.
+enabled in LND using `--accept-keysend` (for CLN node it is enabled by default).
+
+The required access details will depend on the node implementation. For LND, the following
+information is required:
+
+```
+{
+  "id": <node_id>,
+  "address": https://<ip:port or domain:port>,
+  "macaroon": <path_to_selected_macaroon>,
+  "cert": <path_to_tls_cert>
+}
+```
+
+Whereas for CLN nodes, the following information is required:
+
+```
+{ 
+  "id": <node_id>,
+  "address": https://<ip:port or domain:port>,
+  "ca_cert": <path_to_ca_cert>,
+  "client_cert": <path_to_client_cert>,
+  "client_key": <path_to_client_key>
+}
+```
+
+**Note that node addresses must be declare with HTTPS transport, i.e. <https://ip-or-domain:port>**
 
 Payment activity can be simulated in two different ways:
 * Random activity: generate random activity on the `nodes` provided, 
@@ -85,8 +111,6 @@ not "drain" from the simulation.
   ]
 }
 ```
-
-**Note that node addresses must be declare with HTTPS transport, i.e. <https://ip-or-domain>**
 
 Nodes can be identified by an arbitrary string ("Alice", "CLN1", etc) or
 by their node public key. If a valid public key is provided it *must* 
