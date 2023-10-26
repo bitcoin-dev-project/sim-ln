@@ -1,14 +1,23 @@
 use core::fmt;
 use std::fmt::Display;
+use thiserror::Error;
 
 use bitcoin::secp256k1::PublicKey;
 use rand_distr::{Distribution, Exp, LogNormal, WeightedIndex};
 use std::time::Duration;
 
-use crate::{NetworkGenerator, NodeInfo, PaymentGenerator, SimulationError};
+use crate::{NetworkGenerator, NodeInfo, PaymentGenerationError, PaymentGenerator};
 
 const HOURS_PER_MONTH: u64 = 30 * 24;
 const SECONDS_PER_MONTH: u64 = HOURS_PER_MONTH * 60 * 60;
+
+#[derive(Debug, Error)]
+pub enum RandomActivityError {
+    #[error("Value error: {0}")]
+    ValueError(String),
+    #[error("InsufficientCapacity: {0}")]
+    InsufficientCapacity(String),
+}
 
 /// NetworkGraphView maintains a view of the network graph that can be used to pick nodes by their deployed liquidity
 /// and track node capacity within the network. Tracking nodes in the network is memory-expensive, so we use a single
@@ -23,15 +32,15 @@ impl NetworkGraphView {
     // Creates a network view for the map of node public keys to capacity (in millisatoshis) provided. Returns an error
     // if any node's capacity is zero (the node cannot receive), or there are not at least two nodes (one node can't
     // send to itself).
-    pub fn new(nodes: Vec<(NodeInfo, u64)>) -> Result<Self, SimulationError> {
+    pub fn new(nodes: Vec<(NodeInfo, u64)>) -> Result<Self, RandomActivityError> {
         if nodes.len() < 2 {
-            return Err(SimulationError::RandomActivityError(
+            return Err(RandomActivityError::ValueError(
                 "at least two nodes required for activity generation".to_string(),
             ));
         }
 
         if nodes.iter().any(|(_, v)| *v == 0) {
-            return Err(SimulationError::RandomActivityError(
+            return Err(RandomActivityError::InsufficientCapacity(
                 "network generator created with zero capacity node".to_string(),
             ));
         }
@@ -41,7 +50,7 @@ impl NetworkGraphView {
         // capacity along with the node info because we query the two at the same time. Zero capacity nodes are
         // filtered out because they have no chance of being selected (and wont' be able to receive payments).
         let node_picker = WeightedIndex::new(nodes.iter().map(|(_, v)| *v).collect::<Vec<u64>>())
-            .map_err(|e| SimulationError::RandomActivityError(e.to_string()))?;
+            .map_err(|e| RandomActivityError::ValueError(e.to_string()))?;
 
         Ok(NetworkGraphView { node_picker, nodes })
     }
@@ -101,21 +110,21 @@ impl PaymentActivityGenerator {
         source_capacity_msat: u64,
         expected_payment_amt: u64,
         multiplier: f64,
-    ) -> Result<Self, SimulationError> {
+    ) -> Result<Self, RandomActivityError> {
         if source_capacity_msat == 0 {
-            return Err(SimulationError::RandomActivityError(
+            return Err(RandomActivityError::ValueError(
                 "source_capacity_msat cannot be zero".into(),
             ));
         }
 
         if expected_payment_amt == 0 {
-            return Err(SimulationError::RandomActivityError(
+            return Err(RandomActivityError::ValueError(
                 "expected_payment_amt cannot be zero".into(),
             ));
         }
 
         if multiplier == 0.0 {
-            return Err(SimulationError::RandomActivityError(
+            return Err(RandomActivityError::ValueError(
                 "multiplier cannot be zero".into(),
             ));
         }
@@ -129,7 +138,7 @@ impl PaymentActivityGenerator {
             / (SECONDS_PER_MONTH as f64);
 
         let event_dist =
-            Exp::new(lamda).map_err(|e| SimulationError::RandomActivityError(e.to_string()))?;
+            Exp::new(lamda).map_err(|e| RandomActivityError::ValueError(e.to_string()))?;
 
         Ok(PaymentActivityGenerator {
             multiplier,
@@ -144,7 +153,7 @@ impl PaymentActivityGenerator {
     pub fn validate_capacity(
         node_capacity_msat: u64,
         expected_payment_amt: u64,
-    ) -> Result<(), SimulationError> {
+    ) -> Result<(), RandomActivityError> {
         // We will not be able to generate payments if the variance of sigma squared for our log normal distribution
         // is < 0 (because we have to take a square root).
         //
@@ -159,7 +168,7 @@ impl PaymentActivityGenerator {
         //   node_capacity_msat     >= 2 * expected_payment_amt
         let min_required_capacity = 2 * expected_payment_amt;
         if node_capacity_msat < min_required_capacity {
-            return Err(SimulationError::RandomActivityError(format!(
+            return Err(RandomActivityError::InsufficientCapacity(format!(
                 "node needs at least {} capacity (has: {}) to process expected payment amount: {}",
                 min_required_capacity, node_capacity_msat, expected_payment_amt
             )));
@@ -198,7 +207,7 @@ impl PaymentGenerator for PaymentActivityGenerator {
     /// capacity. While the expected value of payments remains the same, scaling variance by node capacity means that
     /// nodes with more deployed capital will see a larger range of payment values than those with smaller total
     /// channel capacity.
-    fn payment_amount(&self, destination_capacity: u64) -> Result<u64, SimulationError> {
+    fn payment_amount(&self, destination_capacity: u64) -> Result<u64, PaymentGenerationError> {
         let payment_limit = std::cmp::min(self.source_capacity, destination_capacity) / 2;
 
         let ln_pmt_amt = (self.expected_payment_amt as f64).ln();
@@ -208,13 +217,13 @@ impl PaymentGenerator for PaymentActivityGenerator {
         let sigma_square = 2.0 * (ln_limit - ln_pmt_amt);
 
         if sigma_square < 0.0 {
-            return Err(SimulationError::RandomActivityError(format!(
+            return Err(PaymentGenerationError(format!(
                 "payment amount not possible for limit: {payment_limit}, sigma squared: {sigma_square}"
             )));
         }
 
         let log_normal = LogNormal::new(mu, sigma_square.sqrt())
-            .map_err(|e| SimulationError::RandomActivityError(e.to_string()))?;
+            .map_err(|e| PaymentGenerationError(e.to_string()))?;
 
         let mut rng = rand::thread_rng();
         Ok(log_normal.sample(&mut rng) as u64)
@@ -271,7 +280,7 @@ mod tests {
             for i in 0..2 {
                 assert!(matches!(
                     NetworkGraphView::new(create_nodes(i, 42 * (i as u64 + 1))),
-                    Err(SimulationError::RandomActivityError { .. })
+                    Err(RandomActivityError::ValueError { .. })
                 ));
             }
 
@@ -281,13 +290,13 @@ mod tests {
             nodes.extend(create_nodes(1, 21));
             assert!(matches!(
                 NetworkGraphView::new(nodes),
-                Err(SimulationError::RandomActivityError { .. })
+                Err(RandomActivityError::InsufficientCapacity { .. })
             ));
 
             // All of them are 0
             assert!(matches!(
                 NetworkGraphView::new(create_nodes(2, 0)),
-                Err(SimulationError::RandomActivityError { .. })
+                Err(RandomActivityError::InsufficientCapacity { .. })
             ));
 
             // Otherwise we should be good
@@ -344,7 +353,7 @@ mod tests {
             );
             assert!(matches!(
                 PaymentActivityGenerator::new(2 * expected_payment, expected_payment + 1, 1.0),
-                Err(SimulationError::RandomActivityError { .. })
+                Err(RandomActivityError::InsufficientCapacity { .. })
             ));
 
             // Respecting the internal exponential distribution creation, neither of the parameters can be zero. Otherwise we may try to create an exponential
@@ -355,7 +364,7 @@ mod tests {
                     get_random_int(1, 10),
                     get_random_int(1, 10) as f64
                 ),
-                Err(SimulationError::RandomActivityError { .. })
+                Err(RandomActivityError::ValueError { .. })
             ));
             assert!(matches!(
                 PaymentActivityGenerator::new(
@@ -363,11 +372,11 @@ mod tests {
                     0,
                     get_random_int(1, 10) as f64
                 ),
-                Err(SimulationError::RandomActivityError { .. })
+                Err(RandomActivityError::ValueError { .. })
             ));
             assert!(matches!(
                 PaymentActivityGenerator::new(get_random_int(1, 10), get_random_int(1, 10), 0.0),
-                Err(SimulationError::RandomActivityError { .. })
+                Err(RandomActivityError::ValueError { .. })
             ));
         }
 
@@ -383,7 +392,7 @@ mod tests {
                 if capacity < 2 * payment_amt {
                     assert!(matches!(
                         r,
-                        Err(SimulationError::RandomActivityError { .. })
+                        Err(RandomActivityError::InsufficientCapacity { .. })
                     ));
                 } else {
                     assert!(r.is_ok());
@@ -406,7 +415,7 @@ mod tests {
             for i in 0..source_capacity {
                 assert!(matches!(
                     pag.payment_amount(i),
-                    Err(SimulationError::RandomActivityError(..))
+                    Err(PaymentGenerationError(..))
                 ))
             }
 
