@@ -4,6 +4,7 @@ use bitcoin::Network;
 use csv::WriterBuilder;
 use lightning::ln::features::NodeFeatures;
 use lightning::ln::PaymentHash;
+use random_activity::RandomActivityError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
@@ -23,6 +24,8 @@ pub mod cln;
 pub mod lnd;
 mod random_activity;
 mod serializers;
+#[cfg(test)]
+mod test_utils;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
@@ -125,8 +128,8 @@ pub enum SimulationError {
     CsvError(#[from] csv::Error),
     #[error("File Error")]
     FileError,
-    #[error("Random activity Error: {0}")]
-    RandomActivityError(String),
+    #[error("{0}")]
+    RandomActivityError(RandomActivityError),
 }
 
 // Phase 2: Event Queue
@@ -203,12 +206,15 @@ pub trait NetworkGenerator {
     fn sample_node_by_capacity(&self, source: PublicKey) -> (NodeInfo, u64);
 }
 
+#[derive(Debug, Error)]
+#[error("Payment generation error: {0}")]
+pub struct PaymentGenerationError(String);
 pub trait PaymentGenerator {
     // Returns the number of seconds that a node should wait until firing its next payment.
     fn next_payment_wait(&self) -> time::Duration;
 
     // Returns a payment amount based on the capacity of the sending and receiving node.
-    fn payment_amount(&self, destination_capacity: u64) -> Result<u64, SimulationError>;
+    fn payment_amount(&self, destination_capacity: u64) -> Result<u64, PaymentGenerationError>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -642,9 +648,10 @@ impl Simulation {
         producer_channels: HashMap<PublicKey, Sender<SimulationEvent>>,
         tasks: &mut JoinSet<()>,
     ) -> Result<(), SimulationError> {
-        let network_generator = Arc::new(Mutex::new(NetworkGraphView::new(
-            node_capacities.values().cloned().collect(),
-        )?));
+        let network_generator = Arc::new(Mutex::new(
+            NetworkGraphView::new(node_capacities.values().cloned().collect())
+                .map_err(SimulationError::RandomActivityError)?,
+        ));
 
         log::info!(
             "Created network generator: {}.",
@@ -655,10 +662,12 @@ impl Simulation {
             let (info, source_capacity) = match node_capacities.get(&pk) {
                 Some((info, capacity)) => (info.clone(), *capacity),
                 None => {
-                    return Err(SimulationError::RandomActivityError(format!(
-                        "Random activity generator run for: {} with unknown capacity.",
-                        pk
-                    )));
+                    return Err(SimulationError::RandomActivityError(
+                        RandomActivityError::ValueError(format!(
+                            "Random activity generator run for: {} with unknown capacity.",
+                            pk
+                        )),
+                    ));
                 }
             };
 
@@ -666,7 +675,8 @@ impl Simulation {
                 source_capacity,
                 self.expected_payment_msat,
                 self.activity_multiplier,
-            )?;
+            )
+            .map_err(SimulationError::RandomActivityError)?;
 
             tasks.spawn(produce_random_events(
                 info,
