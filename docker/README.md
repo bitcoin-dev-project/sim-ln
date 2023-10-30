@@ -51,12 +51,10 @@ For instance, in your configuration:
 
 ```json
 {
-  "LND": {
-    "id": "022579561f6f0ea86e330df2f9e7b2be3e0a53f8552f9d5293b80dfc1038f2f66d",
-    "address": "https://host.docker.internal:10002",
-    "macaroon": "/path/in/container/lnd/bob/data/chain/bitcoin/regtest/admin.macaroon",
-    "cert": "/path/in/container/lnd/bob/tls.cert"
-  }
+  "id": "022579561f6f0ea86e330df2f9e7b2be3e0a53f8552f9d5293b80dfc1038f2f66d",
+  "address": "https://host.docker.internal:10002",
+  "macaroon": "/path/in/container/lnd/bob/data/chain/bitcoin/regtest/admin.macaroon",
+  "cert": "/path/in/container/lnd/bob/tls.cert"
 }
 ```
 

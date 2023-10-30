@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use anyhow::anyhow;
 use clap::Parser;
 use log::LevelFilter;
 use sim_lib::{
@@ -60,7 +61,8 @@ async fn main() -> anyhow::Result<()> {
         .unwrap();
 
     let SimParams { nodes, activity } =
-        serde_json::from_str(&std::fs::read_to_string(cli.sim_file)?)?;
+        serde_json::from_str(&std::fs::read_to_string(cli.sim_file)?)
+            .map_err(|e| anyhow!("Could not deserialize node connection data or activity description from simulation file (line {}, col {}).", e.line(), e.column()))?;
 
     let mut clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>> = HashMap::new();
     let mut pk_node_map = HashMap::new();
