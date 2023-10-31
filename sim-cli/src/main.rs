@@ -42,7 +42,7 @@ struct Cli {
     #[clap(long, short, default_value_t = EXPECTED_PAYMENT_AMOUNT, value_parser = clap::builder::RangedU64ValueParser::<u64>::new().range(1..u64::MAX))]
     expected_pmt_amt: u64,
     /// Multiplier of the overall network capacity used by the random activity generator
-    #[clap(long, short, default_value_t = ACTIVITY_MULTIPLIER, value_parser = clap::builder::RangedU64ValueParser::<u32>::new().range(1..u64::MAX))]
+    #[clap(long, short, default_value_t = ACTIVITY_MULTIPLIER)]
     capacity_multiplier: f64,
     /// Do not create an output file containing the simulations results
     #[clap(long, default_value_t = false)]
