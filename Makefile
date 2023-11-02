@@ -1,7 +1,7 @@
 LOG_LEVEL ?= info
 
 build-docker:
-	chmod +x ./docker/build.sh && ./docker/build.sh
+	docker build -f docker/Dockerfile -t sim-ln .
 
 mount-volume:
 	chmod +x ./docker/setup-volume.sh && ./docker/setup-volume.sh "$(SIMFILE_PATH)"
