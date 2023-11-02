@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use anyhow::anyhow;
+use clap::builder::TypedValueParser;
 use clap::Parser;
 use log::LevelFilter;
 use sim_lib::{
@@ -21,6 +22,22 @@ pub const ACTIVITY_MULTIPLIER: f64 = 2.0;
 
 /// Default batch size to flush result data to disk
 const DEFAULT_PRINT_BATCH_SIZE: u32 = 500;
+
+/// Deserializes a f64 as long as it is positive and greater than 0.
+fn deserialize_f64_greater_than_zero(x: String) -> Result<f64, String> {
+    match x.parse::<f64>() {
+        Ok(x) => {
+            if x > 0.0 {
+                Ok(x)
+            } else {
+                Err(format!(
+                    "capacity_multiplier must be higher than 0. {x} received."
+                ))
+            }
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -42,7 +59,7 @@ struct Cli {
     #[clap(long, short, default_value_t = EXPECTED_PAYMENT_AMOUNT, value_parser = clap::builder::RangedU64ValueParser::<u64>::new().range(1..u64::MAX))]
     expected_pmt_amt: u64,
     /// Multiplier of the overall network capacity used by the random activity generator
-    #[clap(long, short, default_value_t = ACTIVITY_MULTIPLIER)]
+    #[clap(long, short, default_value_t = ACTIVITY_MULTIPLIER, value_parser = clap::builder::StringValueParser::new().try_map(deserialize_f64_greater_than_zero))]
     capacity_multiplier: f64,
     /// Do not create an output file containing the simulations results
     #[clap(long, default_value_t = false)]
