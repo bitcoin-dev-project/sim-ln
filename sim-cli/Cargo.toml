@@ -11,6 +11,7 @@ Instantly simulate real-world Lightning network activity
 [dependencies]
 anyhow = { version = "1.0.69", features = ["backtrace"] }
 clap = { version = "4.1.6", features = ["derive", "env", "std", "help", "usage", "error-context", "suggestions"], default-features = false }
+dialoguer = "0.11.0"
 log = "0.4.20"
 serde = "1.0.183"
 serde_json = "1.0.104"

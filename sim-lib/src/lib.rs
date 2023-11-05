@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
 use std::marker::Send;
+use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
 use std::{collections::HashMap, sync::Arc, time::SystemTime};
 use thiserror::Error;
@@ -326,15 +327,21 @@ pub struct Simulation {
     shutdown_listener: Listener,
     // Total simulation time. The simulation will run forever if undefined.
     total_time: Option<time::Duration>,
-    /// The number of activity results to batch before printing in CSV.
-    print_batch_size: u32,
     /// The expected payment size for the network.
     expected_payment_msat: u64,
     /// The number of times that the network sends its total capacity in a month of operation when generating random
     /// activity.
     activity_multiplier: f64,
-    /// Whether we want the simulation not to produce and result file. Useful for developing, defaults to false.
-    no_results: bool,
+    /// Configurations for printing results to CSV. Results are not written if this option is None.
+    write_results: Option<WriteResults>,
+}
+
+#[derive(Clone)]
+pub struct WriteResults {
+    /// Data directory where CSV result files are written.
+    pub results_dir: PathBuf,
+    /// The number of activity results to batch before printing in CSV.
+    pub batch_size: u32,
 }
 
 impl Simulation {
@@ -342,10 +349,9 @@ impl Simulation {
         nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>>,
         activity: Vec<ActivityDefinition>,
         total_time: Option<u32>,
-        print_batch_size: u32,
         expected_payment_msat: u64,
         activity_multiplier: f64,
-        no_results: bool,
+        write_results: Option<WriteResults>,
     ) -> Self {
         let (shutdown_trigger, shutdown_listener) = triggered::trigger();
         Self {
@@ -354,10 +360,9 @@ impl Simulation {
             shutdown_trigger,
             shutdown_listener,
             total_time: total_time.map(|x| Duration::from_secs(x as u64)),
-            print_batch_size,
             expected_payment_msat,
             activity_multiplier,
-            no_results,
+            write_results,
         }
     }
 
@@ -561,8 +566,7 @@ impl Simulation {
             result_logger,
             results_receiver,
             listener,
-            self.print_batch_size,
-            self.no_results,
+            self.write_results.clone(),
         ));
         log::debug!("Simulator data collection set up.");
     }
@@ -886,14 +890,11 @@ async fn consume_simulation_results(
     logger: Arc<Mutex<PaymentResultLogger>>,
     receiver: Receiver<(Payment, PaymentResult)>,
     listener: Listener,
-    print_batch_size: u32,
-    no_results: bool,
+    write_results: Option<WriteResults>,
 ) {
     log::debug!("Simulation results consumer started.");
 
-    if let Err(e) =
-        write_payment_results(logger, receiver, listener, print_batch_size, no_results).await
-    {
+    if let Err(e) = write_payment_results(logger, receiver, listener, write_results).await {
         log::error!("Error while reporting payment results: {:?}.", e);
     }
 
@@ -904,20 +905,19 @@ async fn write_payment_results(
     logger: Arc<Mutex<PaymentResultLogger>>,
     mut receiver: Receiver<(Payment, PaymentResult)>,
     listener: Listener,
-    print_batch_size: u32,
-    no_results: bool,
+    write_results: Option<WriteResults>,
 ) -> Result<(), SimulationError> {
-    let mut writer = if !no_results {
-        Some(WriterBuilder::new().from_path(format!(
+    let mut writer = write_results.and_then(|write_result| {
+        let file = write_result.results_dir.join(format!(
             "simulation_{:?}.csv",
             SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap()
                 .as_secs()
-        ))?)
-    } else {
-        None
-    };
+        ));
+        let writer = WriterBuilder::new().from_path(file).ok()?;
+        Some((writer, write_result.batch_size))
+    });
 
     let mut counter = 1;
     loop {
@@ -925,7 +925,7 @@ async fn write_payment_results(
             biased;
             _ = listener.clone() => {
                 log::debug!("Simulation results consumer received shutdown signal.");
-                return writer.map_or(Ok(()), |ref mut w| w.flush().map_err(|_| SimulationError::FileError))
+                return writer.map_or(Ok(()), |(ref mut w, _)| w.flush().map_err(|_| SimulationError::FileError))
             },
             payment_report = receiver.recv() => {
                 match payment_report {
@@ -933,19 +933,18 @@ async fn write_payment_results(
                         logger.lock().await.report_result(&details, &result);
                         log::trace!("Resolved dispatched payment: {} with: {}.", details, result);
 
-                        if let Some(ref mut w) = writer {
+                        if let Some((ref mut w, batch_size)) = writer {
                             w.serialize((details, result)).map_err(|e| {
                                 let _ = w.flush();
                                 SimulationError::CsvError(e)
                             })?;
-
-                            counter = counter % print_batch_size + 1;
-                            if print_batch_size == counter {
+                            counter = counter % batch_size + 1;
+                            if batch_size == counter {
                                 w.flush().map_err(|_| SimulationError::FileError)?;
                             }
                         }
                     },
-                    None => return writer.map(|ref mut w| w.flush().map_err(|_| SimulationError::FileError)).unwrap_or(Ok(())),
+                    None => return writer.map_or(Ok(()), |(ref mut w, _)| w.flush().map_err(|_| SimulationError::FileError)),
                 }
             }
         }
