@@ -549,7 +549,16 @@ impl Simulation {
             listener.clone(),
         ));
 
+        let result_logger = Arc::new(Mutex::new(PaymentResultLogger::new()));
+
+        tasks.spawn(run_results_logger(
+            listener.clone(),
+            result_logger.clone(),
+            Duration::from_secs(60),
+        ));
+
         tasks.spawn(consume_simulation_results(
+            result_logger,
             results_receiver,
             listener,
             self.print_batch_size,
@@ -874,6 +883,7 @@ async fn produce_random_events<N: NetworkGenerator, A: PaymentGenerator + Displa
 }
 
 async fn consume_simulation_results(
+    logger: Arc<Mutex<PaymentResultLogger>>,
     receiver: Receiver<(Payment, PaymentResult)>,
     listener: Listener,
     print_batch_size: u32,
@@ -881,7 +891,9 @@ async fn consume_simulation_results(
 ) {
     log::debug!("Simulation results consumer started.");
 
-    if let Err(e) = write_payment_results(receiver, listener, print_batch_size, no_results).await {
+    if let Err(e) =
+        write_payment_results(logger, receiver, listener, print_batch_size, no_results).await
+    {
         log::error!("Error while reporting payment results: {:?}.", e);
     }
 
@@ -889,6 +901,7 @@ async fn consume_simulation_results(
 }
 
 async fn write_payment_results(
+    logger: Arc<Mutex<PaymentResultLogger>>,
     mut receiver: Receiver<(Payment, PaymentResult)>,
     listener: Listener,
     print_batch_size: u32,
@@ -906,8 +919,7 @@ async fn write_payment_results(
         None
     };
 
-    let mut result_logger = PaymentResultLogger::new();
-    let mut counter = 0;
+    let mut counter = 1;
     loop {
         tokio::select! {
             biased;
@@ -918,7 +930,7 @@ async fn write_payment_results(
             payment_report = receiver.recv() => {
                 match payment_report {
                     Some((details, result)) => {
-                        result_logger.report_result(&details, &result);
+                        logger.lock().await.report_result(&details, &result);
                         log::trace!("Resolved dispatched payment: {} with: {}.", details, result);
 
                         if let Some(ref mut w) = writer {
@@ -940,22 +952,17 @@ async fn write_payment_results(
     }
 }
 
-/// PaymentResultLogger is an aggregate logger that will report on a summary of the payments that have been reported
-/// to it at regular intervals (defined by the log_interval it is created with).
+/// PaymentResultLogger is an aggregate logger that will report on a summary of the payments that have been reported.
 #[derive(Default)]
 struct PaymentResultLogger {
     success_payment: u64,
     failed_payment: u64,
     total_sent: u64,
-    call_count: u8,
-    log_interval: u8,
 }
 
 impl PaymentResultLogger {
     fn new() -> Self {
         PaymentResultLogger {
-            // TODO: set the interval at which we log based on the number of payment we're expecting to log.
-            log_interval: 10,
             ..Default::default()
         }
     }
@@ -967,18 +974,44 @@ impl PaymentResultLogger {
         }
 
         self.total_sent += details.amount_msat;
-        self.call_count += 1;
+    }
+}
 
-        if self.call_count % self.log_interval == 0 || self.call_count == 0 {
-            let total_payments = self.success_payment + self.failed_payment;
-            log::info!(
-                "Processed {} payments sending {} msat total with {}% success rate.",
-                total_payments,
-                self.total_sent,
-                (self.success_payment * 100 / total_payments)
-            );
+impl Display for PaymentResultLogger {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let total_payments = self.success_payment + self.failed_payment;
+        write!(
+            f,
+            "Processed {} payments sending {} msat total with {:.2}% success rate.",
+            total_payments,
+            self.total_sent,
+            (self.success_payment as f64 / total_payments as f64) * 100.0
+        )
+    }
+}
+
+async fn run_results_logger(
+    listener: Listener,
+    logger: Arc<Mutex<PaymentResultLogger>>,
+    interval: Duration,
+) {
+    log::debug!("Results logger started.");
+    log::info!("Summary of results will be reported every {:?}.", interval);
+
+    loop {
+        select! {
+            biased;
+            _ = listener.clone() => {
+                break
+            }
+
+            _ = time::sleep(interval) => {
+                log::info!("{}", logger.lock().await)
+            }
         }
     }
+
+    log::debug!("Results logger stopped.")
 }
 
 /// produce_results is responsible for receiving the outputs of events that the simulator has taken and
