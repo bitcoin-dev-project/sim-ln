@@ -203,7 +203,7 @@ pub trait LightningNode {
 pub trait NetworkGenerator {
     // sample_node_by_capacity randomly picks a node within the network weighted by its capacity deployed to the
     // network in channels. It returns the node's public key and its capacity in millisatoshis.
-    fn sample_node_by_capacity(&self, source: PublicKey) -> (NodeInfo, u64);
+    fn sample_node_by_capacity(&self, source: PublicKey) -> (NodeInfo, Option<u64>);
 }
 
 #[derive(Debug, Error)]
@@ -213,8 +213,11 @@ pub trait PaymentGenerator {
     // Returns the number of seconds that a node should wait until firing its next payment.
     fn next_payment_wait(&self) -> time::Duration;
 
-    // Returns a payment amount based on the capacity of the sending and receiving node.
-    fn payment_amount(&self, destination_capacity: u64) -> Result<u64, PaymentGenerationError>;
+    // Returns a payment amount based, with a destination capacity optionally provided to inform the amount picked.
+    fn payment_amount(
+        &self,
+        destination_capacity: Option<u64>,
+    ) -> Result<u64, PaymentGenerationError>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
