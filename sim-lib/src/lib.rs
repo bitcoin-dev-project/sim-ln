@@ -487,14 +487,14 @@ impl Simulation {
             random_activity_nodes.keys().cloned().collect()
         };
 
-        let producer_senders =
+        let consumer_channels =
             self.dispatch_consumers(collecting_nodes, event_sender.clone(), &mut tasks);
 
         // Next, we'll spin up our actual activity generator that will be responsible for triggering the activity that
         // has been configured (if any), passing in the channel that is used to notify data collection that events have
         // been generated. Alternatively, we'll generate random activity if there is no activity specified.
         if !self.activity.is_empty() {
-            self.dispatch_activity_producers(producer_senders, &mut tasks)
+            self.dispatch_activity_producers(consumer_channels, &mut tasks)
                 .await;
         } else {
             log::info!(
@@ -502,7 +502,7 @@ impl Simulation {
                 self.activity_multiplier,
                 self.expected_payment_msat
             );
-            self.dispatch_random_producers(random_activity_nodes, producer_senders, &mut tasks)
+            self.dispatch_random_producers(random_activity_nodes, consumer_channels, &mut tasks)
                 .await?;
         }
 
@@ -670,7 +670,7 @@ impl Simulation {
     async fn dispatch_random_producers(
         &self,
         node_capacities: HashMap<PublicKey, (NodeInfo, u64)>,
-        producer_channels: HashMap<PublicKey, Sender<SimulationEvent>>,
+        consumer_channels: HashMap<PublicKey, Sender<SimulationEvent>>,
         tasks: &mut JoinSet<()>,
     ) -> Result<(), SimulationError> {
         let network_generator = Arc::new(Mutex::new(
@@ -683,7 +683,7 @@ impl Simulation {
             network_generator.lock().await
         );
 
-        for (pk, sender) in producer_channels.into_iter() {
+        for (pk, sender) in consumer_channels.into_iter() {
             let (info, source_capacity) = match node_capacities.get(&pk) {
                 Some((info, capacity)) => (info.clone(), *capacity),
                 None => {
