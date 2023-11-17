@@ -259,27 +259,10 @@ impl Display for RandomPaymentActivity {
 #[cfg(test)]
 mod tests {
     mod test_network_graph_view {
-        use lightning::ln::features::Features;
         use ntest::timeout;
 
         use super::super::*;
-        use crate::test_utils::get_random_keypair;
-        use crate::NodeInfo;
-
-        fn create_nodes(n: usize, node_capacity: u64) -> Vec<(NodeInfo, u64)> {
-            (1..=n)
-                .map(|_| {
-                    (
-                        NodeInfo {
-                            pubkey: get_random_keypair().1,
-                            alias: String::new(),
-                            features: Features::empty(),
-                        },
-                        node_capacity,
-                    )
-                })
-                .collect()
-        }
+        use crate::test_utils::create_nodes;
 
         #[test]
         fn test_new() {
