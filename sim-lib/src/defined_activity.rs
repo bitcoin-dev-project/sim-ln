@@ -1,4 +1,4 @@
-use crate::{NetworkGenerator, NodeInfo, PaymentGenerationError, PaymentGenerator};
+use crate::{NetworkGenerator, NodeInfo, PayGenDisplay, PaymentGenerationError, PaymentGenerator};
 use core::fmt;
 use std::fmt::Display;
 use tokio::time::Duration;
@@ -86,3 +86,5 @@ mod tests {
         ));
     }
 }
+
+impl PayGenDisplay for DefinedActivityGenerator {}

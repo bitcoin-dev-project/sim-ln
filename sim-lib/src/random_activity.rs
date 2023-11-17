@@ -6,7 +6,7 @@ use bitcoin::secp256k1::PublicKey;
 use rand_distr::{Distribution, Exp, LogNormal, WeightedIndex};
 use std::time::Duration;
 
-use crate::{NetworkGenerator, NodeInfo, PaymentGenerationError, PaymentGenerator};
+use crate::{NetworkGenerator, NodeInfo, PayGenDisplay, PaymentGenerationError, PaymentGenerator};
 
 const HOURS_PER_MONTH: u64 = 30 * 24;
 const SECONDS_PER_MONTH: u64 = HOURS_PER_MONTH * 60 * 60;
@@ -259,6 +259,8 @@ impl Display for PaymentActivityGenerator {
         )
     }
 }
+
+impl PayGenDisplay for PaymentActivityGenerator {}
 
 #[cfg(test)]
 mod tests {
