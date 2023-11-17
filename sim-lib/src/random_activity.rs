@@ -60,7 +60,7 @@ impl DestinationGenerator for NetworkGraphView {
     /// Randomly samples the network for a node, weighted by capacity.  Using a single graph view means that it's
     /// possible for a source node to select itself. After sufficient retries, this is highly improbable (even  with
     /// very small graphs, or those with one node significantly more capitalized than others).
-    fn choose_destination(&self, source: PublicKey) -> (NodeInfo, u64) {
+    fn choose_destination(&self, source: PublicKey) -> (NodeInfo, Option<u64>) {
         let mut rng = rand::thread_rng();
 
         // While it's very unlikely that we can't pick a destination that is not our source, it's possible that there's
@@ -70,10 +70,10 @@ impl DestinationGenerator for NetworkGraphView {
         loop {
             let index = self.node_picker.sample(&mut rng);
             // Unwrapping is safe given `NetworkGraphView` has the same amount of elements for `nodes` and `node_picker`
-            let destination = self.nodes.get(index).unwrap();
+            let (node_info, capacity) = self.nodes.get(index).unwrap();
 
-            if destination.0.pubkey != source {
-                return destination.clone();
+            if node_info.pubkey != source {
+                return (node_info.clone(), Some(*capacity));
             }
 
             if i % 50 == 0 {
@@ -207,7 +207,14 @@ impl PaymentGenerator for RandomPaymentActivity {
     /// capacity. While the expected value of payments remains the same, scaling variance by node capacity means that
     /// nodes with more deployed capital will see a larger range of payment values than those with smaller total
     /// channel capacity.
-    fn payment_amount(&self, destination_capacity: u64) -> Result<u64, PaymentGenerationError> {
+    fn payment_amount(
+        &self,
+        destination_capacity: Option<u64>,
+    ) -> Result<u64, PaymentGenerationError> {
+        let destination_capacity = destination_capacity.ok_or(PaymentGenerationError(
+            "destination amount required for payment activity generator".to_string(),
+        ))?;
+
         let payment_limit = std::cmp::min(self.source_capacity, destination_capacity) / 2;
 
         let ln_pmt_amt = (self.expected_payment_amt as f64).ln();
@@ -405,20 +412,25 @@ mod tests {
             // Wrong cases
             for i in 0..source_capacity {
                 assert!(matches!(
-                    pag.payment_amount(i),
+                    pag.payment_amount(Some(i)),
                     Err(PaymentGenerationError(..))
                 ))
             }
 
             // All other cases will work. We are not going to exhaustively test for the rest up to u64::MAX, let just pick a bunch
             for i in source_capacity + 1..100 * source_capacity {
-                assert!(pag.payment_amount(i).is_ok())
+                assert!(pag.payment_amount(Some(i)).is_ok())
             }
 
             // We can even try really high numbers to make sure they are not troublesome
             for i in u64::MAX - 10000..u64::MAX {
-                assert!(pag.payment_amount(i).is_ok())
+                assert!(pag.payment_amount(Some(i)).is_ok())
             }
+
+            assert!(matches!(
+                pag.payment_amount(None),
+                Err(PaymentGenerationError(..))
+            ));
         }
     }
 }

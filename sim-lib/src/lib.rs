@@ -203,8 +203,8 @@ pub trait LightningNode {
 
 pub trait DestinationGenerator {
     // choose_destination picks a destination node within the network, returning the node's information and its
-    // capacity.
-    fn choose_destination(&self, source: PublicKey) -> (NodeInfo, u64);
+    // capacity (if available).
+    fn choose_destination(&self, source: PublicKey) -> (NodeInfo, Option<u64>);
 }
 
 #[derive(Debug, Error)]
@@ -214,8 +214,11 @@ pub trait PaymentGenerator {
     // Returns the number of seconds that a node should wait until firing its next payment.
     fn next_payment_wait(&self) -> time::Duration;
 
-    // Returns a payment amount based on the capacity of the sending and receiving node.
-    fn payment_amount(&self, destination_capacity: u64) -> Result<u64, PaymentGenerationError>;
+    // Returns a payment amount based, with a destination capacity optionally provided to inform the amount picked.
+    fn payment_amount(
+        &self,
+        destination_capacity: Option<u64>,
+    ) -> Result<u64, PaymentGenerationError>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
