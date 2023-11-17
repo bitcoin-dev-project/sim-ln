@@ -28,11 +28,10 @@ NODE_COUNT=$(cat $SIMFILE_PATH_ON_HOST | jq '.nodes | length')
 
 # Loop Over Each Node
 for (( i=0; i<$NODE_COUNT; i++ )); do
-    NODE_TYPE=$(cat $SIMFILE_PATH_ON_HOST | jq -r ".nodes[$i] | keys[0]") # Determine if it's LND or CLN.
-    NODE_ID=$(cat $SIMFILE_PATH_ON_HOST | jq -r ".nodes[$i].$NODE_TYPE.id") # Extract node ID for directory creation.
-    NODE_TLS_PATH_ON_HOST=$(cat $SIMFILE_PATH_ON_HOST | jq -r ".nodes[$i].$NODE_TYPE.cert") # TLS path
-    NODE_MACAROON_PATH_ON_HOST=$(cat $SIMFILE_PATH_ON_HOST | jq -r ".nodes[$i].$NODE_TYPE.macaroon") # Macaroon path
-    
+    NODE_ID=$(cat $SIMFILE_PATH_ON_HOST | jq -r ".nodes[$i].id") # Extract node ID for directory creation.
+    NODE_TLS_PATH_ON_HOST=$(cat $SIMFILE_PATH_ON_HOST | jq -r ".nodes[$i].cert") # TLS path
+    NODE_MACAROON_PATH_ON_HOST=$(cat $SIMFILE_PATH_ON_HOST | jq -r ".nodes[$i].macaroon") # Macaroon path
+   
     # Create staging directories for each node
     mkdir -p $STAGING_DIR/lnd/$NODE_ID
 
