@@ -81,6 +81,7 @@ Other configurable variables include:
 - `HELP`: Set to `true` to print the help message.
 - `PRINT_BATCH_SIZE`: determines the number of payment results that will be written to disk at a time.
 - `TOTAL_TIME`: the total runtime for the simulation expressed in seconds.
+- `DATA_DIR`: Path to a directory containing simulation files, and where simulation results will be stored (default is the `/data_dir` volume directory).
 
 Example usage:
 
