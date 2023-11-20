@@ -6,7 +6,7 @@ use bitcoin::secp256k1::PublicKey;
 use rand_distr::{Distribution, Exp, LogNormal, WeightedIndex};
 use std::time::Duration;
 
-use crate::{NetworkGenerator, NodeInfo, PaymentGenerationError, PaymentGenerator};
+use crate::{NetworkGenerator, NodeInfo, PayGenDisplay, PaymentGenerationError, PaymentGenerator};
 
 const HOURS_PER_MONTH: u64 = 30 * 24;
 const SECONDS_PER_MONTH: u64 = HOURS_PER_MONTH * 60 * 60;
@@ -60,7 +60,7 @@ impl NetworkGenerator for NetworkGraphView {
     /// Randomly samples the network for a node, weighted by capacity.  Using a single graph view means that it's
     /// possible for a source node to select itself. After sufficient retries, this is highly improbable (even  with
     /// very small graphs, or those with one node significantly more capitalized than others).
-    fn sample_node_by_capacity(&self, source: PublicKey) -> (NodeInfo, u64) {
+    fn sample_node_by_capacity(&self, source: PublicKey) -> (NodeInfo, Option<u64>) {
         let mut rng = rand::thread_rng();
 
         // While it's very unlikely that we can't pick a destination that is not our source, it's possible that there's
@@ -73,7 +73,7 @@ impl NetworkGenerator for NetworkGraphView {
             let destination = self.nodes.get(index).unwrap();
 
             if destination.0.pubkey != source {
-                return destination.clone();
+                return (destination.0.clone(), Some(destination.1));
             }
 
             if i % 50 == 0 {
@@ -207,7 +207,18 @@ impl PaymentGenerator for PaymentActivityGenerator {
     /// capacity. While the expected value of payments remains the same, scaling variance by node capacity means that
     /// nodes with more deployed capital will see a larger range of payment values than those with smaller total
     /// channel capacity.
-    fn payment_amount(&self, destination_capacity: u64) -> Result<u64, PaymentGenerationError> {
+    fn payment_amount(
+        &self,
+        destination_capacity: Option<u64>,
+    ) -> Result<u64, PaymentGenerationError> {
+        let destination_capacity = match destination_capacity {
+            Some(c) => c,
+            None => {
+                return Err(PaymentGenerationError(
+                    "destination amount required for payment activity generator".to_string(),
+                ))
+            }
+        };
         let payment_limit = std::cmp::min(self.source_capacity, destination_capacity) / 2;
 
         let ln_pmt_amt = (self.expected_payment_amt as f64).ln();
@@ -249,30 +260,15 @@ impl Display for PaymentActivityGenerator {
     }
 }
 
+impl PayGenDisplay for PaymentActivityGenerator {}
+
 #[cfg(test)]
 mod tests {
     mod test_network_graph_view {
-        use lightning::ln::features::Features;
         use ntest::timeout;
 
         use super::super::*;
-        use crate::test_utils::get_random_keypair;
-        use crate::NodeInfo;
-
-        fn create_nodes(n: usize, node_capacity: u64) -> Vec<(NodeInfo, u64)> {
-            (1..=n)
-                .map(|_| {
-                    (
-                        NodeInfo {
-                            pubkey: get_random_keypair().1,
-                            alias: String::new(),
-                            features: Features::empty(),
-                        },
-                        node_capacity,
-                    )
-                })
-                .collect()
-        }
+        use crate::test_utils::create_nodes;
 
         #[test]
         fn test_new() {
@@ -414,20 +410,25 @@ mod tests {
             // Wrong cases
             for i in 0..source_capacity {
                 assert!(matches!(
-                    pag.payment_amount(i),
+                    pag.payment_amount(Some(i)),
                     Err(PaymentGenerationError(..))
                 ))
             }
 
             // All other cases will work. We are not going to exhaustively test for the rest up to u64::MAX, let just pick a bunch
             for i in source_capacity + 1..100 * source_capacity {
-                assert!(pag.payment_amount(i).is_ok())
+                assert!(pag.payment_amount(Some(i)).is_ok())
             }
 
             // We can even try really high numbers to make sure they are not troublesome
             for i in u64::MAX - 10000..u64::MAX {
-                assert!(pag.payment_amount(i).is_ok())
+                assert!(pag.payment_amount(Some(i)).is_ok())
             }
+
+            assert!(matches!(
+                pag.payment_amount(None),
+                Err(PaymentGenerationError(..))
+            ));
         }
     }
 }
