@@ -41,10 +41,13 @@ Install the CLI:
 cargo install --locked --path sim-cli/
 ```
 
-Run with Simulation File (see [setup instructions](#simulation-file-setup) for details):
- ```
-sim-cli sim.json
+To run the simulation, create a simulation file `sim.json` in the working directory (see [setup instructions](#simulation-file-setup) for details) and run:
+
 ```
+sim-cli
+```
+
+Run `sim-cli -h` for details on `--data-dir` and `--sim-file` options that allow specifying custom simulation file locations.
 
 ### Simulation File Setup
 The simulator requires access details for a set of `nodes` that you 
@@ -190,10 +193,12 @@ described above). Activity sources and destinations may reference the
 *must* provide a valid public key.
 
 ### Simulation Output
-A summary of the results will be logged by the simulator, and a full 
-list of payments made with their outcomes is available in 
-`simulation_{timestamp}.csv` in the directory that the simulation was 
-executed in. For more detailed logs, use the `--log-level` cli flag.
+
+A summary of the results will be logged by the simulator. A full list of payments made with their outcomes
+is available in `simulation_{timestamp}.csv` within the configured `{data_dir}/results`.
+
+Run `sim-cli -h` for details on data directory (`--data-dir`) and other options including `--print-batch-size`
+which affect how simulation outputs are persisted
 
 ## Lightning Environments
 If you're looking to get started with local lightning development, we
