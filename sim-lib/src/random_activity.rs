@@ -6,7 +6,7 @@ use bitcoin::secp256k1::PublicKey;
 use rand_distr::{Distribution, Exp, LogNormal, WeightedIndex};
 use std::time::Duration;
 
-use crate::{NetworkGenerator, NodeInfo, PaymentGenerationError, PaymentGenerator};
+use crate::{DestinationGenerator, NodeInfo, PaymentGenerationError, PaymentGenerator};
 
 const HOURS_PER_MONTH: u64 = 30 * 24;
 const SECONDS_PER_MONTH: u64 = HOURS_PER_MONTH * 60 * 60;
@@ -56,7 +56,7 @@ impl NetworkGraphView {
     }
 }
 
-impl NetworkGenerator for NetworkGraphView {
+impl DestinationGenerator for NetworkGraphView {
     /// Randomly samples the network for a node, weighted by capacity.  Using a single graph view means that it's
     /// possible for a source node to select itself. After sufficient retries, this is highly improbable (even  with
     /// very small graphs, or those with one node significantly more capitalized than others).

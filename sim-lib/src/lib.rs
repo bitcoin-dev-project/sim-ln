@@ -201,7 +201,7 @@ pub trait LightningNode {
     async fn list_channels(&mut self) -> Result<Vec<u64>, LightningError>;
 }
 
-pub trait NetworkGenerator {
+pub trait DestinationGenerator {
     // sample_node_by_capacity randomly picks a node within the network weighted by its capacity deployed to the
     // network in channels. It returns the node's public key and its capacity in millisatoshis.
     fn sample_node_by_capacity(&self, source: PublicKey) -> (NodeInfo, u64);
@@ -826,7 +826,7 @@ async fn produce_events(
     shutdown.trigger();
 }
 
-async fn produce_random_events<N: NetworkGenerator, A: PaymentGenerator + Display>(
+async fn produce_random_events<N: DestinationGenerator, A: PaymentGenerator + Display>(
     source: NodeInfo,
     network_generator: Arc<Mutex<N>>,
     node_generator: A,
