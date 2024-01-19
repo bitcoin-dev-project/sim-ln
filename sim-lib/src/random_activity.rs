@@ -95,14 +95,14 @@ impl Display for NetworkGraphView {
 /// While the expected amount to be sent in a month and the mean payment amount are set, the generator will introduce
 /// randomness both in the time between events and the variance of payment amounts sent to mimic more realistic
 /// payment flows.
-pub struct PaymentActivityGenerator {
+pub struct RandomPaymentActivity {
     multiplier: f64,
     expected_payment_amt: u64,
     source_capacity: u64,
     event_dist: Exp<f64>,
 }
 
-impl PaymentActivityGenerator {
+impl RandomPaymentActivity {
     /// Creates a new activity generator for a node, returning an error if the node has insufficient capacity deployed
     /// for the expected payment amount provided. Capacity is defined as the sum of the channels that the node has
     /// open in the network divided by two (so that capacity is not double counted with channel counterparties).
@@ -129,7 +129,7 @@ impl PaymentActivityGenerator {
             ));
         }
 
-        PaymentActivityGenerator::validate_capacity(source_capacity_msat, expected_payment_amt)?;
+        RandomPaymentActivity::validate_capacity(source_capacity_msat, expected_payment_amt)?;
 
         // Lamda for the exponential distribution that we'll use to randomly time events is equal to the number of
         // events that we expect to see within our set period.
@@ -140,7 +140,7 @@ impl PaymentActivityGenerator {
         let event_dist =
             Exp::new(lamda).map_err(|e| RandomActivityError::ValueError(e.to_string()))?;
 
-        Ok(PaymentActivityGenerator {
+        Ok(RandomPaymentActivity {
             multiplier,
             expected_payment_amt,
             source_capacity: source_capacity_msat,
@@ -193,7 +193,7 @@ fn events_per_month(source_capacity_msat: u64, multiplier: f64, expected_payment
     (source_capacity_msat as f64 * multiplier) / expected_payment_amt as f64
 }
 
-impl PaymentGenerator for PaymentActivityGenerator {
+impl PaymentGenerator for RandomPaymentActivity {
     /// Returns the amount of time until the next payment should be scheduled for the node.
     fn next_payment_wait(&self) -> Duration {
         let mut rng = rand::thread_rng();
@@ -230,7 +230,7 @@ impl PaymentGenerator for PaymentActivityGenerator {
     }
 }
 
-impl Display for PaymentActivityGenerator {
+impl Display for RandomPaymentActivity {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let monthly_events = events_per_month(
             self.source_capacity,
@@ -349,33 +349,25 @@ mod tests {
             // here. Mainly, if the `capacity < expected_payment_amnt / 2`, the generator will fail building
             let expected_payment = get_random_int(1, 100);
             assert!(
-                PaymentActivityGenerator::new(2 * expected_payment, expected_payment, 1.0).is_ok()
+                RandomPaymentActivity::new(2 * expected_payment, expected_payment, 1.0).is_ok()
             );
             assert!(matches!(
-                PaymentActivityGenerator::new(2 * expected_payment, expected_payment + 1, 1.0),
+                RandomPaymentActivity::new(2 * expected_payment, expected_payment + 1, 1.0),
                 Err(RandomActivityError::InsufficientCapacity { .. })
             ));
 
             // Respecting the internal exponential distribution creation, neither of the parameters can be zero. Otherwise we may try to create an exponential
             // function with lambda = NaN, which will error out, or with lambda = Inf, which does not make sense for our use-case
             assert!(matches!(
-                PaymentActivityGenerator::new(
-                    0,
-                    get_random_int(1, 10),
-                    get_random_int(1, 10) as f64
-                ),
+                RandomPaymentActivity::new(0, get_random_int(1, 10), get_random_int(1, 10) as f64),
                 Err(RandomActivityError::ValueError { .. })
             ));
             assert!(matches!(
-                PaymentActivityGenerator::new(
-                    get_random_int(1, 10),
-                    0,
-                    get_random_int(1, 10) as f64
-                ),
+                RandomPaymentActivity::new(get_random_int(1, 10), 0, get_random_int(1, 10) as f64),
                 Err(RandomActivityError::ValueError { .. })
             ));
             assert!(matches!(
-                PaymentActivityGenerator::new(get_random_int(1, 10), get_random_int(1, 10), 0.0),
+                RandomPaymentActivity::new(get_random_int(1, 10), get_random_int(1, 10), 0.0),
                 Err(RandomActivityError::ValueError { .. })
             ));
         }
@@ -388,7 +380,7 @@ mod tests {
                 let capacity = get_random_int(0, 100);
                 let payment_amt = get_random_int(0, 100);
 
-                let r = PaymentActivityGenerator::validate_capacity(capacity, payment_amt);
+                let r = RandomPaymentActivity::validate_capacity(capacity, payment_amt);
                 if capacity < 2 * payment_amt {
                     assert!(matches!(
                         r,
@@ -408,8 +400,7 @@ mod tests {
             // All of them will yield a sigma squared smaller than 0, which we have a sanity check for.
             let expected_payment = get_random_int(1, 100);
             let source_capacity = 2 * expected_payment;
-            let pag =
-                PaymentActivityGenerator::new(source_capacity, expected_payment, 1.0).unwrap();
+            let pag = RandomPaymentActivity::new(source_capacity, expected_payment, 1.0).unwrap();
 
             // Wrong cases
             for i in 0..source_capacity {

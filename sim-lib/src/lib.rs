@@ -19,7 +19,7 @@ use tokio::task::JoinSet;
 use tokio::{select, time, time::Duration};
 use triggered::{Listener, Trigger};
 
-use self::random_activity::{NetworkGraphView, PaymentActivityGenerator};
+use self::random_activity::{NetworkGraphView, RandomPaymentActivity};
 
 pub mod cln;
 pub mod lnd;
@@ -582,10 +582,9 @@ impl Simulation {
         for (pk, node) in self.nodes.iter() {
             let chan_capacity = node.lock().await.list_channels().await?.iter().sum::<u64>();
 
-            if let Err(e) = PaymentActivityGenerator::validate_capacity(
-                chan_capacity,
-                self.expected_payment_msat,
-            ) {
+            if let Err(e) =
+                RandomPaymentActivity::validate_capacity(chan_capacity, self.expected_payment_msat)
+            {
                 log::warn!("Node: {} not eligible for activity generation: {e}.", *pk);
                 continue;
             }
@@ -684,7 +683,7 @@ impl Simulation {
                 }
             };
 
-            let node_generator = PaymentActivityGenerator::new(
+            let node_generator = RandomPaymentActivity::new(
                 source_capacity,
                 self.expected_payment_msat,
                 self.activity_multiplier,
