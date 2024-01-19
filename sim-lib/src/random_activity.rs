@@ -60,7 +60,7 @@ impl DestinationGenerator for NetworkGraphView {
     /// Randomly samples the network for a node, weighted by capacity.  Using a single graph view means that it's
     /// possible for a source node to select itself. After sufficient retries, this is highly improbable (even  with
     /// very small graphs, or those with one node significantly more capitalized than others).
-    fn sample_node_by_capacity(&self, source: PublicKey) -> (NodeInfo, u64) {
+    fn choose_destination(&self, source: PublicKey) -> (NodeInfo, u64) {
         let mut rng = rand::thread_rng();
 
         // While it's very unlikely that we can't pick a destination that is not our source, it's possible that there's
@@ -333,7 +333,7 @@ mod tests {
             let view = NetworkGraphView::new(nodes).unwrap();
 
             for _ in 0..10 {
-                view.sample_node_by_capacity(big_node);
+                view.choose_destination(big_node);
             }
         }
     }

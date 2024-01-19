@@ -202,9 +202,9 @@ pub trait LightningNode {
 }
 
 pub trait DestinationGenerator {
-    // sample_node_by_capacity randomly picks a node within the network weighted by its capacity deployed to the
-    // network in channels. It returns the node's public key and its capacity in millisatoshis.
-    fn sample_node_by_capacity(&self, source: PublicKey) -> (NodeInfo, u64);
+    // choose_destination picks a destination node within the network, returning the node's information and its
+    // capacity.
+    fn choose_destination(&self, source: PublicKey) -> (NodeInfo, u64);
 }
 
 #[derive(Debug, Error)]
@@ -849,7 +849,7 @@ async fn produce_random_events<N: DestinationGenerator, A: PaymentGenerator + Di
             // Wait until our time to next payment has elapsed then execute a random amount payment to a random
             // destination.
             _ = time::sleep(wait) => {
-                let (destination, capacity) = network_generator.lock().await.sample_node_by_capacity(source.pubkey);
+                let (destination, capacity) = network_generator.lock().await.choose_destination(source.pubkey);
 
                 // Only proceed with a payment if the amount is non-zero, otherwise skip this round. If we can't get
                 // a payment amount something has gone wrong (because we should have validated that we can always
