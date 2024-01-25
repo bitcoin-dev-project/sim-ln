@@ -73,7 +73,7 @@ make run-docker
 You can adjust the logging level by providing the `LOG_LEVEL` variable. The default value is `info`. Example:
 
 ```bash
-make run LOG_LEVEL=debug
+make run-docker LOG_LEVEL=debug
 ```
 
 Other configurable variables include:
@@ -86,7 +86,7 @@ Other configurable variables include:
 Example usage:
 
 ```bash
-make run PRINT_BATCH_SIZE=100 TOTAL_TIME=5000
+make run-docker PRINT_BATCH_SIZE=100 TOTAL_TIME=5000
 ```
 
 For an interactive session:
