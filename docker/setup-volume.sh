@@ -44,6 +44,10 @@ for (( i=0; i<$NODE_COUNT; i++ )); do
     sed -i '' 's|'$(dirname $NODE_MACAROON_PATH_ON_HOST)'/admin.macaroon|/data_dir/lnd/'$NODE_ID'/admin.macaroon|' $STAGING_DIR/sim.json
 done
 
+# Replace localhost with docker internal so that addresses will work, otherwise assume that we have an IP 
+# address that will be accessible from inside of the container.
+sed -i -e 's/localhost/host.docker.internal\./g' "$STAGING_DIR/sim.json"
+
 # Create Docker volume and copy the data
 docker volume create $VOLUME_NAME
 docker run --rm -v $VOLUME_NAME:/data_dir -v $STAGING_DIR:/staging alpine sh -c 'cp -r /staging/* /data_dir/'
