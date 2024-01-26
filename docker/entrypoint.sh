@@ -1,7 +1,12 @@
 #!/bin/sh
 
 # Define the start command
-START_COMMAND="/usr/local/bin/sim-cli $SIMFILE_PATH"
+START_COMMAND="/usr/local/bin/sim-cli --sim-file $SIMFILE_PATH"
+
+# Check if a custom data directory was provided
+if [[ ! -z ${DATA_DIR} ]]; then
+    START_COMMAND="$START_COMMAND --data-dir $DATA_DIR"
+fi
 
 # Check for version arg
 if [[ ! -z ${VERSION} ]]; then
