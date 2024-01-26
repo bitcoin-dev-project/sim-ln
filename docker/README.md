@@ -7,7 +7,7 @@ This guide provides instructions on how to build, run, and manage the `sim-ln` D
 - Docker installed on your machine.
 - A `sim.json` file that contains your specific configuration.
 
-## Building the Docker Image
+## 1. Building the Docker Image
 
 To build the Docker image, execute:
 
@@ -17,7 +17,7 @@ make build-docker
 
 This command will make the necessary preparations and build the Docker image.
 
-## Mounting the Volume
+## 2. Mounting the Volume
 
 To ensure that the Docker container can access the configuration and authentication credentials, we use Docker volumes. Before you can run the container, you need to set up the volume with the authentication credentials.
 
@@ -30,6 +30,7 @@ make mount-volume SIMFILE_PATH=/path/to/your/sim.json
 Replace `/path/to/your/sim.json` with the actual path to your `sim.json` file.
 
 The script will automatically copy your configuration, certificates, macaroons, and other authentication config to a Docker volume named simln-data.
+It will also replace `localhost` addresses with `host.docker.internal` so that docker is able to make queries from inside of the container.
 
 *Note:* The path to your config must be an absolute path not relative e.g. "/Users/anonymous/bitcoin-dev-project/sim-ln/sim.json"
 
@@ -40,12 +41,14 @@ If you're running nodes on a remote machine, or if you have a more complex setup
 1. Create a Docker volume named simln-data.
 2. Copy your configuration, certificates, macaroons, etc., to the volume.
 3. Adjust the paths in sim.json to point to the appropriate locations within the volume.
+4. Ensure that your addresses are reachable from *within* the docker container. 
 
----
+<details>
+  <summary>Tip: Using host.docker.internal</summary>
 
-## Using Docker Host's Internal IP
+Docker provides a special DNS name `host.docker.internal` that resolves to the host machine's IP address because we can't `localhost` or `127.0.0.1` for the IP address. 
 
-Docker provides a special DNS name `host.docker.internal` that resolves to the host machine's IP address because we can't `localhost` or `127.0.0.1` for the IP address.
+This value can be used when trying to access things running on the local machine from within a docker container.
 
 For instance, in your configuration:
 
@@ -59,10 +62,9 @@ For instance, in your configuration:
 ```
 
 In the above example, the `address` field uses `host.docker.internal` to refer to a service running on port `10002` on the host machine. This special DNS name ensures that your containerized application can reach out to services running on the host.
+</details>
 
----
-
-## Running the Docker Container
+## 3. Running the Docker Container
 
 To run the `sim-ln` Docker container:
 
@@ -95,7 +97,7 @@ For an interactive session:
 make run-interactive
 ```
 
-## Stopping the Container
+## 4. Stopping the Container
 
 To stop the `sim-ln` Docker container, use:
 
