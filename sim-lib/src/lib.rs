@@ -95,15 +95,15 @@ pub struct SimParams {
 /// [NodeId], which enables the use of public keys and aliases in the simulation description.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActivityParser {
-    // The source of the payment.
+    /// The source of the payment.
     #[serde(with = "serializers::serde_node_id")]
     pub source: NodeId,
-    // The destination of the payment.
+    /// The destination of the payment.
     #[serde(with = "serializers::serde_node_id")]
     pub destination: NodeId,
-    // The interval of the event, as in every how many seconds the payment is performed.
+    /// The interval of the event, as in every how many seconds the payment is performed.
     pub interval_secs: u16,
-    // The amount of m_sat to used in this payment.
+    /// The amount of m_sat to used in this payment.
     pub amount_msat: u64,
 }
 
@@ -111,13 +111,13 @@ pub struct ActivityParser {
 /// This is constructed during activity validation and passed along to the [Simulation].
 #[derive(Debug, Clone)]
 pub struct ActivityDefinition {
-    // The source of the payment.
+    /// The source of the payment.
     pub source: NodeInfo,
-    // The destination of the payment.
+    /// The destination of the payment.
     pub destination: NodeInfo,
-    // The interval of the event, as in every how many seconds the payment is performed.
+    /// The interval of the event, as in every how many seconds the payment is performed.
     pub interval_secs: u16,
-    // The amount of m_sat to used in this payment.
+    /// The amount of m_sat to used in this payment.
     pub amount_msat: u64,
 }
 
@@ -135,7 +135,6 @@ pub enum SimulationError {
     RandomActivityError(RandomActivityError),
 }
 
-// Phase 2: Event Queue
 #[derive(Debug, Error)]
 pub enum LightningError {
     #[error("Node connection error: {0}")]
@@ -204,8 +203,8 @@ pub trait LightningNode: Send {
 }
 
 pub trait DestinationGenerator: Send {
-    // choose_destination picks a destination node within the network, returning the node's information and its
-    // capacity (if available).
+    /// choose_destination picks a destination node within the network, returning the node's information and its
+    /// capacity (if available).
     fn choose_destination(&self, source: PublicKey) -> (NodeInfo, Option<u64>);
 }
 
@@ -214,10 +213,10 @@ pub trait DestinationGenerator: Send {
 pub struct PaymentGenerationError(String);
 
 pub trait PaymentGenerator: Display + Send {
-    // Returns the number of seconds that a node should wait until firing its next payment.
+    /// Returns the number of seconds that a node should wait until firing its next payment.
     fn next_payment_wait(&self) -> time::Duration;
 
-    // Returns a payment amount based, with a destination capacity optionally provided to inform the amount picked.
+    /// Returns a payment amount based, with a destination capacity optionally provided to inform the amount picked.
     fn payment_amount(
         &self,
         destination_capacity: Option<u64>,
@@ -324,14 +323,14 @@ enum SimulationOutput {
 
 #[derive(Clone)]
 pub struct Simulation {
-    // The lightning node that is being simulated.
+    /// The lightning node that is being simulated.
     nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
-    // The activity that are to be executed on the node.
+    /// The activity that are to be executed on the node.
     activity: Vec<ActivityDefinition>,
-    // High level triggers used to manage simulation tasks and shutdown.
+    /// High level triggers used to manage simulation tasks and shutdown.
     shutdown_trigger: Trigger,
     shutdown_listener: Listener,
-    // Total simulation time. The simulation will run forever if undefined.
+    /// Total simulation time. The simulation will run forever if undefined.
     total_time: Option<time::Duration>,
     /// The expected payment size for the network.
     expected_payment_msat: u64,
@@ -425,7 +424,7 @@ impl Simulation {
         Ok(())
     }
 
-    // validates that the nodes are all on the same network and ensures that we're not running on mainnet.
+    /// validates that the nodes are all on the same network and ensures that we're not running on mainnet.
     async fn validate_node_network(&self) -> Result<(), LightningError> {
         if self.nodes.is_empty() {
             return Err(LightningError::ValidationError(
@@ -531,8 +530,8 @@ impl Simulation {
         self.shutdown_trigger.trigger()
     }
 
-    // run_data_collection starts the tasks required for the simulation to report of the results of the activity that
-    // it generates. The simulation should report outputs via the receiver that is passed in.
+    /// run_data_collection starts the tasks required for the simulation to report of the results of the activity that
+    /// it generates. The simulation should report outputs via the receiver that is passed in.
     fn run_data_collection(
         &self,
         output_receiver: Receiver<SimulationOutput>,
@@ -716,11 +715,11 @@ impl Simulation {
     }
 }
 
-// consume_events processes events that are crated for a lightning node that we can execute events on. Any output
-// that is generated from the event being executed is piped into a channel to handle the result of the event. If it
-// exits, it will use the trigger provided to trigger shutdown in other threads. If an error occurs elsewhere, we
-// expect the senders corresponding to our receiver to be dropped, which will cause the receiver to error out and
-// exit.
+/// events that are crated for a lightning node that we can execute events on. Any output that is generated from the
+/// event being executed is piped into a channel to handle the result of the event. If it exits, it will use the
+/// trigger provided to trigger shutdown in other threads. If an error occurs elsewhere, we expect the senders
+/// corresponding to our receiver to be dropped, which will cause the receiver to error out and
+/// exit.
 async fn consume_events(
     node: Arc<Mutex<dyn LightningNode>>,
     mut receiver: Receiver<SimulationEvent>,
@@ -787,8 +786,8 @@ async fn consume_events(
     }
 }
 
-// produce events generates events for the activity description provided. It accepts a shutdown listener so it can
-// exit if other threads signal that they have errored out.
+/// produce events generates events for the activity description provided. It accepts a shutdown listener so it can
+/// exit if other threads signal that they have errored out.
 async fn produce_events<N: DestinationGenerator + ?Sized, A: PaymentGenerator + ?Sized>(
     source: NodeInfo,
     network_generator: Arc<Mutex<N>>,

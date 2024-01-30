@@ -29,9 +29,9 @@ pub struct NetworkGraphView {
 }
 
 impl NetworkGraphView {
-    // Creates a network view for the map of node public keys to capacity (in millisatoshis) provided. Returns an error
-    // if any node's capacity is zero (the node cannot receive), or there are not at least two nodes (one node can't
-    // send to itself).
+    /// Creates a network view for the map of node public keys to capacity (in millisatoshis) provided. Returns an error
+    /// if any node's capacity is zero (the node cannot receive), or there are not at least two nodes (one node can't
+    /// send to itself).
     pub fn new(nodes: Vec<(NodeInfo, u64)>) -> Result<Self, RandomActivityError> {
         if nodes.len() < 2 {
             return Err(RandomActivityError::ValueError(
