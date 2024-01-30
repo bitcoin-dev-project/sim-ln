@@ -92,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
         serde_json::from_str(&std::fs::read_to_string(sim_path)?)
             .map_err(|e| anyhow!("Could not deserialize node connection data or activity description from simulation file (line {}, col {}).", e.line(), e.column()))?;
 
-    let mut clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>> = HashMap::new();
+    let mut clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
     let mut pk_node_map = HashMap::new();
     let mut alias_node_map = HashMap::new();
 
@@ -100,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
         // TODO: Feels like there should be a better way of doing this without having to Arc<Mutex<T>>> it at this time.
         // Box sort of works, but we won't know the size of the dyn LightningNode at compile time so the compiler will
         // scream at us when trying to create the Arc<Mutex>> later on while adding the node to the clients map
-        let node: Arc<Mutex<dyn LightningNode + Send>> = match connection {
+        let node: Arc<Mutex<dyn LightningNode>> = match connection {
             NodeConnection::LND(c) => Arc::new(Mutex::new(LndNode::new(c).await?)),
             NodeConnection::CLN(c) => Arc::new(Mutex::new(ClnNode::new(c).await?)),
         };

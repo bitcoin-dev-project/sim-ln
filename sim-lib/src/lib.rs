@@ -179,7 +179,7 @@ impl Display for NodeInfo {
 
 /// LightningNode represents the functionality that is required to execute events on a lightning node.
 #[async_trait]
-pub trait LightningNode {
+pub trait LightningNode: Send {
     /// Get information about the node.
     fn get_info(&self) -> &NodeInfo;
     /// Get the network this node is running at
@@ -325,7 +325,7 @@ enum SimulationOutput {
 #[derive(Clone)]
 pub struct Simulation {
     // The lightning node that is being simulated.
-    nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>>,
+    nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
     // The activity that are to be executed on the node.
     activity: Vec<ActivityDefinition>,
     // High level triggers used to manage simulation tasks and shutdown.
@@ -362,7 +362,7 @@ struct ExecutorKit {
 
 impl Simulation {
     pub fn new(
-        nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>>,
+        nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
         activity: Vec<ActivityDefinition>,
         total_time: Option<u32>,
         expected_payment_msat: u64,
@@ -722,7 +722,7 @@ impl Simulation {
 // expect the senders corresponding to our receiver to be dropped, which will cause the receiver to error out and
 // exit.
 async fn consume_events(
-    node: Arc<Mutex<dyn LightningNode + Send>>,
+    node: Arc<Mutex<dyn LightningNode>>,
     mut receiver: Receiver<SimulationEvent>,
     sender: Sender<SimulationOutput>,
     shutdown: Trigger,
@@ -986,7 +986,7 @@ async fn run_results_logger(
 /// out. In the multiple-producer case, a single producer shutting down does not drop *all* sending channels so the
 /// consumer will not exit and a trigger is required.
 async fn produce_simulation_results(
-    nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>>,
+    nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
     mut output_receiver: Receiver<SimulationOutput>,
     results: Sender<(Payment, PaymentResult)>,
     shutdown: Listener,
@@ -1034,7 +1034,7 @@ async fn produce_simulation_results(
 }
 
 async fn track_payment_result(
-    node: Arc<Mutex<dyn LightningNode + Send>>,
+    node: Arc<Mutex<dyn LightningNode>>,
     results: Sender<(Payment, PaymentResult)>,
     payment: Payment,
     shutdown: Listener,
