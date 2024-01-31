@@ -27,6 +27,7 @@ mod defined_activity;
 pub mod lnd;
 mod random_activity;
 mod serializers;
+pub mod sim_node;
 #[cfg(test)]
 mod test_utils;
 
@@ -80,6 +81,37 @@ impl std::fmt::Display for NodeId {
                 NodeId::PublicKey(pk) => pk.to_string(),
                 NodeId::Alias(a) => a.to_owned(),
             }
+        )
+    }
+}
+
+/// Represents a short channel ID, expressed as a struct so that we can implement display for the trait.
+#[derive(Debug)]
+pub struct ShortChannelID(u64);
+
+/// Utility function to easily convert from u64 to `ShortChannelID`
+impl From<u64> for ShortChannelID {
+    fn from(value: u64) -> Self {
+        ShortChannelID(value)
+    }
+}
+
+/// Utility function to easily convert `ShortChannelID` into u64
+impl From<ShortChannelID> for u64 {
+    fn from(scid: ShortChannelID) -> Self {
+        scid.0
+    }
+}
+
+/// See https://github.com/lightning/bolts/blob/60de4a09727c20dea330f9ee8313034de6e50594/07-routing-gossip.md#definition-of-short_channel_id.
+impl std::fmt::Display for ShortChannelID {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}:{}:{}",
+            (self.0 >> 40) as u32,
+            ((self.0 >> 16) & 0xFFFFFF) as u32,
+            (self.0 & 0xFFFF) as u16,
         )
     }
 }
