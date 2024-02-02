@@ -6,7 +6,7 @@ use bitcoin::secp256k1::PublicKey;
 use rand_distr::{Distribution, Exp, LogNormal, WeightedIndex};
 use std::time::Duration;
 
-use crate::{NetworkGenerator, NodeInfo, PaymentGenerationError, PaymentGenerator};
+use crate::{DestinationGenerator, NodeInfo, PaymentGenerationError, PaymentGenerator};
 
 const HOURS_PER_MONTH: u64 = 30 * 24;
 const SECONDS_PER_MONTH: u64 = HOURS_PER_MONTH * 60 * 60;
@@ -29,9 +29,9 @@ pub struct NetworkGraphView {
 }
 
 impl NetworkGraphView {
-    // Creates a network view for the map of node public keys to capacity (in millisatoshis) provided. Returns an error
-    // if any node's capacity is zero (the node cannot receive), or there are not at least two nodes (one node can't
-    // send to itself).
+    /// Creates a network view for the map of node public keys to capacity (in millisatoshis) provided. Returns an error
+    /// if any node's capacity is zero (the node cannot receive), or there are not at least two nodes (one node can't
+    /// send to itself).
     pub fn new(nodes: Vec<(NodeInfo, u64)>) -> Result<Self, RandomActivityError> {
         if nodes.len() < 2 {
             return Err(RandomActivityError::ValueError(
@@ -56,11 +56,11 @@ impl NetworkGraphView {
     }
 }
 
-impl NetworkGenerator for NetworkGraphView {
+impl DestinationGenerator for NetworkGraphView {
     /// Randomly samples the network for a node, weighted by capacity.  Using a single graph view means that it's
     /// possible for a source node to select itself. After sufficient retries, this is highly improbable (even  with
     /// very small graphs, or those with one node significantly more capitalized than others).
-    fn sample_node_by_capacity(&self, source: PublicKey) -> (NodeInfo, u64) {
+    fn choose_destination(&self, source: PublicKey) -> (NodeInfo, Option<u64>) {
         let mut rng = rand::thread_rng();
 
         // While it's very unlikely that we can't pick a destination that is not our source, it's possible that there's
@@ -70,10 +70,10 @@ impl NetworkGenerator for NetworkGraphView {
         loop {
             let index = self.node_picker.sample(&mut rng);
             // Unwrapping is safe given `NetworkGraphView` has the same amount of elements for `nodes` and `node_picker`
-            let destination = self.nodes.get(index).unwrap();
+            let (node_info, capacity) = self.nodes.get(index).unwrap();
 
-            if destination.0.pubkey != source {
-                return destination.clone();
+            if node_info.pubkey != source {
+                return (node_info.clone(), Some(*capacity));
             }
 
             if i % 50 == 0 {
@@ -95,14 +95,14 @@ impl Display for NetworkGraphView {
 /// While the expected amount to be sent in a month and the mean payment amount are set, the generator will introduce
 /// randomness both in the time between events and the variance of payment amounts sent to mimic more realistic
 /// payment flows.
-pub struct PaymentActivityGenerator {
+pub struct RandomPaymentActivity {
     multiplier: f64,
     expected_payment_amt: u64,
     source_capacity: u64,
     event_dist: Exp<f64>,
 }
 
-impl PaymentActivityGenerator {
+impl RandomPaymentActivity {
     /// Creates a new activity generator for a node, returning an error if the node has insufficient capacity deployed
     /// for the expected payment amount provided. Capacity is defined as the sum of the channels that the node has
     /// open in the network divided by two (so that capacity is not double counted with channel counterparties).
@@ -129,7 +129,7 @@ impl PaymentActivityGenerator {
             ));
         }
 
-        PaymentActivityGenerator::validate_capacity(source_capacity_msat, expected_payment_amt)?;
+        RandomPaymentActivity::validate_capacity(source_capacity_msat, expected_payment_amt)?;
 
         // Lamda for the exponential distribution that we'll use to randomly time events is equal to the number of
         // events that we expect to see within our set period.
@@ -140,7 +140,7 @@ impl PaymentActivityGenerator {
         let event_dist =
             Exp::new(lamda).map_err(|e| RandomActivityError::ValueError(e.to_string()))?;
 
-        Ok(PaymentActivityGenerator {
+        Ok(RandomPaymentActivity {
             multiplier,
             expected_payment_amt,
             source_capacity: source_capacity_msat,
@@ -193,7 +193,7 @@ fn events_per_month(source_capacity_msat: u64, multiplier: f64, expected_payment
     (source_capacity_msat as f64 * multiplier) / expected_payment_amt as f64
 }
 
-impl PaymentGenerator for PaymentActivityGenerator {
+impl PaymentGenerator for RandomPaymentActivity {
     /// Returns the amount of time until the next payment should be scheduled for the node.
     fn next_payment_wait(&self) -> Duration {
         let mut rng = rand::thread_rng();
@@ -207,7 +207,14 @@ impl PaymentGenerator for PaymentActivityGenerator {
     /// capacity. While the expected value of payments remains the same, scaling variance by node capacity means that
     /// nodes with more deployed capital will see a larger range of payment values than those with smaller total
     /// channel capacity.
-    fn payment_amount(&self, destination_capacity: u64) -> Result<u64, PaymentGenerationError> {
+    fn payment_amount(
+        &self,
+        destination_capacity: Option<u64>,
+    ) -> Result<u64, PaymentGenerationError> {
+        let destination_capacity = destination_capacity.ok_or(PaymentGenerationError(
+            "destination amount required for payment activity generator".to_string(),
+        ))?;
+
         let payment_limit = std::cmp::min(self.source_capacity, destination_capacity) / 2;
 
         let ln_pmt_amt = (self.expected_payment_amt as f64).ln();
@@ -230,7 +237,7 @@ impl PaymentGenerator for PaymentActivityGenerator {
     }
 }
 
-impl Display for PaymentActivityGenerator {
+impl Display for RandomPaymentActivity {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let monthly_events = events_per_month(
             self.source_capacity,
@@ -252,27 +259,10 @@ impl Display for PaymentActivityGenerator {
 #[cfg(test)]
 mod tests {
     mod test_network_graph_view {
-        use lightning::ln::features::Features;
         use ntest::timeout;
 
         use super::super::*;
-        use crate::test_utils::get_random_keypair;
-        use crate::NodeInfo;
-
-        fn create_nodes(n: usize, node_capacity: u64) -> Vec<(NodeInfo, u64)> {
-            (1..=n)
-                .map(|_| {
-                    (
-                        NodeInfo {
-                            pubkey: get_random_keypair().1,
-                            alias: String::new(),
-                            features: Features::empty(),
-                        },
-                        node_capacity,
-                    )
-                })
-                .collect()
-        }
+        use crate::test_utils::create_nodes;
 
         #[test]
         fn test_new() {
@@ -333,7 +323,7 @@ mod tests {
             let view = NetworkGraphView::new(nodes).unwrap();
 
             for _ in 0..10 {
-                view.sample_node_by_capacity(big_node);
+                view.choose_destination(big_node);
             }
         }
     }
@@ -349,33 +339,25 @@ mod tests {
             // here. Mainly, if the `capacity < expected_payment_amnt / 2`, the generator will fail building
             let expected_payment = get_random_int(1, 100);
             assert!(
-                PaymentActivityGenerator::new(2 * expected_payment, expected_payment, 1.0).is_ok()
+                RandomPaymentActivity::new(2 * expected_payment, expected_payment, 1.0).is_ok()
             );
             assert!(matches!(
-                PaymentActivityGenerator::new(2 * expected_payment, expected_payment + 1, 1.0),
+                RandomPaymentActivity::new(2 * expected_payment, expected_payment + 1, 1.0),
                 Err(RandomActivityError::InsufficientCapacity { .. })
             ));
 
             // Respecting the internal exponential distribution creation, neither of the parameters can be zero. Otherwise we may try to create an exponential
             // function with lambda = NaN, which will error out, or with lambda = Inf, which does not make sense for our use-case
             assert!(matches!(
-                PaymentActivityGenerator::new(
-                    0,
-                    get_random_int(1, 10),
-                    get_random_int(1, 10) as f64
-                ),
+                RandomPaymentActivity::new(0, get_random_int(1, 10), get_random_int(1, 10) as f64),
                 Err(RandomActivityError::ValueError { .. })
             ));
             assert!(matches!(
-                PaymentActivityGenerator::new(
-                    get_random_int(1, 10),
-                    0,
-                    get_random_int(1, 10) as f64
-                ),
+                RandomPaymentActivity::new(get_random_int(1, 10), 0, get_random_int(1, 10) as f64),
                 Err(RandomActivityError::ValueError { .. })
             ));
             assert!(matches!(
-                PaymentActivityGenerator::new(get_random_int(1, 10), get_random_int(1, 10), 0.0),
+                RandomPaymentActivity::new(get_random_int(1, 10), get_random_int(1, 10), 0.0),
                 Err(RandomActivityError::ValueError { .. })
             ));
         }
@@ -388,7 +370,7 @@ mod tests {
                 let capacity = get_random_int(0, 100);
                 let payment_amt = get_random_int(0, 100);
 
-                let r = PaymentActivityGenerator::validate_capacity(capacity, payment_amt);
+                let r = RandomPaymentActivity::validate_capacity(capacity, payment_amt);
                 if capacity < 2 * payment_amt {
                     assert!(matches!(
                         r,
@@ -408,26 +390,30 @@ mod tests {
             // All of them will yield a sigma squared smaller than 0, which we have a sanity check for.
             let expected_payment = get_random_int(1, 100);
             let source_capacity = 2 * expected_payment;
-            let pag =
-                PaymentActivityGenerator::new(source_capacity, expected_payment, 1.0).unwrap();
+            let pag = RandomPaymentActivity::new(source_capacity, expected_payment, 1.0).unwrap();
 
             // Wrong cases
             for i in 0..source_capacity {
                 assert!(matches!(
-                    pag.payment_amount(i),
+                    pag.payment_amount(Some(i)),
                     Err(PaymentGenerationError(..))
                 ))
             }
 
             // All other cases will work. We are not going to exhaustively test for the rest up to u64::MAX, let just pick a bunch
             for i in source_capacity + 1..100 * source_capacity {
-                assert!(pag.payment_amount(i).is_ok())
+                assert!(pag.payment_amount(Some(i)).is_ok())
             }
 
             // We can even try really high numbers to make sure they are not troublesome
             for i in u64::MAX - 10000..u64::MAX {
-                assert!(pag.payment_amount(i).is_ok())
+                assert!(pag.payment_amount(Some(i)).is_ok())
             }
+
+            assert!(matches!(
+                pag.payment_amount(None),
+                Err(PaymentGenerationError(..))
+            ));
         }
     }
 }

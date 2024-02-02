@@ -19,9 +19,11 @@ use tokio::task::JoinSet;
 use tokio::{select, time, time::Duration};
 use triggered::{Listener, Trigger};
 
-use self::random_activity::{NetworkGraphView, PaymentActivityGenerator};
+use self::defined_activity::DefinedPaymentActivity;
+use self::random_activity::{NetworkGraphView, RandomPaymentActivity};
 
 pub mod cln;
+mod defined_activity;
 pub mod lnd;
 mod random_activity;
 mod serializers;
@@ -93,15 +95,15 @@ pub struct SimParams {
 /// [NodeId], which enables the use of public keys and aliases in the simulation description.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActivityParser {
-    // The source of the payment.
+    /// The source of the payment.
     #[serde(with = "serializers::serde_node_id")]
     pub source: NodeId,
-    // The destination of the payment.
+    /// The destination of the payment.
     #[serde(with = "serializers::serde_node_id")]
     pub destination: NodeId,
-    // The interval of the event, as in every how many seconds the payment is performed.
+    /// The interval of the event, as in every how many seconds the payment is performed.
     pub interval_secs: u16,
-    // The amount of m_sat to used in this payment.
+    /// The amount of m_sat to used in this payment.
     pub amount_msat: u64,
 }
 
@@ -109,13 +111,13 @@ pub struct ActivityParser {
 /// This is constructed during activity validation and passed along to the [Simulation].
 #[derive(Debug, Clone)]
 pub struct ActivityDefinition {
-    // The source of the payment.
+    /// The source of the payment.
     pub source: NodeInfo,
-    // The destination of the payment.
+    /// The destination of the payment.
     pub destination: NodeInfo,
-    // The interval of the event, as in every how many seconds the payment is performed.
+    /// The interval of the event, as in every how many seconds the payment is performed.
     pub interval_secs: u16,
-    // The amount of m_sat to used in this payment.
+    /// The amount of m_sat to used in this payment.
     pub amount_msat: u64,
 }
 
@@ -133,7 +135,6 @@ pub enum SimulationError {
     RandomActivityError(RandomActivityError),
 }
 
-// Phase 2: Event Queue
 #[derive(Debug, Error)]
 pub enum LightningError {
     #[error("Node connection error: {0}")]
@@ -177,7 +178,7 @@ impl Display for NodeInfo {
 
 /// LightningNode represents the functionality that is required to execute events on a lightning node.
 #[async_trait]
-pub trait LightningNode {
+pub trait LightningNode: Send {
     /// Get information about the node.
     fn get_info(&self) -> &NodeInfo;
     /// Get the network this node is running at
@@ -201,21 +202,25 @@ pub trait LightningNode {
     async fn list_channels(&mut self) -> Result<Vec<u64>, LightningError>;
 }
 
-pub trait NetworkGenerator {
-    // sample_node_by_capacity randomly picks a node within the network weighted by its capacity deployed to the
-    // network in channels. It returns the node's public key and its capacity in millisatoshis.
-    fn sample_node_by_capacity(&self, source: PublicKey) -> (NodeInfo, u64);
+pub trait DestinationGenerator: Send {
+    /// choose_destination picks a destination node within the network, returning the node's information and its
+    /// capacity (if available).
+    fn choose_destination(&self, source: PublicKey) -> (NodeInfo, Option<u64>);
 }
 
 #[derive(Debug, Error)]
 #[error("Payment generation error: {0}")]
 pub struct PaymentGenerationError(String);
-pub trait PaymentGenerator {
-    // Returns the number of seconds that a node should wait until firing its next payment.
+
+pub trait PaymentGenerator: Display + Send {
+    /// Returns the number of seconds that a node should wait until firing its next payment.
     fn next_payment_wait(&self) -> time::Duration;
 
-    // Returns a payment amount based on the capacity of the sending and receiving node.
-    fn payment_amount(&self, destination_capacity: u64) -> Result<u64, PaymentGenerationError>;
+    /// Returns a payment amount based, with a destination capacity optionally provided to inform the amount picked.
+    fn payment_amount(
+        &self,
+        destination_capacity: Option<u64>,
+    ) -> Result<u64, PaymentGenerationError>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -318,14 +323,14 @@ enum SimulationOutput {
 
 #[derive(Clone)]
 pub struct Simulation {
-    // The lightning node that is being simulated.
-    nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>>,
-    // The activity that are to be executed on the node.
+    /// The lightning node that is being simulated.
+    nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
+    /// The activity that are to be executed on the node.
     activity: Vec<ActivityDefinition>,
-    // High level triggers used to manage simulation tasks and shutdown.
+    /// High level triggers used to manage simulation tasks and shutdown.
     shutdown_trigger: Trigger,
     shutdown_listener: Listener,
-    // Total simulation time. The simulation will run forever if undefined.
+    /// Total simulation time. The simulation will run forever if undefined.
     total_time: Option<time::Duration>,
     /// The expected payment size for the network.
     expected_payment_msat: u64,
@@ -343,10 +348,20 @@ pub struct WriteResults {
     /// The number of activity results to batch before printing in CSV.
     pub batch_size: u32,
 }
+///
+/// ExecutorKit contains the components required to spin up an activity configured by the user, to be used to
+/// spin up the appropriate producers and consumers for the activity.
+struct ExecutorKit {
+    source_info: NodeInfo,
+    /// We use an arc mutex here because some implementations of the trait will be very expensive to clone.
+    /// See [NetworkGraphView] for details.
+    network_generator: Arc<Mutex<dyn DestinationGenerator>>,
+    payment_generator: Box<dyn PaymentGenerator>,
+}
 
 impl Simulation {
     pub fn new(
-        nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>>,
+        nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
         activity: Vec<ActivityDefinition>,
         total_time: Option<u32>,
         expected_payment_msat: u64,
@@ -409,7 +424,7 @@ impl Simulation {
         Ok(())
     }
 
-    // validates that the nodes are all on the same network and ensures that we're not running on mainnet.
+    /// validates that the nodes are all on the same network and ensures that we're not running on mainnet.
     async fn validate_node_network(&self) -> Result<(), LightningError> {
         if self.nodes.is_empty() {
             return Err(LightningError::ValidationError(
@@ -467,39 +482,20 @@ impl Simulation {
         let (event_sender, event_receiver) = channel(1);
         self.run_data_collection(event_receiver, &mut tasks);
 
-        // Create consumers for every source node when dealing with activity descriptions, or only for nodes with
-        // sufficient capacity if generating random activity. Since we have to query the capacity of every node
-        // in our network for picking random activity nodes, we cache this value here to be used later when we spin
-        // up producers.
-        let mut random_activity_nodes = HashMap::new();
-        let collecting_nodes = if !self.activity.is_empty() {
-            self.activity
+        // Get an execution kit per activity that we need to generate and spin up consumers for each source node.
+        let activities = self.activity_executors().await?;
+        let consumer_channels = self.dispatch_consumers(
+            activities
                 .iter()
-                .map(|activity| activity.source.pubkey)
-                .collect()
-        } else {
-            random_activity_nodes.extend(self.random_activity_nodes().await?);
-            random_activity_nodes.keys().cloned().collect()
-        };
+                .map(|generator| generator.source_info.pubkey)
+                .collect(),
+            event_sender.clone(),
+            &mut tasks,
+        );
 
-        let producer_senders =
-            self.dispatch_consumers(collecting_nodes, event_sender.clone(), &mut tasks);
-
-        // Next, we'll spin up our actual activity generator that will be responsible for triggering the activity that
-        // has been configured (if any), passing in the channel that is used to notify data collection that events have
-        // been generated. Alternatively, we'll generate random activity if there is no activity specified.
-        if !self.activity.is_empty() {
-            self.dispatch_activity_producers(producer_senders, &mut tasks)
-                .await;
-        } else {
-            log::info!(
-                "Generating random activity with multiplier: {}, average payment amount: {}.",
-                self.activity_multiplier,
-                self.expected_payment_msat
-            );
-            self.dispatch_random_producers(random_activity_nodes, producer_senders, &mut tasks)
-                .await?;
-        }
+        // Next, we'll spin up our actual producers that will be responsible for triggering the configured activity.
+        self.dispatch_producers(activities, consumer_channels, &mut tasks)
+            .await?;
 
         if let Some(total_time) = self.total_time {
             let t = self.shutdown_trigger.clone();
@@ -534,8 +530,8 @@ impl Simulation {
         self.shutdown_trigger.trigger()
     }
 
-    // run_data_collection starts the tasks required for the simulation to report of the results of the activity that
-    // it generates. The simulation should report outputs via the receiver that is passed in.
+    /// run_data_collection starts the tasks required for the simulation to report of the results of the activity that
+    /// it generates. The simulation should report outputs via the receiver that is passed in.
     fn run_data_collection(
         &self,
         output_receiver: Receiver<SimulationOutput>,
@@ -571,35 +567,88 @@ impl Simulation {
         log::debug!("Simulator data collection set up.");
     }
 
+    async fn activity_executors(&self) -> Result<Vec<ExecutorKit>, SimulationError> {
+        let mut generators = Vec::new();
+
+        // Note: when we allow configuring both defined and random activity, this will no longer be an if/else, we'll
+        // just populate with each type as configured.
+        if !self.activity.is_empty() {
+            for description in self.activity.iter() {
+                let activity_generator = DefinedPaymentActivity::new(
+                    description.destination.clone(),
+                    Duration::from_secs(description.interval_secs.into()),
+                    description.amount_msat,
+                );
+
+                generators.push(ExecutorKit {
+                    source_info: description.source.clone(),
+                    // Defined activities have very simple generators, so the traits required are implemented on
+                    // a single struct which we just cheaply clone.
+                    network_generator: Arc::new(Mutex::new(activity_generator.clone())),
+                    payment_generator: Box::new(activity_generator),
+                });
+            }
+        } else {
+            generators = self.random_activity_nodes().await?;
+        }
+
+        Ok(generators)
+    }
+
     /// Returns the list of nodes that are eligible for generating random activity on. This is the subset of nodes
     /// that have sufficient capacity to generate payments of our expected payment amount.
-    async fn random_activity_nodes(
-        &self,
-    ) -> Result<HashMap<PublicKey, (NodeInfo, u64)>, SimulationError> {
+    async fn random_activity_nodes(&self) -> Result<Vec<ExecutorKit>, SimulationError> {
         // Collect capacity of each node from its view of its own channels. Total capacity is divided by two to
         // avoid double counting capacity (as each node has a counterparty in the channel).
-        let mut node_capacities = HashMap::new();
+        let mut generators = Vec::new();
+        let mut active_nodes = HashMap::new();
+
+        // Do a first pass to get the capacity of each node which we need to be able to create a network generator.
+        // While we're at it, we get the node info and store it with capacity to create activity generators in our
+        // second pass.
         for (pk, node) in self.nodes.iter() {
             let chan_capacity = node.lock().await.list_channels().await?.iter().sum::<u64>();
 
-            if let Err(e) = PaymentActivityGenerator::validate_capacity(
-                chan_capacity,
-                self.expected_payment_msat,
-            ) {
+            if let Err(e) =
+                RandomPaymentActivity::validate_capacity(chan_capacity, self.expected_payment_msat)
+            {
                 log::warn!("Node: {} not eligible for activity generation: {e}.", *pk);
                 continue;
             }
 
-            node_capacities.insert(
-                *pk,
-                (
-                    node.lock().await.get_node_info(pk).await?,
-                    chan_capacity / 2,
-                ),
-            );
+            // Don't double count channel capacity because each channel reports the total balance between counter
+            // parities. Track capacity separately to be used for our network generator.
+            let capacity = chan_capacity / 2;
+            let node_info = node.lock().await.get_node_info(pk).await?;
+            active_nodes.insert(node_info.pubkey, (node_info, capacity));
         }
 
-        Ok(node_capacities)
+        let network_generator = Arc::new(Mutex::new(
+            NetworkGraphView::new(active_nodes.values().cloned().collect())
+                .map_err(SimulationError::RandomActivityError)?,
+        ));
+
+        log::info!(
+            "Created network generator: {}.",
+            network_generator.lock().await
+        );
+
+        for (node_info, capacity) in active_nodes.values() {
+            generators.push(ExecutorKit {
+                source_info: node_info.clone(),
+                network_generator: network_generator.clone(),
+                payment_generator: Box::new(
+                    RandomPaymentActivity::new(
+                        *capacity,
+                        self.expected_payment_msat,
+                        self.activity_multiplier,
+                    )
+                    .map_err(SimulationError::RandomActivityError)?,
+                ),
+            });
+        }
+
+        Ok(generators)
     }
 
     /// Responsible for spinning up consumer tasks for each node specified in consuming_nodes. Assumes that validation
@@ -636,65 +685,26 @@ impl Simulation {
         channels
     }
 
-    /// Responsible for spinning up producers for a set of activity descriptions.
-    async fn dispatch_activity_producers(
+    /// Responsible for spinning up producers for a set of activities. Requires that a consumer channel is present
+    /// for every source node in the set of executors.
+    async fn dispatch_producers(
         &self,
-        producer_channels: HashMap<PublicKey, Sender<SimulationEvent>>,
-        tasks: &mut JoinSet<()>,
-    ) {
-        for description in self.activity.iter() {
-            let sender_chan = producer_channels.get(&description.source.pubkey).unwrap();
-            tasks.spawn(produce_events(
-                description.clone(),
-                sender_chan.clone(),
-                self.shutdown_trigger.clone(),
-                self.shutdown_listener.clone(),
-            ));
-        }
-    }
-
-    /// Responsible for spinning up producers for a set of activity descriptions. Requires that node capacities are
-    /// provided for each node represented in producer channels.
-    async fn dispatch_random_producers(
-        &self,
-        node_capacities: HashMap<PublicKey, (NodeInfo, u64)>,
+        executors: Vec<ExecutorKit>,
         producer_channels: HashMap<PublicKey, Sender<SimulationEvent>>,
         tasks: &mut JoinSet<()>,
     ) -> Result<(), SimulationError> {
-        let network_generator = Arc::new(Mutex::new(
-            NetworkGraphView::new(node_capacities.values().cloned().collect())
-                .map_err(SimulationError::RandomActivityError)?,
-        ));
+        for executor in executors {
+            let sender = producer_channels.get(&executor.source_info.pubkey).ok_or(
+                SimulationError::RandomActivityError(RandomActivityError::ValueError(format!(
+                    "Activity producer for: {} not found.",
+                    executor.source_info.pubkey,
+                ))),
+            )?;
 
-        log::info!(
-            "Created network generator: {}.",
-            network_generator.lock().await
-        );
-
-        for (pk, sender) in producer_channels.into_iter() {
-            let (info, source_capacity) = match node_capacities.get(&pk) {
-                Some((info, capacity)) => (info.clone(), *capacity),
-                None => {
-                    return Err(SimulationError::RandomActivityError(
-                        RandomActivityError::ValueError(format!(
-                            "Random activity generator run for: {} with unknown capacity.",
-                            pk
-                        )),
-                    ));
-                }
-            };
-
-            let node_generator = PaymentActivityGenerator::new(
-                source_capacity,
-                self.expected_payment_msat,
-                self.activity_multiplier,
-            )
-            .map_err(SimulationError::RandomActivityError)?;
-
-            tasks.spawn(produce_random_events(
-                info,
-                network_generator.clone(),
-                node_generator,
+            tasks.spawn(produce_events(
+                executor.source_info,
+                executor.network_generator,
+                executor.payment_generator,
                 sender.clone(),
                 self.shutdown_trigger.clone(),
                 self.shutdown_listener.clone(),
@@ -705,13 +715,13 @@ impl Simulation {
     }
 }
 
-// consume_events processes events that are crated for a lightning node that we can execute events on. Any output
-// that is generated from the event being executed is piped into a channel to handle the result of the event. If it
-// exits, it will use the trigger provided to trigger shutdown in other threads. If an error occurs elsewhere, we
-// expect the senders corresponding to our receiver to be dropped, which will cause the receiver to error out and
-// exit.
+/// events that are crated for a lightning node that we can execute events on. Any output that is generated from the
+/// event being executed is piped into a channel to handle the result of the event. If it exits, it will use the
+/// trigger provided to trigger shutdown in other threads. If an error occurs elsewhere, we expect the senders
+/// corresponding to our receiver to be dropped, which will cause the receiver to error out and
+/// exit.
 async fn consume_events(
-    node: Arc<Mutex<dyn LightningNode + Send>>,
+    node: Arc<Mutex<dyn LightningNode>>,
     mut receiver: Receiver<SimulationEvent>,
     sender: Sender<SimulationOutput>,
     shutdown: Trigger,
@@ -776,65 +786,17 @@ async fn consume_events(
     }
 }
 
-// produce events generates events for the activity description provided. It accepts a shutdown listener so it can
-// exit if other threads signal that they have errored out.
-async fn produce_events(
-    act: ActivityDefinition,
-    sender: Sender<SimulationEvent>,
-    shutdown: Trigger,
-    listener: Listener,
-) {
-    let interval = time::Duration::from_secs(act.interval_secs as u64);
-
-    log::debug!(
-        "Started producer for {} every {}s: {} -> {}.",
-        act.amount_msat,
-        act.interval_secs,
-        act.source,
-        act.destination
-    );
-
-    loop {
-        tokio::select! {
-        biased;
-        _ = time::sleep(interval) => {
-            // Consumer was dropped
-            if sender.send(SimulationEvent::SendPayment(act.destination.clone(), act.amount_msat)).await.is_err() {
-                log::debug!(
-                    "Stopped producer for {}: {} -> {}. Consumer cannot be reached.",
-                    act.amount_msat,
-                    act.source,
-                    act.destination
-                );
-                break;
-            }
-        }
-        _ = listener.clone() => {
-            // Shutdown was signaled
-            log::debug!(
-                    "Stopped producer for {}: {} -> {}. Received shutdown signal.",
-                    act.amount_msat,
-                    act.source,
-                    act.destination
-            );
-            break;
-            }
-        }
-    }
-
-    // On exit call our shutdown trigger to inform other threads that we have exited, and they need to shut down.
-    shutdown.trigger();
-}
-
-async fn produce_random_events<N: NetworkGenerator, A: PaymentGenerator + Display>(
+/// produce events generates events for the activity description provided. It accepts a shutdown listener so it can
+/// exit if other threads signal that they have errored out.
+async fn produce_events<N: DestinationGenerator + ?Sized, A: PaymentGenerator + ?Sized>(
     source: NodeInfo,
     network_generator: Arc<Mutex<N>>,
-    node_generator: A,
+    node_generator: Box<A>,
     sender: Sender<SimulationEvent>,
     shutdown: Trigger,
     listener: Listener,
 ) {
-    log::info!("Started random activity producer for {source}: {node_generator}.");
+    log::info!("Started activity producer for {source}: {node_generator}.");
 
     loop {
         let wait = node_generator.next_payment_wait();
@@ -849,7 +811,7 @@ async fn produce_random_events<N: NetworkGenerator, A: PaymentGenerator + Displa
             // Wait until our time to next payment has elapsed then execute a random amount payment to a random
             // destination.
             _ = time::sleep(wait) => {
-                let (destination, capacity) = network_generator.lock().await.sample_node_by_capacity(source.pubkey);
+                let (destination, capacity) = network_generator.lock().await.choose_destination(source.pubkey);
 
                 // Only proceed with a payment if the amount is non-zero, otherwise skip this round. If we can't get
                 // a payment amount something has gone wrong (because we should have validated that we can always
@@ -1023,7 +985,7 @@ async fn run_results_logger(
 /// out. In the multiple-producer case, a single producer shutting down does not drop *all* sending channels so the
 /// consumer will not exit and a trigger is required.
 async fn produce_simulation_results(
-    nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode + Send>>>,
+    nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
     mut output_receiver: Receiver<SimulationOutput>,
     results: Sender<(Payment, PaymentResult)>,
     shutdown: Listener,
@@ -1071,7 +1033,7 @@ async fn produce_simulation_results(
 }
 
 async fn track_payment_result(
-    node: Arc<Mutex<dyn LightningNode + Send>>,
+    node: Arc<Mutex<dyn LightningNode>>,
     results: Sender<(Payment, PaymentResult)>,
     payment: Payment,
     shutdown: Listener,
