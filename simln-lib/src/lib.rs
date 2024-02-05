@@ -29,6 +29,7 @@ use self::defined_activity::DefinedPaymentActivity;
 use self::random_activity::{NetworkGraphView, RandomPaymentActivity};
 
 pub mod cln;
+pub mod clock;
 mod defined_activity;
 pub mod eclair;
 pub mod lnd;
