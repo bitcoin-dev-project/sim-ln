@@ -15,6 +15,7 @@ use lightning::util::logger::{Level, Logger, Record};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::Arc;
+use thiserror::Error;
 use tokio::select;
 use tokio::sync::oneshot::{channel, Receiver, Sender};
 use tokio::sync::Mutex;
@@ -25,40 +26,71 @@ use crate::ShortChannelID;
 /// ForwardingError represents the various errors that we can run into when forwarding payments in a simulated network.
 /// Since we're not using real lightning nodes, these errors are not obfuscated and can be propagated to the sending
 /// node and used for analysis.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum ForwardingError {
     /// Zero amount htlcs are invalid in the protocol.
+    #[error("ZeroAmountHtlc")]
     ZeroAmountHtlc,
     /// The outgoing channel id was not found in the network graph.
+    #[error("ChannelNotFound: {0}")]
     ChannelNotFound(ShortChannelID),
     /// The node pubkey provided was not associated with the channel in the network graph.
+    #[error("NodeNotFound: {0:?}")]
     NodeNotFound(PublicKey),
     /// The channel has already forwarded an HTLC with the payment hash provided.
     /// TODO: remove if MPP support is added.
+    #[error("PaymentHashExists: {0:?}")]
     PaymentHashExists(PaymentHash),
     /// An htlc with the payment hash provided could not be found to resolve.
+    #[error("PaymentHashNotFound: {0:?}")]
     PaymentHashNotFound(PaymentHash),
     /// The forwarding node did not have sufficient outgoing balance to forward the htlc (htlc amount / balance).
+    #[error("InsufficientBalance: amount: {0} > balance: {1}")]
     InsufficientBalance(u64, u64),
     /// The htlc forwarded is less than the channel's advertised minimum htlc amount (htlc amount / minimum).
+    #[error("LessThanMinimum: amount: {0} < minimum: {1}")]
     LessThanMinimum(u64, u64),
-    /// The htlc forwarded is more than the chanenl's advertised maximum htlc amount (htlc amount / maximum).
+    /// The htlc forwarded is more than the channel's advertised maximum htlc amount (htlc amount / maximum).
+    #[error("MoreThanMaximum: amount: {0} > maximum: {1}")]
     MoreThanMaximum(u64, u64),
     /// The channel has reached its maximum allowable number of htlcs in flight (total in flight / maximim).
+    #[error("ExceedsInFlightCount: total in flight: {0} > maximum count: {1}")]
     ExceedsInFlightCount(u64, u64),
     /// The forwarded htlc's amount would push the channel over its maximum allowable in flight total
     /// (total in flight / maximum).
+    #[error("ExceedsInFlightTotal: total in flight amount: {0} > maximum amount: {0}")]
     ExceedsInFlightTotal(u64, u64),
     /// The forwarded htlc's cltv expiry exceeds the maximum value used to express block heights in Bitcoin.
+    #[error("ExpiryInSeconds: cltv expressed in seconds: {0}")]
     ExpiryInSeconds(u32, u32),
     /// The forwarded htlc has insufficient cltv delta for the channel's minimum delta (cltv delta / minimum).
+    #[error("InsufficientCltvDelta: cltv delta: {0} < required: {1}")]
     InsufficientCltvDelta(u32, u32),
     /// The forwarded htlc has insufficient fee for the channel's policy (fee / expected fee / base fee / prop fee).
+    #[error("InsufficientFee: offered fee: {0} (base: {1}, prop: {2}) < expected: {3}")]
     InsufficientFee(u64, u64, u64, u64),
     /// The fee policy for a htlc amount would overflow with the given fee policy (htlc amount / base fee / prop fee).
+    #[error("FeeOverflow: htlc amount: {0} (base: {1}, prop: {2})")]
     FeeOverflow(u64, u64, u64),
     /// Sanity check on channel balances failed (node balances / channel capacity).
+    #[error("SanityCheckFailed: node balance: {0} != capacity: {1}")]
     SanityCheckFailed(u64, u64),
+}
+
+impl ForwardingError {
+    /// Returns a boolean indicating whether failure to forward a htlc is a critical error that warrants shutdown.
+    fn is_critical(&self) -> bool {
+        matches!(
+            self,
+            ForwardingError::ZeroAmountHtlc
+                | ForwardingError::ChannelNotFound(_)
+                | ForwardingError::NodeNotFound(_)
+                | ForwardingError::PaymentHashExists(_)
+                | ForwardingError::PaymentHashNotFound(_)
+                | ForwardingError::SanityCheckFailed(_, _)
+                | ForwardingError::FeeOverflow(_, _, _)
+        )
+    }
 }
 
 /// Represents an in-flight htlc that has been forwarded over a channel that is awaiting resolution.
