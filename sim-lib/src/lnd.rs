@@ -127,7 +127,7 @@ impl LightningNode for LndNode {
                 return Err(LightningError::ValidationError(
                     "simnet is not supported".to_string(),
                 ))
-            }
+            },
             x => x,
         })
         .map_err(|err| LightningError::ValidationError(err.to_string()))?)

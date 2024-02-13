@@ -40,7 +40,7 @@ fn deserialize_f64_greater_than_zero(x: String) -> Result<f64, String> {
                     "capacity_multiplier must be higher than 0. {x} received."
                 ))
             }
-        }
+        },
         Err(e) => Err(e.to_string()),
     }
 }
@@ -159,7 +159,7 @@ async fn main() -> anyhow::Result<()> {
                         act.destination
                     )));
                 }
-            }
+            },
             NodeId::PublicKey(pk) => {
                 if let Some(info) = pk_node_map.get(pk) {
                     info.clone()
@@ -179,7 +179,7 @@ async fn main() -> anyhow::Result<()> {
                             ))
                         })?
                 }
-            }
+            },
         };
 
         validated_activities.push(ActivityDefinition {
