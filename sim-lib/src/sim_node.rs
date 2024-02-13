@@ -1291,4 +1291,67 @@ mod tests {
             Err(ForwardingError::InsufficientBalance(_, _))
         ));
     }
+
+    /// Tests basic functionality of a `SimulatedChannel` but does no endeavor to test the underlying
+    /// `ChannelState`, as this is covered elsewhere in our tests.
+    #[test]
+    fn test_simulated_channel() {
+        // Create a test channel with all balance available to node 1 as local liquidity, and none for node_2 to begin
+        // with.
+        let capacity_msat = 500_000_000;
+        let node_1 = ChannelState::new(create_test_policy(capacity_msat / 2), capacity_msat);
+        let node_2 = ChannelState::new(create_test_policy(capacity_msat / 2), 0);
+
+        let mut simulated_channel = SimulatedChannel {
+            capacity_msat,
+            short_channel_id: ShortChannelID::from(123),
+            node_1: node_1.clone(),
+            node_2: node_2.clone(),
+        };
+
+        // Assert that we're not able to send a htlc over node_2 -> node_1 (no liquidity).
+        let hash_1 = PaymentHash { 0: [1; 32] };
+        let htlc_1 = Htlc {
+            amount_msat: node_2.policy.min_htlc_size_msat,
+            cltv_expiry: node_1.policy.cltv_expiry_delta,
+        };
+
+        assert!(matches!(
+            simulated_channel.add_htlc(&node_2.policy.pubkey, hash_1, htlc_1),
+            Err(ForwardingError::InsufficientBalance(_, _))
+        ));
+
+        // Assert that we can send a htlc over node_1 -> node_2.
+        let hash_2 = PaymentHash { 0: [1; 32] };
+        let htlc_2 = Htlc {
+            amount_msat: node_1.policy.max_htlc_size_msat,
+            cltv_expiry: node_2.policy.cltv_expiry_delta,
+        };
+        assert!(simulated_channel
+            .add_htlc(&node_1.policy.pubkey, hash_2, htlc_2)
+            .is_ok());
+
+        // Settle the htlc and then assert that we can send from node_2 -> node_2 because the balance has been shifted
+        // across channels.
+        assert!(simulated_channel
+            .remove_htlc(&node_1.policy.pubkey, &hash_2, true)
+            .is_ok());
+
+        assert!(simulated_channel
+            .add_htlc(&node_2.policy.pubkey, hash_2, htlc_2)
+            .is_ok());
+
+        // Finally, try to add/remove htlcs for a pubkey that is not participating in the channel and assert that we
+        // fail.
+        let (_, pk) = get_random_keypair();
+        assert!(matches!(
+            simulated_channel.add_htlc(&pk, hash_2, htlc_2),
+            Err(ForwardingError::NodeNotFound(_))
+        ));
+
+        assert!(matches!(
+            simulated_channel.remove_htlc(&pk, &hash_2, true),
+            Err(ForwardingError::NodeNotFound(_))
+        ));
+    }
 }
