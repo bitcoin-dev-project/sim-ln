@@ -190,3 +190,151 @@ impl ChannelState {
         }
     }
 }
+
+/// Represents a simulated channel, and is responsible for managing addition and removal of HTLCs from the channel and
+/// sanity checks. Channel state is tracked *unidirectionally* for each participant in the channel.
+///
+/// Each node represented in the channel tracks only its outgoing HTLCs, and balance is transferred between the two
+/// nodes as they settle or fail. Given some channel: node_1 <----> node_2:
+/// * HTLC sent node_1 -> node_2: added to in-flight outgoing htlcs on node_1.
+/// * HTLC sent node_2 -> node_1: added to in-flight outgoing htlcs on node_2.
+///
+/// Rules for managing balance are as follows:
+/// * When an HTLC is in flight, the channel's local outgoing liquidity decreases (as it's locked up).
+/// * When an HTLC fails, the balance is returned to the local node (the one that it was in-flight / outgoing on).
+/// * When an HTLC succeeds, the balance is sent to the remote node (the one that did not track it as in-flight).
+///
+/// With each state transition, the simulated channel checks that the sum of its local balances and in-flight equal the
+/// total channel capacity. Failure of this sanity check represents a critical failure in the state machine.
+#[derive(Clone)]
+pub struct SimulatedChannel {
+    capacity_msat: u64,
+    short_channel_id: ShortChannelID,
+    node_1: ChannelState,
+    node_2: ChannelState,
+}
+
+impl SimulatedChannel {
+    /// Creates a new channel with the capacity and policies provided. The total capacity of the channel is evenly split
+    /// between the channel participants (this is an arbitrary decision).
+    pub fn new(
+        capacity_msat: u64,
+        short_channel_id: ShortChannelID,
+        node_1: ChannelPolicy,
+        node_2: ChannelPolicy,
+    ) -> Self {
+        SimulatedChannel {
+            capacity_msat,
+            short_channel_id,
+            node_1: ChannelState::new(node_1, capacity_msat / 2),
+            node_2: ChannelState::new(node_2, capacity_msat / 2),
+        }
+    }
+
+    fn get_node_mut(&mut self, pubkey: &PublicKey) -> Result<&mut ChannelState, ForwardingError> {
+        if pubkey == &self.node_1.policy.pubkey {
+            Ok(&mut self.node_1)
+        } else if pubkey == &self.node_2.policy.pubkey {
+            Ok(&mut self.node_2)
+        } else {
+            Err(ForwardingError::NodeNotFound(*pubkey))
+        }
+    }
+
+    fn get_node(&self, pubkey: &PublicKey) -> Result<&ChannelState, ForwardingError> {
+        if pubkey == &self.node_1.policy.pubkey {
+            Ok(&self.node_1)
+        } else if pubkey == &self.node_2.policy.pubkey {
+            Ok(&self.node_2)
+        } else {
+            Err(ForwardingError::NodeNotFound(*pubkey))
+        }
+    }
+
+    /// Adds an htlc to the appropriate side of the simulated channel, checking its policy and balance are okay. The
+    /// public key of the node sending the HTLC (ie, the party that would send update_add_htlc in the protocol)
+    /// must be provided to add the outgoing htlc to its side of the channel.
+    fn add_htlc(
+        &mut self,
+        sending_node: &PublicKey,
+        hash: PaymentHash,
+        htlc: Htlc,
+    ) -> Result<(), ForwardingError> {
+        if htlc.amount_msat == 0 {
+            return Err(ForwardingError::ZeroAmountHtlc);
+        }
+
+        self.get_node_mut(sending_node)?
+            .add_outgoing_htlc(hash, htlc)?;
+        self.sanity_check()
+    }
+
+    /// Performs a sanity check on the total balances in a channel. Note that we do not currently include on-chain
+    /// fees or reserve so these values should exactly match.
+    fn sanity_check(&self) -> Result<(), ForwardingError> {
+        let node_1_total = self.node_1.local_balance_msat + self.node_1.in_flight_total();
+        let node_2_total = self.node_2.local_balance_msat + self.node_2.in_flight_total();
+
+        fail_forwarding_inequality!(node_1_total + node_2_total, !=, self.capacity_msat, SanityCheckFailed);
+
+        Ok(())
+    }
+
+    /// Removes an htlc from the appropriate side of the simulated channel, settling balances across channel sides
+    /// based on the success of the htlc. The public key of the node that originally sent the HTLC (ie, the party
+    /// that would send update_add_htlc in the protocol) must be provided to remove the htlc from its side of the
+    /// channel.
+    fn remove_htlc(
+        &mut self,
+        sending_node: &PublicKey,
+        hash: &PaymentHash,
+        success: bool,
+    ) -> Result<(), ForwardingError> {
+        let htlc = self
+            .get_node_mut(sending_node)?
+            .remove_outgoing_htlc(hash, success)?;
+        self.settle_htlc(sending_node, htlc.amount_msat, success)?;
+        self.sanity_check()
+    }
+
+    /// Updates the local balance of each node in the channel once a htlc has been resolved, pushing funds to the
+    /// receiving nodes in the case of a successful payment and returning balance to the sender in the case of a
+    /// failure.
+    fn settle_htlc(
+        &mut self,
+        sending_node: &PublicKey,
+        amount_msat: u64,
+        success: bool,
+    ) -> Result<(), ForwardingError> {
+        // Successful payments push balance to the receiver, failures return it to the sender.
+        let (sender_delta_msat, receiver_delta_msat) = if success {
+            (0, amount_msat)
+        } else {
+            (amount_msat, 0)
+        };
+
+        if sending_node == &self.node_1.policy.pubkey {
+            self.node_1.local_balance_msat += sender_delta_msat;
+            self.node_2.local_balance_msat += receiver_delta_msat;
+            Ok(())
+        } else if sending_node == &self.node_2.policy.pubkey {
+            self.node_2.local_balance_msat += sender_delta_msat;
+            self.node_1.local_balance_msat += receiver_delta_msat;
+            Ok(())
+        } else {
+            Err(ForwardingError::NodeNotFound(*sending_node))
+        }
+    }
+
+    /// Checks an htlc forward against the outgoing policy of the node provided.
+    fn check_htlc_forward(
+        &self,
+        forwarding_node: &PublicKey,
+        cltv_delta: u32,
+        amount_msat: u64,
+        fee_msat: u64,
+    ) -> Result<(), ForwardingError> {
+        self.get_node(forwarding_node)?
+            .check_htlc_forward(cltv_delta, amount_msat, fee_msat)
+    }
+}
