@@ -1038,3 +1038,257 @@ impl UtxoLookup for UtxoValidator {
         }))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::test_utils::get_random_keypair;
+
+    use super::*;
+
+    /// Creates a test channel policy with its maximum HTLC size set to half of the in flight limit of the channel.
+    /// The minimum HTLC size is hardcoded to 2 so that we can fall beneath this value with a 1 msat htlc.
+    fn create_test_policy(max_in_flight_msat: u64) -> ChannelPolicy {
+        let (_, pk) = get_random_keypair();
+        ChannelPolicy {
+            pubkey: pk,
+            max_htlc_count: 10,
+            max_in_flight_msat,
+            min_htlc_size_msat: 2,
+            max_htlc_size_msat: max_in_flight_msat / 2,
+            cltv_expiry_delta: 10,
+            base_fee: 1000,
+            fee_rate_prop: 5000,
+        }
+    }
+
+    macro_rules! assert_channel_balances {
+        ($channel_state:expr, $local_balance:expr, $in_flight_len:expr, $in_flight_total:expr) => {
+            assert_eq!($channel_state.local_balance_msat, $local_balance);
+            assert_eq!($channel_state.in_flight.len(), $in_flight_len);
+            assert_eq!($channel_state.in_flight_total(), $in_flight_total);
+        };
+    }
+
+    /// Tests state updates related to adding and removing HTLCs to a channel.
+    #[test]
+    fn test_channel_state_transitions() {
+        let local_balance = 100_000_000;
+        let mut channel_state =
+            ChannelState::new(create_test_policy(local_balance / 2), local_balance);
+
+        // Basic sanity check that we Initialize the channel correctly.
+        assert_channel_balances!(channel_state, local_balance, 0, 0);
+
+        // Add a few HTLCs to our internal state and assert that balances are as expected. We'll test
+        // `check_outgoing_addition` in more detail in another test, so we just assert that we can add the htlc in
+        // this test.
+        let hash_1 = PaymentHash { 0: [1; 32] };
+        let htlc_1 = Htlc {
+            amount_msat: 1000,
+            cltv_expiry: 40,
+        };
+
+        assert!(channel_state.add_outgoing_htlc(hash_1, htlc_1).is_ok());
+        assert_channel_balances!(
+            channel_state,
+            local_balance - htlc_1.amount_msat,
+            1,
+            htlc_1.amount_msat
+        );
+
+        // Try to add a htlc with the same payment hash and assert that we fail because we enforce one htlc per hash
+        // at present.
+        assert!(matches!(
+            channel_state.add_outgoing_htlc(hash_1, htlc_1),
+            Err(ForwardingError::PaymentHashExists(_))
+        ));
+
+        // Add a second, distinct htlc to our in-flight state.
+        let hash_2 = PaymentHash { 0: [2; 32] };
+        let htlc_2 = Htlc {
+            amount_msat: 1000,
+            cltv_expiry: 40,
+        };
+
+        assert!(channel_state.add_outgoing_htlc(hash_2, htlc_2).is_ok());
+        assert_channel_balances!(
+            channel_state,
+            local_balance - htlc_1.amount_msat - htlc_2.amount_msat,
+            2,
+            htlc_1.amount_msat + htlc_2.amount_msat
+        );
+
+        // Remove our second htlc with a failure so that our in-flight drops and we return the balance.
+        assert!(channel_state.remove_outgoing_htlc(&hash_2).is_ok());
+        channel_state.settle_outgoing_htlc(htlc_2.amount_msat, false);
+        assert_channel_balances!(
+            channel_state,
+            local_balance - htlc_1.amount_msat,
+            1,
+            htlc_1.amount_msat
+        );
+
+        // Try to remove the same htlc and assert that we fail because the htlc can't be found.
+        assert!(matches!(
+            channel_state.remove_outgoing_htlc(&hash_2),
+            Err(ForwardingError::PaymentHashNotFound(_))
+        ));
+
+        // Finally, remove our original htlc with success and assert that our local balance is accordingly updated.
+        assert!(channel_state.remove_outgoing_htlc(&hash_1).is_ok());
+        channel_state.settle_outgoing_htlc(htlc_1.amount_msat, true);
+        assert_channel_balances!(channel_state, local_balance - htlc_1.amount_msat, 0, 0);
+    }
+
+    /// Tests policy checks applied when forwarding a htlc over a channel.
+    #[test]
+    fn test_htlc_forward() {
+        let local_balance = 140_000;
+        let channel_state = ChannelState::new(create_test_policy(local_balance / 2), local_balance);
+
+        // CLTV delta insufficient (one less than required).
+        assert!(matches!(
+            channel_state.check_htlc_forward(channel_state.policy.cltv_expiry_delta - 1, 0, 0),
+            Err(ForwardingError::InsufficientCltvDelta(_, _))
+        ));
+
+        // Test insufficient fee.
+        let htlc_amount = 1000;
+        let htlc_fee = channel_state.policy.base_fee
+            + (channel_state.policy.fee_rate_prop * htlc_amount) / 1e6 as u64;
+
+        assert!(matches!(
+            channel_state.check_htlc_forward(
+                channel_state.policy.cltv_expiry_delta,
+                htlc_amount,
+                htlc_fee - 1
+            ),
+            Err(ForwardingError::InsufficientFee(_, _, _, _))
+        ));
+
+        // Test exact and over-estimation of required policy.
+        assert!(channel_state
+            .check_htlc_forward(
+                channel_state.policy.cltv_expiry_delta,
+                htlc_amount,
+                htlc_fee,
+            )
+            .is_ok());
+
+        assert!(channel_state
+            .check_htlc_forward(
+                channel_state.policy.cltv_expiry_delta * 2,
+                htlc_amount,
+                htlc_fee * 3
+            )
+            .is_ok());
+    }
+
+    /// Test addition of outgoing htlc to local state.
+    #[test]
+    fn test_check_outgoing_addition() {
+        // Create test channel with low local liquidity so that we run into failures.
+        let local_balance = 100_000;
+        let mut channel_state =
+            ChannelState::new(create_test_policy(local_balance / 2), local_balance);
+
+        let mut htlc = Htlc {
+            amount_msat: channel_state.policy.max_htlc_size_msat + 1,
+            cltv_expiry: channel_state.policy.cltv_expiry_delta,
+        };
+        // HTLC maximum size exceeded.
+        assert!(matches!(
+            channel_state.check_outgoing_addition(&htlc),
+            Err(ForwardingError::MoreThanMaximum(_, _))
+        ));
+
+        // Beneath HTLC minimum size.
+        htlc.amount_msat = channel_state.policy.min_htlc_size_msat - 1;
+        assert!(matches!(
+            channel_state.check_outgoing_addition(&htlc),
+            Err(ForwardingError::LessThanMinimum(_, _))
+        ));
+
+        // Add two large htlcs so that we will start to run into our in-flight total amount limit.
+        let hash_1 = PaymentHash { 0: [1; 32] };
+        let htlc_1 = Htlc {
+            amount_msat: channel_state.policy.max_in_flight_msat / 2,
+            cltv_expiry: channel_state.policy.cltv_expiry_delta,
+        };
+
+        assert!(channel_state.check_outgoing_addition(&htlc_1).is_ok());
+        assert!(channel_state.add_outgoing_htlc(hash_1, htlc_1).is_ok());
+
+        let hash_2 = PaymentHash { 0: [2; 32] };
+        let htlc_2 = Htlc {
+            amount_msat: channel_state.policy.max_in_flight_msat / 2,
+            cltv_expiry: channel_state.policy.cltv_expiry_delta,
+        };
+
+        assert!(channel_state.check_outgoing_addition(&htlc_2).is_ok());
+        assert!(channel_state.add_outgoing_htlc(hash_2, htlc_2).is_ok());
+
+        // Now, assert that we can't add even our smallest htlc size, because we're hit our in-flight amount limit.
+        htlc.amount_msat = channel_state.policy.min_htlc_size_msat;
+        assert!(matches!(
+            channel_state.check_outgoing_addition(&htlc),
+            Err(ForwardingError::ExceedsInFlightTotal(_, _))
+        ));
+
+        // Resolve both of the htlcs successfully so that the local liquidity is no longer available.
+        assert!(channel_state.remove_outgoing_htlc(&hash_1).is_ok());
+        channel_state.settle_outgoing_htlc(htlc_1.amount_msat, true);
+
+        assert!(channel_state.remove_outgoing_htlc(&hash_2).is_ok());
+        channel_state.settle_outgoing_htlc(htlc_2.amount_msat, true);
+
+        // Now we're going to add many htlcs so that we hit our in-flight count limit (unique payment hash per htlc).
+        for i in 0..channel_state.policy.max_htlc_count {
+            let hash = PaymentHash {
+                0: [i.try_into().unwrap(); 32],
+            };
+            assert!(channel_state.check_outgoing_addition(&htlc).is_ok());
+            assert!(channel_state.add_outgoing_htlc(hash, htlc).is_ok());
+        }
+
+        // Try to add one more htlc and we should be rejected.
+        let htlc_3 = Htlc {
+            amount_msat: channel_state.policy.min_htlc_size_msat,
+            cltv_expiry: channel_state.policy.cltv_expiry_delta,
+        };
+
+        assert!(matches!(
+            channel_state.check_outgoing_addition(&htlc_3),
+            Err(ForwardingError::ExceedsInFlightCount(_, _))
+        ));
+
+        // Resolve all in-flight htlcs.
+        for i in 0..channel_state.policy.max_htlc_count {
+            let hash = PaymentHash {
+                0: [i.try_into().unwrap(); 32],
+            };
+            assert!(channel_state.remove_outgoing_htlc(&hash).is_ok());
+            channel_state.settle_outgoing_htlc(htlc.amount_msat, true)
+        }
+
+        // Add and settle another htlc to move more liquidity away from our local balance.
+        let hash_4 = PaymentHash { 0: [1; 32] };
+        let htlc_4 = Htlc {
+            amount_msat: channel_state.policy.max_htlc_size_msat,
+            cltv_expiry: channel_state.policy.cltv_expiry_delta,
+        };
+        assert!(channel_state.check_outgoing_addition(&htlc_4).is_ok());
+        assert!(channel_state.add_outgoing_htlc(hash_4, htlc_4).is_ok());
+        assert!(channel_state.remove_outgoing_htlc(&hash_4).is_ok());
+        channel_state.settle_outgoing_htlc(htlc_4.amount_msat, true);
+
+        // Finally, assert that we don't have enough balance to forward our largest possible htlc (because of all the
+        // htlcs that we've settled) and assert that we fail to a large htlc. The balance assertion here is just a
+        // sanity check for the test, which will fail if we change the amounts settled/failed in the test.
+        assert!(channel_state.local_balance_msat < channel_state.policy.max_htlc_size_msat);
+        assert!(matches!(
+            channel_state.check_outgoing_addition(&htlc_4),
+            Err(ForwardingError::InsufficientBalance(_, _))
+        ));
+    }
+}
