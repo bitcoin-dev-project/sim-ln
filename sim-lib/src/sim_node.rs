@@ -1041,9 +1041,11 @@ impl UtxoLookup for UtxoValidator {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::get_random_keypair;
-
     use super::*;
+    use crate::test_utils::get_random_keypair;
+    use bitcoin::secp256k1::PublicKey;
+    use lightning::routing::router::Route;
+    use mockall::mock;
 
     /// Creates a test channel policy with its maximum HTLC size set to half of the in flight limit of the channel.
     /// The minimum HTLC size is hardcoded to 2 so that we can fall beneath this value with a 1 msat htlc.
@@ -1059,6 +1061,58 @@ mod tests {
             base_fee: 1000,
             fee_rate_prop: 5000,
         }
+    }
+
+    /// Creates a set of n simulated channels connected in a chain of channels, where the short channel ID of each
+    /// channel is its index in the chain of channels and all capacity is on the side of the node that opened the
+    /// channel.
+    ///
+    /// For example if n = 3 it will produce: node_1 -- node_2 -- node_3 -- node_4, connected by channels.
+    fn create_simulated_channels(n: u64, capacity_msat: u64) -> Vec<SimulatedChannel> {
+        let mut channels: Vec<SimulatedChannel> = vec![];
+        let (_, first_node) = get_random_keypair();
+
+        // Create channels in a ring so that we'll get long payment paths.
+        let mut node_1 = first_node;
+        for i in 0..n {
+            // Generate a new random node pubkey.
+            let (_, node_2) = get_random_keypair();
+
+            let node_1_to_2 = ChannelPolicy {
+                pubkey: node_1,
+                max_htlc_count: 483,
+                max_in_flight_msat: capacity_msat / 2,
+                min_htlc_size_msat: 1,
+                max_htlc_size_msat: capacity_msat / 2,
+                cltv_expiry_delta: 40,
+                base_fee: 1000 * i,
+                fee_rate_prop: 1500 * i,
+            };
+
+            let node_2_to_1 = ChannelPolicy {
+                pubkey: node_2,
+                max_htlc_count: 483,
+                max_in_flight_msat: capacity_msat / 2,
+                min_htlc_size_msat: 1,
+                max_htlc_size_msat: capacity_msat / 2,
+                cltv_expiry_delta: 40 + 10 * i as u32,
+                base_fee: 2000 * i,
+                fee_rate_prop: i,
+            };
+
+            channels.push(SimulatedChannel {
+                capacity_msat,
+                // Unique channel ID per link.
+                short_channel_id: ShortChannelID::from(i),
+                node_1: ChannelState::new(node_1_to_2, capacity_msat),
+                node_2: ChannelState::new(node_2_to_1, 0),
+            });
+
+            // Progress source ID to create a chain of nodes.
+            node_1 = node_2;
+        }
+
+        channels
     }
 
     macro_rules! assert_channel_balances {
@@ -1352,6 +1406,104 @@ mod tests {
         assert!(matches!(
             simulated_channel.remove_htlc(&pk, &hash_2, true),
             Err(ForwardingError::NodeNotFound(_))
+        ));
+    }
+
+    mock! {
+        Network{}
+
+        #[async_trait]
+        impl SimNetwork for Network{
+            fn dispatch_payment(
+                &mut self,
+                source: PublicKey,
+                route: Route,
+                payment_hash: PaymentHash,
+                sender: Sender<Result<PaymentResult, LightningError>>,
+            );
+
+            async fn lookup_node(&self, node: &PublicKey) -> Result<(NodeInfo, Vec<u64>), LightningError>;
+        }
+    }
+
+    /// Tests the functionality of a `SimNode`, mocking out the `SimNetwork` that is responsible for payment
+    /// propagation to isolate testing to just the implementation of `LightningNode`.
+    #[tokio::test]
+    async fn test_simulated_node() {
+        // Mock out our network and create a routing graph with 5 hops.
+        let mock = MockNetwork::new();
+        let sim_network = Arc::new(Mutex::new(mock));
+        let channels = create_simulated_channels(5, 300000000);
+        let graph = populate_network_graph(channels.clone()).unwrap();
+
+        // Create a simulated node for the first channel in our network.
+        let pk = channels[0].node_1.policy.pubkey;
+        let mut node = SimNode::new(pk, sim_network.clone(), Arc::new(graph));
+
+        // Prime mock to return node info from lookup and assert that we get the pubkey we're expecting.
+        let lookup_pk = channels[3].node_1.policy.pubkey;
+        sim_network
+            .lock()
+            .await
+            .expect_lookup_node()
+            .returning(move |_| Ok((node_info(lookup_pk), vec![1, 2, 3])));
+
+        // Assert that we get three channels from the mock.
+        let node_info = node.get_node_info(&lookup_pk).await.unwrap();
+        assert_eq!(lookup_pk, node_info.pubkey);
+        assert_eq!(node.list_channels().await.unwrap().len(), 3);
+
+        // Next, we're going to test handling of in-flight payments. To do this, we'll mock out calls to our dispatch
+        // function to send different results depending on the destination.
+        let dest_1 = channels[2].node_1.policy.pubkey;
+        let dest_2 = channels[4].node_1.policy.pubkey;
+
+        sim_network
+            .lock()
+            .await
+            .expect_dispatch_payment()
+            .returning(
+                move |_, route: Route, _, sender: Sender<Result<PaymentResult, LightningError>>| {
+                    // If we've reached dispatch, we must have at least one path, grab the last hop to match the
+                    // receiver.
+                    let receiver = route.paths[0].hops.last().unwrap().pubkey;
+                    let result = if receiver == dest_1 {
+                        PaymentResult {
+                            htlc_count: 2,
+                            payment_outcome: PaymentOutcome::Success,
+                        }
+                    } else if receiver == dest_2 {
+                        PaymentResult {
+                            htlc_count: 0,
+                            payment_outcome: PaymentOutcome::InsufficientBalance,
+                        }
+                    } else {
+                        panic!("unknown mocked receiver");
+                    };
+
+                    let _ = sender.send(Ok(result)).unwrap();
+                },
+            );
+
+        // Dispatch payments to different destinations and assert that our track payment results are as expected.
+        let hash_1 = node.send_payment(dest_1, 10_000).await.unwrap();
+        let hash_2 = node.send_payment(dest_2, 15_000).await.unwrap();
+
+        let (_, shutdown_listener) = triggered::trigger();
+
+        let result_1 = node
+            .track_payment(hash_1, shutdown_listener.clone())
+            .await
+            .unwrap();
+        assert!(matches!(result_1.payment_outcome, PaymentOutcome::Success));
+
+        let result_2 = node
+            .track_payment(hash_2, shutdown_listener.clone())
+            .await
+            .unwrap();
+        assert!(matches!(
+            result_2.payment_outcome,
+            PaymentOutcome::InsufficientBalance
         ));
     }
 }
