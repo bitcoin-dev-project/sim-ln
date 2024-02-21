@@ -6,19 +6,16 @@ permissions:
   contents: read
 
 jobs:
-  clippy:
-    name: Lint
+  check:
+    name: Check Code with stable output
     runs-on: ubuntu-latest
     steps:
+      - name: Install protoc
+        run: sudo apt install -y protobuf-compiler
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: giraffate/clippy-action@v1
-        with:
-          reporter: github-pr-review
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          clippy_flags: --all-features  --all-targets --color always -- --deny warnings
+      - name: run check
+        run: make check
 
   build:
     name: Build and test

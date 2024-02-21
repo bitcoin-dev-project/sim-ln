@@ -51,13 +51,13 @@ impl NodeId {
                     return Err(LightningError::ValidationError(format!(
                     "the provided node id does not match the one returned by the backend ({} != {}).", pk, node_id)));
                 }
-            }
+            },
             crate::NodeId::Alias(a) => {
                 if alias != a {
                     log::warn!("The provided alias does not match the one returned by the backend ({} != {}).", a, alias)
                 }
                 *alias = a.to_string();
-            }
+            },
         }
         Ok(())
     }
@@ -752,7 +752,7 @@ async fn consume_events(
                         // We need to track the payment outcome using the payment hash that we have received.
                         payment.hash = Some(payment_hash);
                         SimulationOutput::SendPaymentSuccess(payment)
-                    }
+                    },
                     Err(e) => {
                         log::error!(
                             "Error while sending payment {} -> {}.",
@@ -765,23 +765,23 @@ async fn consume_events(
                                 log::error!("Simulation terminated with error: {s}.");
                                 shutdown.trigger();
                                 break;
-                            }
+                            },
                             _ => SimulationOutput::SendPaymentFailure(
                                 payment,
                                 PaymentResult::not_dispatched(),
                             ),
                         }
-                    }
+                    },
                 };
 
                 match sender.send(outcome).await {
-                    Ok(_) => {}
+                    Ok(_) => {},
                     Err(e) => {
                         log::error!("Error sending action outcome: {:?}.", e);
                         break;
-                    }
+                    },
                 }
-            }
+            },
         };
     }
 }
@@ -1055,20 +1055,20 @@ async fn track_payment_result(
                         res.payment_outcome
                     );
                     res
-                }
+                },
                 Err(e) => {
                     log::error!("Track payment failed for {}: {e}.", hex::encode(hash.0));
                     PaymentResult::track_payment_failed()
-                }
+                },
             }
-        }
+        },
         // None means that the payment was not dispatched, so we cannot track it.
         None => {
             log::error!(
                 "We cannot track a payment that has not been dispatched. Missing payment hash."
             );
             PaymentResult::not_dispatched()
-        }
+        },
     };
 
     if results.clone().send((payment, res)).await.is_err() {
