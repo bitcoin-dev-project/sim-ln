@@ -3,23 +3,24 @@ use crate::{
 };
 use async_trait::async_trait;
 use bitcoin::constants::ChainHash;
-use bitcoin::Network;
-use bitcoin::{
-    hashes::{sha256::Hash as Sha256, Hash},
-    secp256k1::PublicKey,
+use bitcoin::hashes::{sha256::Hash as Sha256, Hash};
+use bitcoin::secp256k1::PublicKey;
+use bitcoin::{Network, ScriptBuf, TxOut};
+use lightning::ln::chan_utils::make_funding_redeemscript;
+use std::collections::{hash_map::Entry, HashMap};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use lightning::ln::features::{ChannelFeatures, NodeFeatures};
+use lightning::ln::msgs::{
+    LightningError as LdkError, UnsignedChannelAnnouncement, UnsignedChannelUpdate,
 };
-use bitcoin::{ScriptBuf, TxOut};
-use lightning::ln::features::NodeFeatures;
-use lightning::ln::msgs::LightningError as LdkError;
 use lightning::ln::{PaymentHash, PaymentPreimage};
-use lightning::routing::gossip::NetworkGraph;
+use lightning::routing::gossip::{NetworkGraph, NodeId};
 use lightning::routing::router::{find_route, Path, PaymentParameters, Route, RouteParameters};
 use lightning::routing::scoring::ProbabilisticScorer;
 use lightning::routing::utxo::{UtxoLookup, UtxoResult};
 use lightning::util::logger::{Level, Logger, Record};
-use std::collections::hash_map::Entry;
-use std::collections::HashMap;
-use std::sync::Arc;
 use thiserror::Error;
 use tokio::select;
 use tokio::sync::oneshot::{channel, Receiver, Sender};
@@ -658,6 +659,90 @@ impl SimGraph {
 
         log::debug!("Simulated graph shutdown.");
     }
+}
+
+/// Produces a map of node public key to lightning node implementation to be used for simulations.
+pub async fn ln_node_from_graph<'a>(
+    graph: Arc<Mutex<SimGraph>>,
+    routing_graph: Arc<NetworkGraph<&'_ WrappedLog>>,
+) -> HashMap<PublicKey, Arc<Mutex<dyn LightningNode + '_>>> {
+    let mut nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
+
+    for pk in graph.lock().await.nodes.keys() {
+        nodes.insert(
+            *pk,
+            Arc::new(Mutex::new(SimNode::new(
+                *pk,
+                graph.clone(),
+                routing_graph.clone(),
+            ))),
+        );
+    }
+
+    nodes
+}
+
+/// Populates a network graph based on the set of simulated channels provided. This function *only* applies channel
+/// announcements, which has the effect of adding the nodes in each channel to the graph, because LDK does not export
+/// all of the fields required to apply node announcements. This means that we will not have node-level information
+/// (such as features) available in the routing graph.
+pub fn populate_network_graph<'a>(
+    channels: Vec<SimulatedChannel>,
+) -> Result<NetworkGraph<&'a WrappedLog>, LdkError> {
+    let graph = NetworkGraph::new(Network::Regtest, &WrappedLog {});
+
+    let chain_hash = ChainHash::using_genesis_block(Network::Regtest);
+
+    for channel in channels {
+        let announcement = UnsignedChannelAnnouncement {
+            // For our purposes we don't currently need any channel level features.
+            features: ChannelFeatures::empty(),
+            chain_hash,
+            short_channel_id: channel.short_channel_id.into(),
+            node_id_1: NodeId::from_pubkey(&channel.node_1.policy.pubkey),
+            node_id_2: NodeId::from_pubkey(&channel.node_2.policy.pubkey),
+            // Note: we don't need bitcoin keys for our purposes, so we just copy them *but* remember that we do use
+            // this for our fake utxo validation so they do matter for producing the script that we mock validate.
+            bitcoin_key_1: NodeId::from_pubkey(&channel.node_1.policy.pubkey),
+            bitcoin_key_2: NodeId::from_pubkey(&channel.node_2.policy.pubkey),
+            // Internal field used by LDK, we don't need it.
+            excess_data: Vec::new(),
+        };
+
+        let utxo_validator = UtxoValidator {
+            amount_sat: channel.capacity_msat / 1000,
+            script: make_funding_redeemscript(
+                &channel.node_1.policy.pubkey,
+                &channel.node_2.policy.pubkey,
+            )
+            .to_v0_p2wsh(),
+        };
+
+        graph.update_channel_from_unsigned_announcement(&announcement, &Some(&utxo_validator))?;
+
+        // The least significant bit of the channel flag field represents the direction that the channel update
+        // applies to. This value is interpreted as node_1 if it is zero, and node_2 otherwise.
+        for (i, node) in [channel.node_1, channel.node_2].iter().enumerate() {
+            let update = UnsignedChannelUpdate {
+                chain_hash,
+                short_channel_id: channel.short_channel_id.into(),
+                timestamp: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as u32,
+                flags: i as u8,
+                cltv_expiry_delta: node.policy.cltv_expiry_delta as u16,
+                htlc_minimum_msat: node.policy.min_htlc_size_msat,
+                htlc_maximum_msat: node.policy.max_htlc_size_msat,
+                fee_base_msat: node.policy.base_fee as u32,
+                fee_proportional_millionths: node.policy.fee_rate_prop as u32,
+                excess_data: Vec::new(),
+            };
+            graph.update_channel_unsigned(&update)?;
+        }
+    }
+
+    Ok(graph)
 }
 
 #[async_trait]
