@@ -1,16 +1,21 @@
-use crate::{LightningError, LightningNode, NodeInfo, PaymentOutcome, PaymentResult};
+use crate::{
+    LightningError, LightningNode, NodeInfo, PaymentOutcome, PaymentResult, SimulationError,
+};
 use async_trait::async_trait;
+use bitcoin::constants::ChainHash;
 use bitcoin::Network;
 use bitcoin::{
     hashes::{sha256::Hash as Sha256, Hash},
     secp256k1::PublicKey,
 };
+use bitcoin::{ScriptBuf, TxOut};
 use lightning::ln::features::NodeFeatures;
 use lightning::ln::msgs::LightningError as LdkError;
 use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::routing::gossip::NetworkGraph;
-use lightning::routing::router::{find_route, PaymentParameters, Route, RouteParameters};
+use lightning::routing::router::{find_route, Path, PaymentParameters, Route, RouteParameters};
 use lightning::routing::scoring::ProbabilisticScorer;
+use lightning::routing::utxo::{UtxoLookup, UtxoResult};
 use lightning::util::logger::{Level, Logger, Record};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
@@ -19,7 +24,8 @@ use thiserror::Error;
 use tokio::select;
 use tokio::sync::oneshot::{channel, Receiver, Sender};
 use tokio::sync::Mutex;
-use triggered::Listener;
+use tokio::task::JoinSet;
+use triggered::{Listener, Trigger};
 
 use crate::ShortChannelID;
 
@@ -458,7 +464,7 @@ fn find_payment_route(
     dest: PublicKey,
     amount_msat: u64,
     pathfinding_graph: &NetworkGraph<&WrappedLog>,
-) -> Result<Route, LdkError> {
+) -> Result<Route, SimulationError> {
     let scorer = ProbabilisticScorer::new(Default::default(), pathfinding_graph, &WrappedLog {});
 
     find_route(
@@ -480,6 +486,7 @@ fn find_payment_route(
         &Default::default(),
         &[0; 32],
     )
+    .map_err(|e| SimulationError::SimulatedNetworkError(e.err))
 }
 
 #[async_trait]
@@ -592,6 +599,325 @@ impl<T: SimNetwork> LightningNode for SimNode<'_, T> {
     }
 }
 
+/// Graph is the top level struct that is used to coordinate simulation of lightning nodes.
+pub struct SimGraph {
+    /// nodes caches the list of nodes in the network with a vector of their channel capacities, only used for quick
+    /// lookup.
+    nodes: HashMap<PublicKey, Vec<u64>>,
+
+    /// channels maps the scid of a channel to its current simulation state.
+    channels: Arc<Mutex<HashMap<ShortChannelID, SimulatedChannel>>>,
+
+    /// track all tasks spawned to process payments in the graph.
+    tasks: JoinSet<()>,
+
+    /// trigger shutdown if a critical error occurs.
+    shutdown_trigger: Trigger,
+}
+
+impl SimGraph {
+    /// Creates a graph on which to simulate payments.
+    pub fn new(
+        graph_channels: Vec<SimulatedChannel>,
+        shutdown_trigger: Trigger,
+    ) -> Result<Self, LdkError> {
+        let mut nodes: HashMap<PublicKey, Vec<u64>> = HashMap::new();
+        let mut channels = HashMap::new();
+
+        for channel in graph_channels.iter() {
+            channels.insert(channel.short_channel_id, channel.clone());
+
+            for pubkey in [channel.node_1.policy.pubkey, channel.node_2.policy.pubkey] {
+                match nodes.entry(pubkey) {
+                    Entry::Occupied(o) => o.into_mut().push(channel.capacity_msat),
+                    Entry::Vacant(v) => {
+                        v.insert(vec![channel.capacity_msat]);
+                    },
+                }
+            }
+        }
+
+        Ok(SimGraph {
+            nodes,
+            channels: Arc::new(Mutex::new(channels)),
+            tasks: JoinSet::new(),
+            shutdown_trigger,
+        })
+    }
+
+    /// Blocks until all tasks created by the simulator have shut down. This function does not trigger shutdown,
+    /// because it expects erroring-out tasks to handle their own shutdown triggering.
+    pub async fn wait_for_shutdown(&mut self) {
+        log::debug!("Waiting for simulated graph to shutdown.");
+
+        while let Some(res) = self.tasks.join_next().await {
+            if let Err(e) = res {
+                log::error!("Graph task exited with error: {e}");
+            }
+        }
+
+        log::debug!("Simulated graph shutdown.");
+    }
+}
+
+#[async_trait]
+impl SimNetwork for SimGraph {
+    /// dispatch_payment asynchronously propagates a payment through the simulated network, returning a tracking
+    /// channel that can be used to obtain the result of the payment. At present, MPP payments are not supported.
+    /// In future, we'll allow multiple paths for a single payment, so we allow the trait to accept a route with
+    /// multiple paths to avoid future refactoring.
+    fn dispatch_payment(
+        &mut self,
+        source: PublicKey,
+        route: Route,
+        payment_hash: PaymentHash,
+        sender: Sender<Result<PaymentResult, LightningError>>,
+    ) {
+        // Expect at least one path (right now), with the intention to support multiple in future.
+        let path = match route.paths.first() {
+            Some(p) => p,
+            None => {
+                log::warn!("Find route did not return expected number of paths.");
+
+                if let Err(e) = sender.send(Ok(PaymentResult {
+                    htlc_count: 0,
+                    payment_outcome: PaymentOutcome::RouteNotFound,
+                })) {
+                    log::error!("Could not send payment result: {:?}.", e);
+                }
+
+                return;
+            },
+        };
+
+        self.tasks.spawn(propagate_payment(
+            self.channels.clone(),
+            source,
+            path.clone(),
+            payment_hash,
+            sender,
+            self.shutdown_trigger.clone(),
+        ));
+    }
+
+    /// lookup_node fetches a node's information and channel capacities.
+    async fn lookup_node(&self, node: &PublicKey) -> Result<(NodeInfo, Vec<u64>), LightningError> {
+        self.nodes
+            .get(node)
+            .map(|channels| (node_info(*node), channels.clone()))
+            .ok_or(LightningError::GetNodeInfoError(
+                "Node not found".to_string(),
+            ))
+    }
+}
+
+/// Adds htlcs to the simulation state along the path provided. Returning the index in the path from which to fail
+/// back htlcs (if any) and a forwarding error if the payment is not successfully added to the entire path.
+///
+/// For each hop in the route, we check both the addition of the HTLC and whether we can forward it. Take an example
+/// route A --> B --> C, we will add this in two hops: A --> B then B -->C. For each hop, using A --> B as an example:
+/// * Check whether A can add the outgoing HTLC (checks liquidity and in-flight restrictions).
+///   * If no, fail the HTLC.
+///   * If yes, add outgoing HTLC to A's channel.
+/// * Check whether B will accept the forward.
+///   * If no, fail the HTLC.
+///   * If yes, continue to the next hop.
+///
+/// If successfully added to A --> B, this check will be repeated for B --> C.
+///
+/// Note that we don't have any special handling for the receiving node, once we've successfully added a outgoing HTLC
+/// for the outgoing channel that is connected to the receiving node we'll return. To add invoice-related handling,
+/// we'd need to include some logic that then decides whether to settle/fail the HTLC at the last hop here.
+async fn add_htlcs(
+    nodes: Arc<Mutex<HashMap<ShortChannelID, SimulatedChannel>>>,
+    source: PublicKey,
+    route: Path,
+    payment_hash: PaymentHash,
+) -> Result<(), (Option<usize>, ForwardingError)> {
+    let mut outgoing_node = source;
+    let mut outgoing_amount = route.fee_msat() + route.final_value_msat();
+    let mut outgoing_cltv = route.hops.iter().map(|hop| hop.cltv_expiry_delta).sum();
+
+    // Tracks the hop index that we need to remove htlcs from on payment completion (both success and failure).
+    // Given a payment from A to C, over the route A -- B -- C, this index has the following meanings:
+    // - None: A could not add the outgoing HTLC to B, no action for payment failure.
+    // - Some(0): A -- B added the HTLC but B could not forward the HTLC to C, so it only needs removing on A -- B.
+    // - Some(1): A -- B and B -- C added the HTLC, so it should be removed from the full route.
+    let mut fail_idx = None;
+
+    for (i, hop) in route.hops.iter().enumerate() {
+        // Lock the node that we want to add the HTLC to next. We choose to lock one hop at a time (rather than for
+        // the whole route) so that we can mimic the behavior of payments in the real network where the HTLCs in a
+        // route don't all get to lock in in a row (they have interactions with other payments).
+        let mut node_lock = nodes.lock().await;
+        let scid = ShortChannelID::from(hop.short_channel_id);
+
+        if let Some(channel) = node_lock.get_mut(&scid) {
+            channel
+                .add_htlc(
+                    &outgoing_node,
+                    payment_hash,
+                    Htlc {
+                        amount_msat: outgoing_amount,
+                        cltv_expiry: outgoing_cltv,
+                    },
+                )
+                // If we couldn't add to this HTLC, we only need to fail back from the preceding hop, so we don't
+                // have to progress our fail_idx.
+                .map_err(|e| (fail_idx, e))?;
+
+            // If the HTLC was successfully added, then we'll need to remove the HTLC from this channel if we fail,
+            // so we progress our failure index to include this node.
+            fail_idx = Some(i);
+
+            // Once we've added the HTLC on this hop's channel, we want to check whether it has sufficient fee
+            // and CLTV delta per the _next_ channel's policy (because fees and CLTV delta in LN are charged on
+            // the outgoing link). We check the policy belonging to the node that we just forwarded to, which
+            // represents the fee in that direction.
+            //
+            // TODO: add invoice-related checks (including final CTLV) if we support non-keysend payments.
+            if i != route.hops.len() - 1 {
+                if let Some(channel) =
+                    node_lock.get(&ShortChannelID::from(route.hops[i + 1].short_channel_id))
+                {
+                    channel
+                        .check_htlc_forward(
+                            &hop.pubkey,
+                            hop.cltv_expiry_delta,
+                            outgoing_amount - hop.fee_msat,
+                            hop.fee_msat,
+                        )
+                        // If we haven't met forwarding conditions for the next channel's policy, then we fail at
+                        // the current index, because we've already added the HTLC as outgoing.
+                        .map_err(|e| (fail_idx, e))?;
+                }
+            }
+        } else {
+            return Err((fail_idx, ForwardingError::ChannelNotFound(scid)));
+        }
+
+        // Once we've taken the "hop" to the destination pubkey, it becomes the source of the next outgoing htlc.
+        outgoing_node = hop.pubkey;
+        outgoing_amount -= hop.fee_msat;
+        outgoing_cltv -= hop.cltv_expiry_delta;
+
+        // TODO: introduce artificial latency between hops?
+    }
+
+    Ok(())
+}
+
+/// Removes htlcs from the simulation state from the index in the path provided (backwards).
+///
+/// Taking the example of a payment over A --> B --> C --> D where the payment was rejected by C because it did not
+/// have enough liquidity to forward it, we will expect a failure index of 1 because the HTLC was successfully added
+/// to A and B's outgoing channels, but not C.
+///
+/// This function will remove the HTLC one hop at a time, working backwards from the failure index, so in this
+/// case B --> C and then B --> A. We lookup the HTLC on the incoming node because it will have tracked it in its
+/// outgoing in-flight HTLCs.
+async fn remove_htlcs(
+    nodes: Arc<Mutex<HashMap<ShortChannelID, SimulatedChannel>>>,
+    resolution_idx: usize,
+    source: PublicKey,
+    route: Path,
+    payment_hash: PaymentHash,
+    success: bool,
+) -> Result<(), ForwardingError> {
+    for (i, hop) in route.hops[0..resolution_idx].iter().enumerate().rev() {
+        // When we add HTLCs, we do so on the state of the node that sent the htlc along the channel so we need to
+        // look up our incoming node so that we can remove it when we go backwards. For the first htlc, this is just
+        // the sending node, otherwise it's the hop before.
+        let incoming_node = if i == 0 {
+            source
+        } else {
+            route.hops[i - 1].pubkey
+        };
+
+        // As with when we add HTLCs, we remove them one hop at a time (rather than locking for the whole route) to
+        // mimic the behavior of payments in a real network.
+        match nodes
+            .lock()
+            .await
+            .get_mut(&ShortChannelID::from(hop.short_channel_id))
+        {
+            Some(channel) => channel.remove_htlc(&incoming_node, &payment_hash, success)?,
+            None => {
+                return Err(ForwardingError::ChannelNotFound(ShortChannelID::from(
+                    hop.short_channel_id,
+                )))
+            },
+        }
+    }
+
+    Ok(())
+}
+
+/// Finds a payment path from the source to destination nodes provided, and propagates the appropriate htlcs through
+/// the simulated network, notifying the sender channel provided of the payment outcome. If a critical error occurs,
+/// ie a breakdown of our state machine, it will still notify the payment outcome and will use the shutdown trigger
+/// to signal that we should exit.
+async fn propagate_payment(
+    nodes: Arc<Mutex<HashMap<ShortChannelID, SimulatedChannel>>>,
+    source: PublicKey,
+    route: Path,
+    payment_hash: PaymentHash,
+    sender: Sender<Result<PaymentResult, LightningError>>,
+    shutdown: Trigger,
+) {
+    // If we partially added HTLCs along the route, we need to fail them back to the source to clean up our partial
+    // state. It's possible that we failed with the very first add, and then we don't need to clean anything up.
+    let notify_result = if let Err((fail_idx, err)) =
+        add_htlcs(nodes.clone(), source, route.clone(), payment_hash).await
+    {
+        if err.is_critical() {
+            shutdown.trigger();
+        }
+
+        if let Some(resolution_idx) = fail_idx {
+            if let Err(e) =
+                remove_htlcs(nodes, resolution_idx, source, route, payment_hash, false).await
+            {
+                if e.is_critical() {
+                    shutdown.trigger();
+                }
+            }
+        }
+
+        // We have more information about failures because we're in control of the whole route, so we log the
+        // actual failure reason and then fail back with unknown failure type.
+        log::debug!(
+            "Forwarding failure for simulated payment {}: {err}",
+            hex::encode(payment_hash.0)
+        );
+
+        PaymentResult {
+            htlc_count: 0,
+            payment_outcome: PaymentOutcome::Unknown,
+        }
+    } else {
+        // If we successfully added the htlc, go ahead and remove all the htlcs in the route with successful resolution.
+        if let Err(e) =
+            remove_htlcs(nodes, route.hops.len(), source, route, payment_hash, true).await
+        {
+            if e.is_critical() {
+                shutdown.trigger();
+            }
+
+            log::error!("Could not remove htlcs from channel: {e}.");
+        }
+
+        PaymentResult {
+            htlc_count: 1,
+            payment_outcome: PaymentOutcome::Success,
+        }
+    };
+
+    if let Err(e) = sender.send(Ok(notify_result)) {
+        log::error!("Could not notify payment result: {:?}.", e);
+    }
+}
+
 /// WrappedLog implements LDK's logging trait so that we can provide pathfinding with a logger that uses our existing
 /// logger.
 pub struct WrappedLog {}
@@ -607,5 +933,20 @@ impl Logger for WrappedLog {
             Level::Warn => log::warn!("{}", record.args),
             Level::Error => log::error!("{}", record.args),
         }
+    }
+}
+
+/// UtxoValidator is a mock utxo validator that just returns a fake output with the desired capacity for a channel.
+struct UtxoValidator {
+    amount_sat: u64,
+    script: ScriptBuf,
+}
+
+impl UtxoLookup for UtxoValidator {
+    fn get_utxo(&self, _genesis_hash: &ChainHash, _short_channel_id: u64) -> UtxoResult {
+        UtxoResult::Sync(Ok(TxOut {
+            value: self.amount_sat,
+            script_pubkey: self.script.clone(),
+        }))
     }
 }
