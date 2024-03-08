@@ -4,6 +4,7 @@ use bitcoin::Network;
 use csv::WriterBuilder;
 use lightning::ln::features::NodeFeatures;
 use lightning::ln::PaymentHash;
+use log::LevelFilter;
 use random_activity::RandomActivityError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -1076,4 +1077,18 @@ async fn track_payment_result(
     }
 
     log::trace!("Payment result tracker exiting.");
+}
+
+/// Configuration options for simulation
+#[derive(Debug)]
+pub struct SimulationConfig {
+    pub log_level: LevelFilter,
+    pub total_time: Option<u32>,
+    pub expected_pmt_amt: u64,
+    pub capacity_multiplier: f64,
+    pub no_results: bool,
+    pub print_batch_size: u32,
+    pub data_dir: PathBuf,
+    pub sim_file: PathBuf,
+    pub log_interval: u32,
 }
