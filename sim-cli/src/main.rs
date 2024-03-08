@@ -1,5 +1,6 @@
 use bitcoin::secp256k1::PublicKey;
 use config::{Config, File};
+use flexi_logger::{LogSpecBuilder, Logger};
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,7 +15,6 @@ use sim_lib::{
     cln::ClnNode, lnd::LndNode, ActivityDefinition, LightningError, LightningNode, NodeConnection,
     NodeId, SimParams, Simulation, SimulationConfig, WriteResults,
 };
-use simple_logger::SimpleLogger;
 
 /// The default directory where the simulation files are stored and where the results will be written to.
 pub const DEFAULT_DATA_DIR: &str = ".";
@@ -448,15 +448,20 @@ fn merge_cli() -> anyhow::Result<Cli> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    SimpleLogger::new().with_level(LevelFilter::Info).init()?;
+    let logger_handle = Logger::try_with_str("info")?
+        .set_palette("b1;3;2;4;6".to_string())
+        .start()?;
+
     let cli = merge_cli()?;
     let opts = cli.to_simulation_config();
 
-    SimpleLogger::new()
-        .with_level(LevelFilter::Warn)
-        .with_module_level("sim_lib", opts.log_level)
-        .with_module_level("sim_cli", opts.log_level)
-        .init()?;
+    logger_handle.set_new_spec(
+        LogSpecBuilder::new()
+            .default(LevelFilter::Warn)
+            .module("sim_lib", opts.log_level)
+            .module("sim_cli", opts.log_level)
+            .build(),
+    );
 
     let sim_path = read_sim_path(opts.data_dir.clone(), opts.sim_file).await?;
     let SimParams { nodes, activity } =
