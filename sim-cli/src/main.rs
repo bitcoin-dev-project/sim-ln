@@ -187,6 +187,7 @@ async fn main() -> anyhow::Result<()> {
             destination,
             interval_secs: act.interval_secs,
             amount_msat: act.amount_msat,
+            activity_name: act.activity_name,
         });
     }
 
