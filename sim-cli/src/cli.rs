@@ -34,7 +34,7 @@ pub const DEFAULT_LOG_LEVEL: &str = "info";
 pub const DEFAULT_NO_RESULTS: bool = false;
 
 /// Default log interval
-pub const DEFAULT_LOG_INTERVAL: u32 = 60;
+pub const DEFAULT_LOG_INTERVAL: u64 = 60;
 
 /// Configuration header
 pub const CONFIG_HEADER: &str = "simln.conf";
@@ -145,7 +145,7 @@ pub struct Cli {
         default_value_t = DEFAULT_LOG_INTERVAL,
         value_parser = clap::builder::RangedU64ValueParser::<u32>::new().range(1..u32::MAX as u64)
     )]
-    log_interval: u32,
+    log_interval: u64,
 }
 
 /// Implementation of Cli with default values

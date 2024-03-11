@@ -9,7 +9,7 @@ use anyhow::anyhow;
 use log::LevelFilter;
 use sim_lib::{
     cln::ClnNode, lnd::LndNode, ActivityDefinition, LightningError, LightningNode, NodeConnection, NodeId, SimParams,
-    Simulation, WriteResults,
+    Simulation,
 };
 
 mod cli;
@@ -35,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
             .build(),
     );
 
-    let sim_path = read_sim_path(opts.data_dir.clone(), opts.sim_file).await?;
+    let sim_path = read_sim_path(opts.data_dir.clone(), opts.sim_file.clone()).await?;
     let SimParams { nodes, activity } = serde_json::from_str(&std::fs::read_to_string(sim_path)?).map_err(|e| {
         anyhow!(
             "Nodes or activities not parsed from simulation file (line {}, col {}).",
@@ -135,23 +135,7 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    let write_results = if !opts.no_results {
-        Some(WriteResults {
-            results_dir: mkdir(opts.data_dir.join("results")).await?,
-            batch_size: opts.print_batch_size,
-        })
-    } else {
-        None
-    };
-
-    let sim = Simulation::new(
-        clients,
-        validated_activities,
-        opts.total_time,
-        opts.expected_pmt_amt,
-        opts.capacity_multiplier,
-        write_results,
-    );
+    let sim = Simulation::new(clients, validated_activities, opts).await?;
     let sim2 = sim.clone();
 
     ctrlc::set_handler(move || {
@@ -206,9 +190,4 @@ async fn select_sim_file(data_dir: PathBuf) -> anyhow::Result<PathBuf> {
         .interact()?;
 
     Ok(data_dir.join(sim_files[selection].clone()))
-}
-
-async fn mkdir(dir: PathBuf) -> anyhow::Result<PathBuf> {
-    tokio::fs::create_dir_all(&dir).await?;
-    Ok(dir)
 }

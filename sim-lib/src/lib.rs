@@ -335,6 +335,8 @@ pub struct Simulation {
     activity_multiplier: f64,
     /// Configurations for printing results to CSV. Results are not written if this option is None.
     write_results: Option<WriteResults>,
+    /// Duration measuring how often the summary of results are logged.
+    log_interval: u64,
 }
 
 #[derive(Clone)]
@@ -356,25 +358,35 @@ struct ExecutorKit {
 }
 
 impl Simulation {
-    pub fn new(
+    pub async fn new(
         nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
         activity: Vec<ActivityDefinition>,
-        total_time: Option<u32>,
-        expected_payment_msat: u64,
-        activity_multiplier: f64,
-        write_results: Option<WriteResults>,
-    ) -> Self {
+        config_options: SimulationConfig,
+    ) -> Result<Self, SimulationError> {
         let (shutdown_trigger, shutdown_listener) = triggered::trigger();
-        Self {
+        let write_results = if !config_options.no_results {
+            Some(WriteResults {
+                results_dir: mkdir(config_options.data_dir.join("results")).await.map_err(|e| {
+                    log::error!("Failed to create results directory. Error: {e}.");
+                    SimulationError::FileError
+                })?,
+                batch_size: config_options.print_batch_size,
+            })
+        } else {
+            None
+        };
+
+        Ok(Self {
             nodes,
             activity,
             shutdown_trigger,
             shutdown_listener,
-            total_time: total_time.map(|x| Duration::from_secs(x as u64)),
-            expected_payment_msat,
-            activity_multiplier,
+            total_time: config_options.total_time.map(|x| Duration::from_secs(x as u64)),
+            expected_payment_msat: config_options.expected_pmt_amt,
+            activity_multiplier: config_options.capacity_multiplier,
             write_results,
-        }
+            log_interval: config_options.log_interval,
+        })
     }
 
     /// validate_activity validates that the user-provided activity description is achievable for the network that
@@ -544,7 +556,7 @@ impl Simulation {
         tasks.spawn(run_results_logger(
             listener.clone(),
             result_logger.clone(),
-            Duration::from_secs(60),
+            Duration::from_secs(self.log_interval),
         ));
 
         tasks.spawn(consume_simulation_results(
@@ -1050,5 +1062,10 @@ pub struct SimulationConfig {
     pub print_batch_size: u32,
     pub data_dir: PathBuf,
     pub sim_file: PathBuf,
-    pub log_interval: u32,
+    pub log_interval: u64,
+}
+
+async fn mkdir(dir: PathBuf) -> anyhow::Result<PathBuf> {
+    tokio::fs::create_dir_all(&dir).await?;
+    Ok(dir)
 }
