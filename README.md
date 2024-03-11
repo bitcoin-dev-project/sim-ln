@@ -41,6 +41,8 @@ Install the CLI:
 cargo install --locked --path sim-cli/
 ```
 
+### Running the Simulation
+
 To run the simulation, create a simulation file `sim.json` in the working directory (see [setup instructions](#simulation-file-setup) for details) and run:
 
 ```
@@ -48,6 +50,32 @@ sim-cli
 ```
 
 Run `sim-cli -h` for details on `--data-dir` and `--sim-file` options that allow specifying custom simulation file locations.
+
+Additionally, a configuration file can be used to specify runtime options. To set this up, create an `INI` file in the project root directory
+
+```sh
+$ touch conf.ini
+```
+
+Populate the `.ini` file with the options desired. For example:
+
+```ini
+// conf.ini
+[simln.conf]
+data_dir = /path/to/custom/data_dir
+sim_file = /path/to/custom/sim_file
+...
+```
+
+The default configuration file is `conf.ini`. To explicitly specify it or any other configuration file, use the command line argument as shown below.
+
+```sh
+$ sim-cli --config custom_config.ini
+```
+
+**Note**: The configuration keys used in the config file corresponds to the long format names of `sim-cli` options.
+
+### Contributing
 
 Interested in contributing to the project? See [CONTRIBUTING](CONTRIBUTING.md) for more details.
 
