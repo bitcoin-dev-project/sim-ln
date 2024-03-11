@@ -124,9 +124,7 @@ impl RandomPaymentActivity {
         }
 
         if multiplier == 0.0 {
-            return Err(RandomActivityError::ValueError(
-                "multiplier cannot be zero".into(),
-            ));
+            return Err(RandomActivityError::ValueError("multiplier cannot be zero".into()));
         }
 
         RandomPaymentActivity::validate_capacity(source_capacity_msat, expected_payment_amt)?;
@@ -134,11 +132,10 @@ impl RandomPaymentActivity {
         // Lamda for the exponential distribution that we'll use to randomly time events is equal to the number of
         // events that we expect to see within our set period.
 
-        let lamda = events_per_month(source_capacity_msat, multiplier, expected_payment_amt)
-            / (SECONDS_PER_MONTH as f64);
+        let lamda =
+            events_per_month(source_capacity_msat, multiplier, expected_payment_amt) / (SECONDS_PER_MONTH as f64);
 
-        let event_dist =
-            Exp::new(lamda).map_err(|e| RandomActivityError::ValueError(e.to_string()))?;
+        let event_dist = Exp::new(lamda).map_err(|e| RandomActivityError::ValueError(e.to_string()))?;
 
         Ok(RandomPaymentActivity {
             multiplier,
@@ -150,10 +147,7 @@ impl RandomPaymentActivity {
 
     /// Validates that the generator will be able to generate payment amounts based on the node's capacity and the
     /// simulation's expected payment amount.
-    pub fn validate_capacity(
-        node_capacity_msat: u64,
-        expected_payment_amt: u64,
-    ) -> Result<(), RandomActivityError> {
+    pub fn validate_capacity(node_capacity_msat: u64, expected_payment_amt: u64) -> Result<(), RandomActivityError> {
         // We will not be able to generate payments if the variance of sigma squared for our log normal distribution
         // is < 0 (because we have to take a square root).
         //
@@ -207,10 +201,7 @@ impl PaymentGenerator for RandomPaymentActivity {
     /// capacity. While the expected value of payments remains the same, scaling variance by node capacity means that
     /// nodes with more deployed capital will see a larger range of payment values than those with smaller total
     /// channel capacity.
-    fn payment_amount(
-        &self,
-        destination_capacity: Option<u64>,
-    ) -> Result<u64, PaymentGenerationError> {
+    fn payment_amount(&self, destination_capacity: Option<u64>) -> Result<u64, PaymentGenerationError> {
         let destination_capacity = destination_capacity.ok_or(PaymentGenerationError(
             "destination amount required for payment activity generator".to_string(),
         ))?;
@@ -229,8 +220,7 @@ impl PaymentGenerator for RandomPaymentActivity {
             )));
         }
 
-        let log_normal = LogNormal::new(mu, sigma_square.sqrt())
-            .map_err(|e| PaymentGenerationError(e.to_string()))?;
+        let log_normal = LogNormal::new(mu, sigma_square.sqrt()).map_err(|e| PaymentGenerationError(e.to_string()))?;
 
         let mut rng = rand::thread_rng();
         Ok(log_normal.sample(&mut rng) as u64)
@@ -239,11 +229,7 @@ impl PaymentGenerator for RandomPaymentActivity {
 
 impl Display for RandomPaymentActivity {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let monthly_events = events_per_month(
-            self.source_capacity,
-            self.multiplier,
-            self.expected_payment_amt,
-        );
+        let monthly_events = events_per_month(self.source_capacity, self.multiplier, self.expected_payment_amt);
 
         write!(
             f,
@@ -338,9 +324,7 @@ mod tests {
             // distribution must fail building given the inputs. The former will be thoroughly tested in its own unit test, but we'll test some basic cases
             // here. Mainly, if the `capacity < expected_payment_amnt / 2`, the generator will fail building
             let expected_payment = get_random_int(1, 100);
-            assert!(
-                RandomPaymentActivity::new(2 * expected_payment, expected_payment, 1.0).is_ok()
-            );
+            assert!(RandomPaymentActivity::new(2 * expected_payment, expected_payment, 1.0).is_ok());
             assert!(matches!(
                 RandomPaymentActivity::new(2 * expected_payment, expected_payment + 1, 1.0),
                 Err(RandomActivityError::InsufficientCapacity { .. })
@@ -372,10 +356,7 @@ mod tests {
 
                 let r = RandomPaymentActivity::validate_capacity(capacity, payment_amt);
                 if capacity < 2 * payment_amt {
-                    assert!(matches!(
-                        r,
-                        Err(RandomActivityError::InsufficientCapacity { .. })
-                    ));
+                    assert!(matches!(r, Err(RandomActivityError::InsufficientCapacity { .. })));
                 } else {
                     assert!(r.is_ok());
                 }
@@ -394,10 +375,7 @@ mod tests {
 
             // Wrong cases
             for i in 0..source_capacity {
-                assert!(matches!(
-                    pag.payment_amount(Some(i)),
-                    Err(PaymentGenerationError(..))
-                ))
+                assert!(matches!(pag.payment_amount(Some(i)), Err(PaymentGenerationError(..))))
             }
 
             // All other cases will work. We are not going to exhaustively test for the rest up to u64::MAX, let just pick a bunch
@@ -410,10 +388,7 @@ mod tests {
                 assert!(pag.payment_amount(Some(i)).is_ok())
             }
 
-            assert!(matches!(
-                pag.payment_amount(None),
-                Err(PaymentGenerationError(..))
-            ));
+            assert!(matches!(pag.payment_amount(None), Err(PaymentGenerationError(..))));
         }
     }
 }

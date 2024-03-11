@@ -50,8 +50,5 @@ where
     D: serde::Deserializer<'de>,
 {
     let s = String::deserialize(deserializer)?;
-    Ok(expanduser(s)
-        .map_err(serde::de::Error::custom)?
-        .display()
-        .to_string())
+    Ok(expanduser(s).map_err(serde::de::Error::custom)?.display().to_string())
 }

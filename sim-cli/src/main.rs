@@ -36,9 +36,13 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let sim_path = read_sim_path(opts.data_dir.clone(), opts.sim_file).await?;
-    let SimParams { nodes, activity } =
-        serde_json::from_str(&std::fs::read_to_string(sim_path)?)
-            .map_err(|e| anyhow!("Could not deserialize node connection data or activity description from simulation file (line {}, col {}).", e.line(), e.column()))?;
+    let SimParams { nodes, activity } = serde_json::from_str(&std::fs::read_to_string(sim_path)?).map_err(|e| {
+        anyhow!(
+            "Nodes or activities not parsed from simulation file (line {}, col {}).",
+            e.line(),
+            e.column()
+        )
+    })?;
 
     let mut clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
     let mut pk_node_map = HashMap::new();
@@ -55,11 +59,7 @@ async fn main() -> anyhow::Result<()> {
 
         let node_info = node.lock().await.get_info().clone();
 
-        log::info!(
-            "Connected to {} - Node ID: {}.",
-            node_info.alias,
-            node_info.pubkey
-        );
+        log::info!("Connected to {} - Node ID: {}.", node_info.alias, node_info.pubkey);
 
         if clients.contains_key(&node_info.pubkey) {
             anyhow::bail!(LightningError::ValidationError(format!(
@@ -121,10 +121,7 @@ async fn main() -> anyhow::Result<()> {
                         .await
                         .map_err(|e| {
                             log::debug!("{}", e);
-                            LightningError::ValidationError(format!(
-                                "Destination node unknown or invalid: {}.",
-                                pk,
-                            ))
+                            LightningError::ValidationError(format!("Destination node unknown or invalid: {}.", pk,))
                         })?
                 }
             },
@@ -196,10 +193,7 @@ async fn select_sim_file(data_dir: PathBuf) -> anyhow::Result<PathBuf> {
         .collect::<Vec<_>>();
 
     if sim_files.is_empty() {
-        anyhow::bail!(
-            "no simulation files found in {}.",
-            data_dir.canonicalize()?.display()
-        );
+        anyhow::bail!("no simulation files found in {}.", data_dir.canonicalize()?.display());
     }
 
     let selection = dialoguer::Select::new()
