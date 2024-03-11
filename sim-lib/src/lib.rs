@@ -50,12 +50,18 @@ impl NodeId {
             crate::NodeId::PublicKey(pk) => {
                 if pk != node_id {
                     return Err(LightningError::ValidationError(format!(
-                    "the provided node id does not match the one returned by the backend ({} != {}).", pk, node_id)));
+                        "the provided node id does not match the one returned by the backend ({} != {}).",
+                        pk, node_id
+                    )));
                 }
             },
             crate::NodeId::Alias(a) => {
                 if alias != a {
-                    log::warn!("The provided alias does not match the one returned by the backend ({} != {}).", a, alias)
+                    log::warn!(
+                        "The provided alias does not match the one returned by the backend ({} != {}).",
+                        a,
+                        alias
+                    )
                 }
                 *alias = a.to_string();
             },
@@ -443,7 +449,10 @@ impl Simulation {
                 for node in self.nodes.values() {
                     let node = node.lock().await;
                     if !node.get_info().features.supports_keysend() {
-                        return Err(LightningError::ValidationError(format!("All nodes eligible for random activity generation must support keysend, {} does not", node.get_info())));
+                        return Err(LightningError::ValidationError(format!(
+                            "All nodes eligible for random activity generation must support keysend, {} does not",
+                            node.get_info()
+                        )));
                     }
                 }
             }
