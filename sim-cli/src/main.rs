@@ -185,6 +185,8 @@ async fn main() -> anyhow::Result<()> {
         validated_activities.push(ActivityDefinition {
             source,
             destination,
+            start_secs: act.start_secs,
+            count: act.count,
             interval_secs: act.interval_secs,
             amount_msat: act.amount_msat,
         });

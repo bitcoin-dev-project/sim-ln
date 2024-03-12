@@ -139,6 +139,12 @@ pub struct ActivityParser {
     /// The destination of the payment.
     #[serde(with = "serializers::serde_node_id")]
     pub destination: NodeId,
+    /// The time in the simulation to start the payment
+    #[serde(default)]
+    pub start_secs: u16,
+    /// The number of payments to send over the course of the simulation
+    #[serde(default)]
+    pub count: Option<u64>,
     /// The interval of the event, as in every how many seconds the payment is performed.
     pub interval_secs: u16,
     /// The amount of m_sat to used in this payment.
@@ -153,6 +159,10 @@ pub struct ActivityDefinition {
     pub source: NodeInfo,
     /// The destination of the payment.
     pub destination: NodeInfo,
+    /// The time in the simulation to start the payment
+    pub start_secs: u16,
+    /// The number of payments to send over the course of the simulation
+    pub count: Option<u64>,
     /// The interval of the event, as in every how many seconds the payment is performed.
     pub interval_secs: u16,
     /// The amount of m_sat to used in this payment.
@@ -261,6 +271,12 @@ pub trait DestinationGenerator: Send {
 pub struct PaymentGenerationError(String);
 
 pub trait PaymentGenerator: Display + Send {
+    /// Returns the time that the payments should start
+    fn payment_start(&self) -> Duration;
+
+    /// Returns the number of payments that should be made
+    fn payment_count(&self) -> Option<u64>;
+
     /// Returns the number of seconds that a node should wait until firing its next payment.
     fn next_payment_wait(&self) -> time::Duration;
 
@@ -667,6 +683,8 @@ impl Simulation {
             for description in self.activity.iter() {
                 let activity_generator = DefinedPaymentActivity::new(
                     description.destination.clone(),
+                    Duration::from_secs(description.start_secs.into()),
+                    description.count,
                     Duration::from_secs(description.interval_secs.into()),
                     description.amount_msat,
                 );
@@ -918,8 +936,21 @@ async fn produce_events<N: DestinationGenerator + ?Sized, A: PaymentGenerator + 
     sender: Sender<SimulationEvent>,
     listener: Listener,
 ) -> Result<(), SimulationError> {
+    let mut current_count = 0;
     loop {
-        let wait = node_generator.next_payment_wait();
+        if let Some(c) = node_generator.payment_count() {
+            if c == current_count {
+                log::info!("Payment count has been met: {c} payments. Stopping the activity.");
+                return Ok(());
+            }
+        }
+
+        let wait: Duration = if current_count == 0 {
+            node_generator.payment_start()
+        } else {
+            node_generator.next_payment_wait()
+        };
+
         log::debug!("Next payment for {source} in {:?} seconds.", wait);
 
         select! {
@@ -956,6 +987,7 @@ async fn produce_events<N: DestinationGenerator + ?Sized, A: PaymentGenerator + 
                     return Err(SimulationError::MpscChannelError (format!("Stopped random producer for {amount}: {source} -> {destination}.")));
                 }
 
+                current_count += 1;
             },
         }
     }
