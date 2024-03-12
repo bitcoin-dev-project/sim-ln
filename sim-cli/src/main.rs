@@ -1,4 +1,5 @@
 use bitcoin::secp256k1::PublicKey;
+use sim_lib::{ActivityParser, NodeInfo};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -132,7 +133,48 @@ async fn main() -> anyhow::Result<()> {
         alias_node_map.insert(node_info.alias.clone(), node_info);
     }
 
+    let write_results = if !cli.no_results {
+        Some(WriteResults {
+            results_dir: mkdir(cli.data_dir.join("results")).await?,
+            batch_size: cli.print_batch_size,
+        })
+    } else {
+        None
+    };
+
+    let validated_activities =
+        validate_activities(activity, &clients, &pk_node_map, &alias_node_map).await?;
+
+    let sim = Simulation::new(
+        clients,
+        validated_activities,
+        cli.total_time,
+        cli.expected_pmt_amt,
+        cli.capacity_multiplier,
+        write_results,
+    );
+    let sim2 = sim.clone();
+
+    ctrlc::set_handler(move || {
+        log::info!("Shutting down simulation.");
+        sim2.shutdown();
+    })?;
+
+    sim.run().await?;
+
+    Ok(())
+}
+
+/// Validates a set of defined activities, cross-checking aliases and public keys against the set of clients that
+/// have been configured.
+async fn validate_activities(
+    activity: Vec<ActivityParser>,
+    clients: &HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
+    pk_node_map: &HashMap<PublicKey, NodeInfo>,
+    alias_node_map: &HashMap<String, NodeInfo>,
+) -> Result<Vec<ActivityDefinition>, LightningError> {
     let mut validated_activities = vec![];
+
     // Make all the activities identifiable by PK internally
     for act in activity.into_iter() {
         // We can only map aliases to nodes we control, so if either the source or destination alias
@@ -143,7 +185,7 @@ async fn main() -> anyhow::Result<()> {
         } {
             source.clone()
         } else {
-            anyhow::bail!(LightningError::ValidationError(format!(
+            return Err(LightningError::ValidationError(format!(
                 "activity source {} not found in nodes.",
                 act.source
             )));
@@ -154,7 +196,7 @@ async fn main() -> anyhow::Result<()> {
                 if let Some(info) = alias_node_map.get(a) {
                     info.clone()
                 } else {
-                    anyhow::bail!(LightningError::ValidationError(format!(
+                    return Err(LightningError::ValidationError(format!(
                         "unknown activity destination: {}.",
                         act.destination
                     )));
@@ -190,33 +232,7 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    let write_results = if !cli.no_results {
-        Some(WriteResults {
-            results_dir: mkdir(cli.data_dir.join("results")).await?,
-            batch_size: cli.print_batch_size,
-        })
-    } else {
-        None
-    };
-
-    let sim = Simulation::new(
-        clients,
-        validated_activities,
-        cli.total_time,
-        cli.expected_pmt_amt,
-        cli.capacity_multiplier,
-        write_results,
-    );
-    let sim2 = sim.clone();
-
-    ctrlc::set_handler(move || {
-        log::info!("Shutting down simulation.");
-        sim2.shutdown();
-    })?;
-
-    sim.run().await?;
-
-    Ok(())
+    Ok(validated_activities)
 }
 
 async fn read_sim_path(data_dir: PathBuf, sim_file: PathBuf) -> anyhow::Result<PathBuf> {
