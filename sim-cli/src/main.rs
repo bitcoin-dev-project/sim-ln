@@ -88,10 +88,35 @@ async fn main() -> anyhow::Result<()> {
         .init()
         .unwrap();
 
-    let sim_path = read_sim_path(cli.data_dir.clone(), cli.sim_file).await?;
-    let SimParams { nodes, activity } =
-        serde_json::from_str(&std::fs::read_to_string(sim_path)?)
-            .map_err(|e| anyhow!("Could not deserialize node connection data or activity description from simulation file (line {}, col {}).", e.line(), e.column()))?;
+    let sim = create_simulation(&cli).await?;
+
+    let sim2 = sim.clone();
+    ctrlc::set_handler(move || {
+        log::info!("Shutting down simulation.");
+        sim2.shutdown();
+    })?;
+
+    sim.run().await?;
+    Ok(())
+}
+
+/// Parses the cli options provided and creates a simulation to be run, connecting to lightning nodes and validating
+/// any activity described in the simulation file.
+async fn create_simulation(cli: &Cli) -> Result<Simulation, anyhow::Error> {
+    let sim_path = read_sim_path(cli.data_dir.clone(), cli.sim_file.clone()).await?;
+    let SimParams { nodes, activity } = serde_json::from_str(&std::fs::read_to_string(sim_path)?)
+        .map_err(|e| {
+        anyhow!(
+            "Could not deserialize node connection data or activity description from simulation file (line {}, col {}).",
+            e.line(),
+            e.column()
+        )
+    })?;
+
+    let (clients, pk_node_map, alias_node_map) = connect_nodes(nodes).await?;
+
+    let validated_activities =
+        validate_activities(activity, &clients, &pk_node_map, &alias_node_map).await?;
 
     let write_results = if !cli.no_results {
         Some(WriteResults {
@@ -102,29 +127,14 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    let (clients, pk_node_map, alias_node_map) = connect_nodes(nodes).await?;
-
-    let validated_activities =
-        validate_activities(activity, &clients, &pk_node_map, &alias_node_map).await?;
-
-    let sim = Simulation::new(
+    Ok(Simulation::new(
         clients,
         validated_activities,
         cli.total_time,
         cli.expected_pmt_amt,
         cli.capacity_multiplier,
         write_results,
-    );
-    let sim2 = sim.clone();
-
-    ctrlc::set_handler(move || {
-        log::info!("Shutting down simulation.");
-        sim2.shutdown();
-    })?;
-
-    sim.run().await?;
-
-    Ok(())
+    ))
 }
 
 /// Connects to the set of nodes providing, returning a map of node public keys to LightningNode implementations and
