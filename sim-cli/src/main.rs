@@ -93,46 +93,6 @@ async fn main() -> anyhow::Result<()> {
         serde_json::from_str(&std::fs::read_to_string(sim_path)?)
             .map_err(|e| anyhow!("Could not deserialize node connection data or activity description from simulation file (line {}, col {}).", e.line(), e.column()))?;
 
-    let mut clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
-    let mut pk_node_map = HashMap::new();
-    let mut alias_node_map = HashMap::new();
-
-    for connection in nodes {
-        // TODO: Feels like there should be a better way of doing this without having to Arc<Mutex<T>>> it at this time.
-        // Box sort of works, but we won't know the size of the dyn LightningNode at compile time so the compiler will
-        // scream at us when trying to create the Arc<Mutex>> later on while adding the node to the clients map
-        let node: Arc<Mutex<dyn LightningNode>> = match connection {
-            NodeConnection::LND(c) => Arc::new(Mutex::new(LndNode::new(c).await?)),
-            NodeConnection::CLN(c) => Arc::new(Mutex::new(ClnNode::new(c).await?)),
-        };
-
-        let node_info = node.lock().await.get_info().clone();
-
-        log::info!(
-            "Connected to {} - Node ID: {}.",
-            node_info.alias,
-            node_info.pubkey
-        );
-
-        if clients.contains_key(&node_info.pubkey) {
-            anyhow::bail!(LightningError::ValidationError(format!(
-                "duplicated node: {}.",
-                node_info.pubkey
-            )));
-        }
-
-        if alias_node_map.contains_key(&node_info.alias) {
-            anyhow::bail!(LightningError::ValidationError(format!(
-                "duplicated node: {}.",
-                node_info.alias
-            )));
-        }
-
-        clients.insert(node_info.pubkey, node);
-        pk_node_map.insert(node_info.pubkey, node_info.clone());
-        alias_node_map.insert(node_info.alias.clone(), node_info);
-    }
-
     let write_results = if !cli.no_results {
         Some(WriteResults {
             results_dir: mkdir(cli.data_dir.join("results")).await?,
@@ -141,6 +101,8 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+
+    let (clients, pk_node_map, alias_node_map) = connect_nodes(nodes).await?;
 
     let validated_activities =
         validate_activities(activity, &clients, &pk_node_map, &alias_node_map).await?;
@@ -161,6 +123,73 @@ async fn main() -> anyhow::Result<()> {
     })?;
 
     sim.run().await?;
+
+    Ok(())
+}
+
+/// Connects to the set of nodes providing, returning a map of node public keys to LightningNode implementations and
+/// maps of public key/alias to node information for easy validation.
+async fn connect_nodes(
+    nodes: Vec<NodeConnection>,
+) -> Result<
+    (
+        HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
+        HashMap<PublicKey, NodeInfo>,
+        HashMap<String, NodeInfo>,
+    ),
+    LightningError,
+> {
+    let mut clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
+    let mut pk_node_map = HashMap::new();
+    let mut alias_node_map = HashMap::new();
+
+    for connection in nodes {
+        // TODO: Feels like there should be a better way of doing this without having to Arc<Mutex<T>>> it at this time.
+        // Box sort of works, but we won't know the size of the dyn LightningNode at compile time so the compiler will
+        // scream at us when trying to create the Arc<Mutex>> later on while adding the node to the clients map
+        let node: Arc<Mutex<dyn LightningNode>> = match connection {
+            NodeConnection::LND(c) => Arc::new(Mutex::new(LndNode::new(c).await?)),
+            NodeConnection::CLN(c) => Arc::new(Mutex::new(ClnNode::new(c).await?)),
+        };
+
+        add_node_to_maps(node, &mut clients, &mut pk_node_map, &mut alias_node_map).await?;
+    }
+
+    Ok((clients, pk_node_map, alias_node_map))
+}
+
+/// Adds a lightning node to a client map and tracking maps used to lookup node pubkeys and aliases.
+async fn add_node_to_maps(
+    node: Arc<Mutex<dyn LightningNode>>,
+    clients: &mut HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
+    pk_node_map: &mut HashMap<PublicKey, NodeInfo>,
+    alias_node_map: &mut HashMap<String, NodeInfo>,
+) -> Result<(), LightningError> {
+    let node_info = node.lock().await.get_info().clone();
+
+    log::info!(
+        "Connected to {} - Node ID: {}.",
+        node_info.alias,
+        node_info.pubkey
+    );
+
+    if clients.contains_key(&node_info.pubkey) {
+        return Err(LightningError::ValidationError(format!(
+            "duplicated node: {}.",
+            node_info.pubkey
+        )));
+    }
+
+    if alias_node_map.contains_key(&node_info.alias) {
+        return Err(LightningError::ValidationError(format!(
+            "duplicated node: {}.",
+            node_info.alias
+        )));
+    }
+
+    clients.insert(node_info.pubkey, node);
+    pk_node_map.insert(node_info.pubkey, node_info.clone());
+    alias_node_map.insert(node_info.alias.clone(), node_info);
 
     Ok(())
 }
