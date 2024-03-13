@@ -210,3 +210,103 @@ project.
 
 ## Docker
 If you want to run the cli in a containerized environment, see the docker set up docs [here](./docker/README.md)
+
+## Advanced Usage - Network Simulation
+
+If you are looking to simulate payments are large lightning networks 
+without the resource consumption of setting up a large cluster of nodes,
+you may be interested in dispatching payments on a simulated network.
+
+To run on a simulated network, you will need to provide the desired 
+topology and channel policies for each edge in the graph. The nodes in 
+the network will be inferred from the edges provided. Simulation of 
+payments on both a mocked and real lightning network is not supported, 
+so the `sim_network` field is mutually exclusive with the `nodes` section 
+described above.
+
+The example that follows will execute random payments on a network 
+consisting of three nodes and two channels. You may specify defined 
+activity to execute on the mocked network, though you must refer to 
+nodes by their pubkey (aliases are not yet supported).
+
+```
+{
+  "sim_network": [
+    {
+      "scid": 1,
+      "capacity_msat": 250000,
+      "node_1": {
+        "pubkey": "0344f37d544896dcc95a08ddd9bdfc2b756bf3f91b3f65bce588bd9d0228c24977",
+        "max_htlc_count": 483,
+        "max_in_flight_msat": 250000,
+        "min_htlc_size_msat": 1,
+        "max_htlc_size_msat": 100000,
+        "cltv_expiry_delta": 40,
+        "base_fee": 1000,
+        "fee_rate_prop": 100
+      },
+      "node_2": {
+        "pubkey": "020a30431ce58843eedf8051214dbfadb65b107cc598b8277f14bb9b33c9cd026f",
+        "max_htlc_count": 15,
+        "max_in_flight_msat": 100000,
+        "min_htlc_size_msat": 1,
+        "max_htlc_size_msat": 50000,
+        "cltv_expiry_delta": 80,
+        "base_fee": 2000,
+        "fee_rate_prop": 500
+      }
+    },
+    {
+      "scid": 2,
+      "capacity_msat": 100000,
+      "node_1": {
+        "pubkey": "020a30431ce58843eedf8051214dbfadb65b107cc598b8277f14bb9b33c9cd026f",
+        "max_htlc_count": 200,
+        "max_in_flight_msat": 100000,
+        "min_htlc_size_msat": 1,
+        "max_htlc_size_msat": 25000,
+        "cltv_expiry_delta": 40,
+        "base_fee": 1750,
+        "fee_rate_prop": 100
+      },
+      "node_2": {
+        "pubkey": "035c0b392725bb7298d56bf1bcb23634fc509d86a39a8141d435f9d4d6cd4b12eb",
+        "max_htlc_count": 15,
+        "max_in_flight_msat": 50000,
+        "min_htlc_size_msat": 1,
+        "max_htlc_size_msat": 50000,
+        "cltv_expiry_delta": 80,
+        "base_fee": 3000,
+        "fee_rate_prop": 5
+      }
+    }
+  ]
+}
+```
+
+Note that you need to provide forwarding policies in each direction, 
+because each participant in the channel sets their own forwarding 
+policy and restrictions on their counterparty. 
+
+### Inclusions and Limitations
+
+The simulator will execute payments on the mocked out network as it 
+would for a network of real nodes. See the inclusions and exclusions 
+listed below for a description of the functionality covered by the 
+simulated network.
+
+Included: 
+* Routing Policy Enforcement: mocked channels enforce fee and CLTV 
+  requirements.
+* Channel restrictions: mocked channels abide by the in-flight 
+  count and value limitations set on channel creation.
+* Liquidity checks: HTLCs are only forwarded if the node has sufficient
+  liquidity in the mocked channel.
+
+Not included: 
+* Channel reserve: the required minimum reserve balance is not 
+  subtracted from a node's available balance.
+* On chain fees: the simulation does not subtract on chain fees from 
+  available liquidity.
+* Dust limits: the simulation node not account for restrictions on dust
+  HTLCs.
