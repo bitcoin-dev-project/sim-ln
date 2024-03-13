@@ -180,16 +180,19 @@ async fn add_node_to_maps(
         )));
     }
 
-    if alias_node_map.contains_key(&node_info.alias) {
-        return Err(LightningError::ValidationError(format!(
-            "duplicated node: {}.",
-            node_info.alias
-        )));
+    if !node_info.alias.is_empty() {
+        if alias_node_map.contains_key(&node_info.alias) {
+            return Err(LightningError::ValidationError(format!(
+                "duplicated node: {}.",
+                node_info.alias
+            )));
+        }
+
+        alias_node_map.insert(node_info.alias.clone(), node_info.clone());
     }
 
     clients.insert(node_info.pubkey, node);
-    pk_node_map.insert(node_info.pubkey, node_info.clone());
-    alias_node_map.insert(node_info.alias.clone(), node_info);
+    pk_node_map.insert(node_info.pubkey, node_info);
 
     Ok(())
 }
