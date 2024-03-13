@@ -1046,6 +1046,9 @@ mod tests {
     use bitcoin::secp256k1::PublicKey;
     use lightning::routing::router::Route;
     use mockall::mock;
+    use std::time::Duration;
+    use tokio::sync::oneshot;
+    use tokio::time::timeout;
 
     /// Creates a test channel policy with its maximum HTLC size set to half of the in flight limit of the channel.
     /// The minimum HTLC size is hardcoded to 2 so that we can fall beneath this value with a 1 msat htlc.
@@ -1505,5 +1508,269 @@ mod tests {
             result_2.payment_outcome,
             PaymentOutcome::InsufficientBalance
         ));
+    }
+
+    /// Contains elements required to test dispatch_payment functionality.
+    struct DispatchPaymentTestKit<'a> {
+        graph: SimGraph,
+        nodes: Vec<PublicKey>,
+        routing_graph: NetworkGraph<&'a WrappedLog>,
+        shutdown: triggered::Trigger,
+    }
+
+    impl<'a> DispatchPaymentTestKit<'a> {
+        /// Creates a test graph with a set of nodes connected by three channels, with all the capacity of the channel
+        /// on the side of the first node. For example, if called with capacity = 100 it will set up the following
+        /// network:
+        /// Alice (100) --- (0) Bob (100) --- (0) Carol (100) --- (0) Dave
+        ///
+        /// The nodes pubkeys in this chain of channels are provided in-order for easy access.
+        async fn new(capacity: u64) -> Self {
+            let (shutdown, _listener) = triggered::trigger();
+            let channels = create_simulated_channels(3, capacity);
+
+            // Collect pubkeys in-order, pushing the last node on separately because they don't have an outgoing
+            // channel (they are not node_1 in any channel, only node_2).
+            let mut nodes = channels
+                .iter()
+                .map(|c| c.node_1.policy.pubkey)
+                .collect::<Vec<PublicKey>>();
+            nodes.push(channels.last().unwrap().node_2.policy.pubkey);
+
+            let kit = DispatchPaymentTestKit {
+                graph: SimGraph::new(channels.clone(), shutdown.clone())
+                    .expect("could not create test graph"),
+                nodes,
+                routing_graph: populate_network_graph(channels).unwrap(),
+                shutdown,
+            };
+
+            // Assert that our channel balance is all on the side of the channel opener when we start up.
+            assert_eq!(
+                kit.channel_balances().await,
+                vec![(capacity, 0), (capacity, 0), (capacity, 0)]
+            );
+
+            kit
+        }
+
+        /// Returns a vector of local/remote channel balances for channels in the network.
+        async fn channel_balances(&self) -> Vec<(u64, u64)> {
+            let mut balances = vec![];
+
+            // We can't iterate through our hashmap of channels in-order, so we take advantage of our short channel id
+            // being the index in our chain of channels. This allows us to look up channels in-order.
+            let chan_count = self.graph.channels.lock().await.len();
+
+            for i in 0..chan_count {
+                let chan_lock = self.graph.channels.lock().await;
+                let channel = chan_lock.get(&ShortChannelID::from(i as u64)).unwrap();
+
+                // Take advantage of our test setup, which always makes node_1 the channel initiator to get our
+                // "in order" balances for the chain of channels.
+                balances.push((
+                    channel.node_1.local_balance_msat,
+                    channel.node_2.local_balance_msat,
+                ));
+            }
+
+            balances
+        }
+
+        // Sends a test payment from source to destination and waits for the payment to complete, returning the route
+        // used.
+        async fn send_test_payemnt(
+            &mut self,
+            source: PublicKey,
+            dest: PublicKey,
+            amt: u64,
+        ) -> Route {
+            let route = find_payment_route(&source, dest, amt, &self.routing_graph).unwrap();
+
+            let (sender, receiver) = oneshot::channel();
+            self.graph
+                .dispatch_payment(source, route.clone(), PaymentHash { 0: [1; 32] }, sender);
+
+            // Assert that we receive from the channel or fail.
+            assert!(timeout(Duration::from_millis(10), receiver).await.is_ok());
+
+            route
+        }
+
+        // Sets the balance on the channel to the tuple provided, used to arrange liquidity for testing.
+        async fn set_channel_balance(&mut self, scid: &ShortChannelID, balance: (u64, u64)) {
+            let mut channels_lock = self.graph.channels.lock().await;
+            let channel = channels_lock.get_mut(scid).unwrap();
+
+            channel.node_1.local_balance_msat = balance.0;
+            channel.node_2.local_balance_msat = balance.1;
+
+            assert!(channel.sanity_check().is_ok());
+        }
+    }
+
+    /// Tests dispatch of a successfully settled payment across a test network of simulated channels:
+    /// Alice --- Bob --- Carol --- Dave
+    #[tokio::test]
+    async fn test_successful_dispatch() {
+        let chan_capacity = 500_000_000;
+        let mut test_kit = DispatchPaymentTestKit::new(chan_capacity).await;
+
+        // Send a payment that should succeed from Alice -> Dave.
+        let mut amt = 20_000;
+        let route = test_kit
+            .send_test_payemnt(test_kit.nodes[0], test_kit.nodes[3], amt)
+            .await;
+
+        let route_total = amt + route.get_total_fees();
+        let hop_1_amt = amt + route.paths[0].hops[1].fee_msat;
+
+        // The sending node should have pushed the amount + total fee to the intermediary.
+        let alice_to_bob = (chan_capacity - route_total, route_total);
+        // The middle hop should include fees for the outgoing link.
+        let mut bob_to_carol = (chan_capacity - hop_1_amt, hop_1_amt);
+        // The receiving node should have the payment amount pushed to them.
+        let carol_to_dave = (chan_capacity - amt, amt);
+
+        let mut expected_balances = vec![alice_to_bob, bob_to_carol, carol_to_dave];
+        assert_eq!(test_kit.channel_balances().await, expected_balances);
+
+        // Next, we'll test the case where a payment fails on the first hop. This is an edge case in our state
+        // machine, so we want to specifically hit it. To do this, we'll try to send double the amount that we just
+        // pushed to Dave back to Bob, expecting a failure on Dave's outgoing link due to insufficient liquidity.
+        let _ = test_kit
+            .send_test_payemnt(test_kit.nodes[3], test_kit.nodes[1], amt * 2)
+            .await;
+        assert_eq!(test_kit.channel_balances().await, expected_balances);
+
+        // Now, test a successful single-hop payment from Bob -> Carol. We'll do this twice, so that we can drain all
+        // the liquidity on Bob's side (to prepare for a multi-hop failure test). Our pathfinding only allows us to
+        // use 50% of the channel's capacity, so we need to do two payments.
+        amt = bob_to_carol.0 / 2;
+        let _ = test_kit
+            .send_test_payemnt(test_kit.nodes[1], test_kit.nodes[2], amt)
+            .await;
+
+        bob_to_carol = (bob_to_carol.0 / 2, bob_to_carol.1 + amt);
+        expected_balances = vec![alice_to_bob, bob_to_carol, carol_to_dave];
+        assert_eq!(test_kit.channel_balances().await, expected_balances);
+
+        // When we push this amount a second time, all the liquidity should be moved to Carol's end.
+        let _ = test_kit
+            .send_test_payemnt(test_kit.nodes[1], test_kit.nodes[2], amt)
+            .await;
+        bob_to_carol = (0, chan_capacity);
+        expected_balances = vec![alice_to_bob, bob_to_carol, carol_to_dave];
+        assert_eq!(test_kit.channel_balances().await, expected_balances);
+
+        // Finally, we'll test a multi-hop failure by trying to send from Alice -> Dave. Since Bob's liquidity is
+        // drained, we expect a failure and unchanged balances along the route.
+        let _ = test_kit
+            .send_test_payemnt(test_kit.nodes[0], test_kit.nodes[3], 20_000)
+            .await;
+        assert_eq!(test_kit.channel_balances().await, expected_balances);
+
+        test_kit.shutdown.trigger();
+        test_kit.graph.wait_for_shutdown().await;
+    }
+
+    /// Tests successful dispatch of a multi-hop payment.
+    #[tokio::test]
+    async fn test_successful_multi_hop() {
+        let chan_capacity = 500_000_000;
+        let mut test_kit = DispatchPaymentTestKit::new(chan_capacity).await;
+
+        // Send a payment that should succeed from Alice -> Dave.
+        let amt = 20_000;
+        let route = test_kit
+            .send_test_payemnt(test_kit.nodes[0], test_kit.nodes[3], amt)
+            .await;
+
+        let route_total = amt + route.get_total_fees();
+        let hop_1_amt = amt + route.paths[0].hops[1].fee_msat;
+
+        let expected_balances = vec![
+            // The sending node should have pushed the amount + total fee to the intermediary.
+            (chan_capacity - route_total, route_total),
+            // The middle hop should include fees for the outgoing link.
+            (chan_capacity - hop_1_amt, hop_1_amt),
+            // The receiving node should have the payment amount pushed to them.
+            (chan_capacity - amt, amt),
+        ];
+        assert_eq!(test_kit.channel_balances().await, expected_balances);
+
+        test_kit.shutdown.trigger();
+        test_kit.graph.wait_for_shutdown().await;
+    }
+
+    /// Tests success and failure for single hop payments, which are an edge case in our state machine.
+    #[tokio::test]
+    async fn test_single_hop_payments() {
+        let chan_capacity = 500_000_000;
+        let mut test_kit = DispatchPaymentTestKit::new(chan_capacity).await;
+
+        // Send a single hop payment from Alice -> Bob, it will succeed because Alice has all the liquidity.
+        let amt = 150_000;
+        let _ = test_kit
+            .send_test_payemnt(test_kit.nodes[0], test_kit.nodes[1], amt)
+            .await;
+
+        let expected_balances = vec![
+            (chan_capacity - amt, amt),
+            (chan_capacity, 0),
+            (chan_capacity, 0),
+        ];
+        assert_eq!(test_kit.channel_balances().await, expected_balances);
+
+        // Send a single hop payment from Dave -> Carol that will fail due to lack of liquidity, balances should be
+        // unchanged.
+        let _ = test_kit
+            .send_test_payemnt(test_kit.nodes[3], test_kit.nodes[2], amt)
+            .await;
+
+        assert_eq!(test_kit.channel_balances().await, expected_balances);
+
+        test_kit.shutdown.trigger();
+        test_kit.graph.wait_for_shutdown().await;
+    }
+
+    /// Tests failing back of multi-hop payments at various failure indexes.
+    #[tokio::test]
+    async fn test_multi_hop_faiulre() {
+        let chan_capacity = 500_000_000;
+        let mut test_kit = DispatchPaymentTestKit::new(chan_capacity).await;
+
+        // Drain liquidity between Bob and Carol to force failures on Bob's outgoing linke.
+        test_kit
+            .set_channel_balance(&ShortChannelID::from(1), (0, chan_capacity))
+            .await;
+
+        let mut expected_balances =
+            vec![(chan_capacity, 0), (0, chan_capacity), (chan_capacity, 0)];
+        assert_eq!(test_kit.channel_balances().await, expected_balances);
+
+        // Send a payment from Alice -> Dave which we expect to fail leaving balances unaffected.
+        let amt = 150_000;
+        let _ = test_kit
+            .send_test_payemnt(test_kit.nodes[0], test_kit.nodes[3], amt)
+            .await;
+
+        assert_eq!(test_kit.channel_balances().await, expected_balances);
+
+        // Push liquidity to Dave so that we can send a payment which will fail on Bob's outgoing link, leaving
+        // balances unaffected.
+        expected_balances[2] = (0, chan_capacity);
+        test_kit
+            .set_channel_balance(&ShortChannelID::from(2), (0, chan_capacity))
+            .await;
+
+        let _ = test_kit
+            .send_test_payemnt(test_kit.nodes[3], test_kit.nodes[0], amt)
+            .await;
+
+        assert_eq!(test_kit.channel_balances().await, expected_balances);
+
+        test_kit.shutdown.trigger();
+        test_kit.graph.wait_for_shutdown().await;
     }
 }
