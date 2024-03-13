@@ -587,7 +587,7 @@ impl Simulation {
 
                 let activity_name = match &description.activity_name {
                     Some(name) => name.clone(),
-                    None => index.to_string(),
+                    None => format!("index {}", index),
                 };
 
                 generators.push(ExecutorKit {
@@ -648,7 +648,7 @@ impl Simulation {
             generators.push(ExecutorKit {
                 source_info: node_info.clone(),
                 network_generator: network_generator.clone(),
-                activity_name: "Random activity".to_string(),
+                activity_name: "".to_string(),
                 payment_generator: Box::new(
                     RandomPaymentActivity::new(
                         *capacity,
@@ -810,16 +810,21 @@ async fn produce_events<N: DestinationGenerator + ?Sized, A: PaymentGenerator + 
     shutdown: Trigger,
     listener: Listener,
 ) {
-    log::info!("Started {activity_name} => activity producer for {source}: {node_generator}.");
+    log::info!(
+        "Started {activity_name} activity => activity producer for {source}: {node_generator}."
+    );
 
     loop {
         let wait = node_generator.next_payment_wait();
-        log::debug!("Next payment for {source} in {:?} seconds.", wait);
+        log::debug!(
+            "{activity_name} activity => Next payment for {source} in {:?} seconds.",
+            wait
+        );
 
         select! {
             biased;
             _ = listener.clone() => {
-                log::debug!("Random activity generator for {source} received signal to shut down.");
+                log::debug!("{activity_name} activity => Random activity generator for {source} received signal to shut down.");
                 break;
             },
             // Wait until our time to next payment has elapsed then execute a random amount payment to a random
@@ -833,24 +838,24 @@ async fn produce_events<N: DestinationGenerator + ?Sized, A: PaymentGenerator + 
                 let amount = match node_generator.payment_amount(capacity) {
                     Ok(amt) => {
                         if amt == 0 {
-                            log::debug!("Skipping zero amount payment for {source} -> {destination}.");
+                            log::debug!("{activity_name} activity => Skipping zero amount payment for {source} -> {destination}.");
                             continue;
                         }
                         amt
                     },
                     Err(e) => {
-                        log::error!("Could not get amount for {source} -> {destination}: {e}. Please report a bug!");
+                        log::error!("{activity_name} activity => Could not get amount for {source} -> {destination}: {e}. Please report a bug!");
                         break;
                     },
                 };
 
-                log::debug!("Generated random payment: {source} -> {}: {amount} msat.", destination);
+                log::debug!("{activity_name} activity => Generated random payment: {source} -> {}: {amount} msat.", destination);
 
                 // Send the payment, exiting if we can no longer send to the consumer.
                 let event = SimulationEvent::SendPayment(destination.clone(), amount);
                 if let Err(e) = sender.send(event).await {
                     log::debug!(
-                        "Stopped random producer for {amount}: {source} -> {destination}. Consumer error: {e}.",
+                        "{activity_name} activity => Stopped random producer for {amount}: {source} -> {destination}. Consumer error: {e}.",
                     );
                     break;
                 }
@@ -858,7 +863,7 @@ async fn produce_events<N: DestinationGenerator + ?Sized, A: PaymentGenerator + 
         }
     }
 
-    log::debug!("Stopped random activity producer {source}.");
+    log::debug!("{activity_name} activity => Stopped random activity producer {source}.");
     shutdown.trigger();
 }
 
