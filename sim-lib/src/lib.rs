@@ -401,13 +401,13 @@ impl Simulation {
         expected_payment_msat: u64,
         activity_multiplier: f64,
         write_results: Option<WriteResults>,
+        shutdown: (Trigger, Listener),
     ) -> Self {
-        let (shutdown_trigger, shutdown_listener) = triggered::trigger();
         Self {
             nodes,
             activity,
-            shutdown_trigger,
-            shutdown_listener,
+            shutdown_trigger: shutdown.0,
+            shutdown_listener: shutdown.1,
             total_time: total_time.map(|x| Duration::from_secs(x as u64)),
             expected_payment_msat,
             activity_multiplier,

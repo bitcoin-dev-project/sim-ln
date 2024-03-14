@@ -1762,6 +1762,7 @@ dependencies = [
  "sim-lib",
  "simple_logger",
  "tokio",
+ "triggered",
 ]
 
 [[package]]

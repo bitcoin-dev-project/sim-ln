@@ -127,6 +127,8 @@ async fn create_simulation(cli: &Cli) -> Result<Simulation, anyhow::Error> {
         None
     };
 
+    let (shutdown_trigger, shutdown_listener) = triggered::trigger();
+
     Ok(Simulation::new(
         clients,
         validated_activities,
@@ -134,6 +136,7 @@ async fn create_simulation(cli: &Cli) -> Result<Simulation, anyhow::Error> {
         cli.expected_pmt_amt,
         cli.capacity_multiplier,
         write_results,
+        (shutdown_trigger, shutdown_listener),
     ))
 }
 
