@@ -231,6 +231,24 @@ impl ChannelState {
             .remove(hash)
             .ok_or(ForwardingError::PaymentHashNotFound(*hash))
     }
+
+    // Updates channel state to account for the resolution of an outgoing in-flight HTLC. If the HTLC failed, the
+    // balance is failed back to the channel's local balance. If not, the in-flight balance is settled to the other
+    // node, so there is no operation.
+    fn settle_outgoing_htlc(&mut self, amt: u64, success: bool) {
+        if !success {
+            self.local_balance_msat += amt
+        }
+    }
+
+    // Updates channel state to account for the resolution of an incoming in-flight HTLC. If the HTLC succeeded,
+    // the balance is settled to the channel's local balance. If not, the in-flight balance is failed back to the
+    // other node, so there is no operation.
+    fn settle_incoming_htlc(&mut self, amt: u64, success: bool) {
+        if success {
+            self.local_balance_msat += amt
+        }
+    }
 }
 
 /// Represents a simulated channel, and is responsible for managing addition and removal of HTLCs from the channel and
@@ -348,20 +366,13 @@ impl SimulatedChannel {
         amount_msat: u64,
         success: bool,
     ) -> Result<(), ForwardingError> {
-        // Successful payments push balance to the receiver, failures return it to the sender.
-        let (sender_delta_msat, receiver_delta_msat) = if success {
-            (0, amount_msat)
-        } else {
-            (amount_msat, 0)
-        };
-
         if sending_node == &self.node_1.policy.pubkey {
-            self.node_1.local_balance_msat += sender_delta_msat;
-            self.node_2.local_balance_msat += receiver_delta_msat;
+            self.node_1.settle_outgoing_htlc(amount_msat, success);
+            self.node_2.settle_incoming_htlc(amount_msat, success);
             Ok(())
         } else if sending_node == &self.node_2.policy.pubkey {
-            self.node_2.local_balance_msat += sender_delta_msat;
-            self.node_1.local_balance_msat += receiver_delta_msat;
+            self.node_2.settle_outgoing_htlc(amount_msat, success);
+            self.node_1.settle_incoming_htlc(amount_msat, success);
             Ok(())
         } else {
             Err(ForwardingError::NodeNotFound(*sending_node))
