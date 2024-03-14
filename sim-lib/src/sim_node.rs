@@ -225,26 +225,11 @@ impl ChannelState {
         Ok(())
     }
 
-    /// Removes the HTLC from our set of outgoing in-flight HTLCs, failing if the payment hash is not found. If the
-    /// HTLC failed, the balance is returned to our local liquidity. Note that this function is not responsible for
-    /// reflecting that the balance has moved to the other side of the channel in the success-case, calling code is
-    /// responsible for that.
-    fn remove_outgoing_htlc(
-        &mut self,
-        hash: &PaymentHash,
-        success: bool,
-    ) -> Result<Htlc, ForwardingError> {
-        match self.in_flight.remove(hash) {
-            Some(v) => {
-                // If the HTLC failed, pending balance returns to local balance.
-                if !success {
-                    self.local_balance_msat += v.amount_msat;
-                }
-
-                Ok(v)
-            },
-            None => Err(ForwardingError::PaymentHashNotFound(*hash)),
-        }
+    /// Removes the HTLC from our set of outgoing in-flight HTLCs, failing if the payment hash is not found.
+    fn remove_outgoing_htlc(&mut self, hash: &PaymentHash) -> Result<Htlc, ForwardingError> {
+        self.in_flight
+            .remove(hash)
+            .ok_or(ForwardingError::PaymentHashNotFound(*hash))
     }
 }
 
@@ -349,7 +334,7 @@ impl SimulatedChannel {
     ) -> Result<(), ForwardingError> {
         let htlc = self
             .get_node_mut(sending_node)?
-            .remove_outgoing_htlc(hash, success)?;
+            .remove_outgoing_htlc(hash)?;
         self.settle_htlc(sending_node, htlc.amount_msat, success)?;
         self.sanity_check()
     }
