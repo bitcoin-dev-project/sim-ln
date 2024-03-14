@@ -40,10 +40,7 @@ impl PaymentGenerator for DefinedPaymentActivity {
         self.wait
     }
 
-    fn payment_amount(
-        &self,
-        destination_capacity: Option<u64>,
-    ) -> Result<u64, crate::PaymentGenerationError> {
+    fn payment_amount(&self, destination_capacity: Option<u64>) -> Result<u64, crate::PaymentGenerationError> {
         if destination_capacity.is_some() {
             Err(PaymentGenerationError(
                 "destination amount must not be set for defined activity generator".to_string(),
@@ -69,8 +66,7 @@ mod tests {
         let source = get_random_keypair();
         let payment_amt = 50;
 
-        let generator =
-            DefinedPaymentActivity::new(node.clone(), Duration::from_secs(60), payment_amt);
+        let generator = DefinedPaymentActivity::new(node.clone(), Duration::from_secs(60), payment_amt);
 
         let (dest, dest_capacity) = generator.choose_destination(source.1);
         assert_eq!(node.pubkey, dest.pubkey);

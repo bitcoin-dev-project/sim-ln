@@ -2,9 +2,8 @@ use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
 use cln_grpc::pb::{
-    listpays_pays::ListpaysPaysStatus, node_client::NodeClient, Amount, GetinfoRequest,
-    KeysendRequest, KeysendResponse, ListchannelsRequest, ListnodesRequest, ListpaysRequest,
-    ListpaysResponse,
+    listpays_pays::ListpaysPaysStatus, node_client::NodeClient, Amount, GetinfoRequest, KeysendRequest,
+    KeysendResponse, ListchannelsRequest, ListnodesRequest, ListpaysRequest, ListpaysResponse,
 };
 use lightning::ln::features::NodeFeatures;
 use lightning::ln::PaymentHash;
@@ -16,9 +15,7 @@ use tokio::time::{self, Duration};
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 use triggered::Listener;
 
-use crate::{
-    serializers, LightningError, LightningNode, NodeId, NodeInfo, PaymentOutcome, PaymentResult,
-};
+use crate::{serializers, LightningError, LightningNode, NodeId, NodeInfo, PaymentOutcome, PaymentResult};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ClnConnection {
@@ -43,31 +40,25 @@ impl ClnNode {
         let tls = ClientTlsConfig::new()
             .domain_name("cln")
             .identity(Identity::from_pem(
-                reader(&connection.client_cert).await.map_err(|_| {
-                    LightningError::ConnectionError("Cannot loads client certificate".to_string())
-                })?,
-                reader(&connection.client_key).await.map_err(|_| {
-                    LightningError::ConnectionError("Cannot loads client key".to_string())
-                })?,
+                reader(&connection.client_cert)
+                    .await
+                    .map_err(|_| LightningError::ConnectionError("Cannot loads client certificate".to_string()))?,
+                reader(&connection.client_key)
+                    .await
+                    .map_err(|_| LightningError::ConnectionError("Cannot loads client key".to_string()))?,
             ))
-            .ca_certificate(Certificate::from_pem(
-                reader(&connection.ca_cert).await.map_err(|_| {
-                    LightningError::ConnectionError("Cannot loads CA certificate".to_string())
-                })?,
-            ));
+            .ca_certificate(Certificate::from_pem(reader(&connection.ca_cert).await.map_err(
+                |_| LightningError::ConnectionError("Cannot loads CA certificate".to_string()),
+            )?));
 
         let mut client = NodeClient::new(
             Channel::from_shared(connection.address.to_string())
                 .map_err(|err| LightningError::ConnectionError(err.to_string()))?
                 .tls_config(tls)
-                .map_err(|_| {
-                    LightningError::ConnectionError("Cannot establish tls connection".to_string())
-                })?
+                .map_err(|_| LightningError::ConnectionError("Cannot establish tls connection".to_string()))?
                 .connect()
                 .await
-                .map_err(|_| {
-                    LightningError::ConnectionError("Cannot connect to gRPC server".to_string())
-                })?,
+                .map_err(|_| LightningError::ConnectionError("Cannot connect to gRPC server".to_string()))?,
         );
 
         let (id, mut alias, our_features) = client
@@ -75,16 +66,11 @@ impl ClnNode {
             .await
             .map(|r| {
                 let inner = r.into_inner();
-                (
-                    inner.id,
-                    inner.alias.unwrap_or_default(),
-                    inner.our_features,
-                )
+                (inner.id, inner.alias.unwrap_or_default(), inner.our_features)
             })
             .map_err(|err| LightningError::GetInfoError(err.to_string()))?;
 
-        let pubkey = PublicKey::from_slice(&id)
-            .map_err(|err| LightningError::GetInfoError(err.to_string()))?;
+        let pubkey = PublicKey::from_slice(&id).map_err(|err| LightningError::GetInfoError(err.to_string()))?;
         connection.id.validate(&pubkey, &mut alias)?;
 
         let features = if let Some(features) = our_features {
@@ -148,15 +134,10 @@ impl LightningNode for ClnNode {
             .map_err(|err| LightningError::GetInfoError(err.to_string()))?
             .into_inner();
 
-        Ok(Network::from_core_arg(&info.network)
-            .map_err(|err| LightningError::ValidationError(err.to_string()))?)
+        Ok(Network::from_core_arg(&info.network).map_err(|err| LightningError::ValidationError(err.to_string()))?)
     }
 
-    async fn send_payment(
-        &mut self,
-        dest: PublicKey,
-        amount_msat: u64,
-    ) -> Result<PaymentHash, LightningError> {
+    async fn send_payment(&mut self, dest: PublicKey, amount_msat: u64) -> Result<PaymentHash, LightningError> {
         let KeysendResponse { payment_hash, .. } = self
             .client
             .key_send(KeysendRequest {
@@ -186,11 +167,7 @@ impl LightningNode for ClnNode {
         Ok(PaymentHash(slice))
     }
 
-    async fn track_payment(
-        &mut self,
-        hash: PaymentHash,
-        shutdown: Listener,
-    ) -> Result<PaymentResult, LightningError> {
+    async fn track_payment(&mut self, hash: PaymentHash, shutdown: Listener) -> Result<PaymentResult, LightningError> {
         loop {
             tokio::select! {
                 biased;
@@ -245,19 +222,14 @@ impl LightningNode for ClnNode {
             Ok(NodeInfo {
                 pubkey: *node_id,
                 alias: node.alias.unwrap_or(String::new()),
-                features: node
-                    .features
-                    .clone()
-                    .map_or(NodeFeatures::empty(), |mut f| {
-                        // We need to reverse this given it has the CLN wire encoding which is BE
-                        f.reverse();
-                        NodeFeatures::from_le_bytes(f)
-                    }),
+                features: node.features.clone().map_or(NodeFeatures::empty(), |mut f| {
+                    // We need to reverse this given it has the CLN wire encoding which is BE
+                    f.reverse();
+                    NodeFeatures::from_le_bytes(f)
+                }),
             })
         } else {
-            Err(LightningError::GetNodeInfoError(
-                "Node not found".to_string(),
-            ))
+            Err(LightningError::GetNodeInfoError("Node not found".to_string()))
         }
     }
 

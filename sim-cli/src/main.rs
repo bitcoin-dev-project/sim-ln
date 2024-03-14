@@ -1,96 +1,48 @@
 use bitcoin::secp256k1::PublicKey;
+use flexi_logger::{LogSpecBuilder, Logger};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use anyhow::anyhow;
-use clap::builder::TypedValueParser;
-use clap::Parser;
 use log::LevelFilter;
 use sim_lib::{
-    cln::ClnNode, lnd::LndNode, ActivityDefinition, LightningError, LightningNode, NodeConnection,
-    NodeId, SimParams, Simulation, WriteResults,
+    cln::ClnNode, lnd::LndNode, ActivityDefinition, LightningError, LightningNode, NodeConnection, NodeId, SimParams,
+    Simulation,
 };
-use simple_logger::SimpleLogger;
 
-/// The default directory where the simulation files are stored and where the results will be written to.
-pub const DEFAULT_DATA_DIR: &str = ".";
+mod cli;
+use cli::{merge_cli, DEFAULT_LOG_LEVEL};
 
-/// The default simulation file to be used by the simulator.
-pub const DEFAULT_SIM_FILE: &str = "sim.json";
-
-/// The default expected payment amount for the simulation, around ~$10 at the time of writing.
-pub const EXPECTED_PAYMENT_AMOUNT: u64 = 3_800_000;
-
-/// The number of times over each node in the network sends its total deployed capacity in a calendar month.
-pub const ACTIVITY_MULTIPLIER: f64 = 2.0;
-
-/// Default batch size to flush result data to disk
-const DEFAULT_PRINT_BATCH_SIZE: u32 = 500;
-
-/// Deserializes a f64 as long as it is positive and greater than 0.
-fn deserialize_f64_greater_than_zero(x: String) -> Result<f64, String> {
-    match x.parse::<f64>() {
-        Ok(x) => {
-            if x > 0.0 {
-                Ok(x)
-            } else {
-                Err(format!(
-                    "capacity_multiplier must be higher than 0. {x} received."
-                ))
-            }
-        },
-        Err(e) => Err(e.to_string()),
-    }
-}
-
-#[derive(Parser)]
-#[command(version, about)]
-struct Cli {
-    /// Path to a directory containing simulation files, and where simulation results will be stored
-    #[clap(long, short, default_value = DEFAULT_DATA_DIR)]
-    data_dir: PathBuf,
-    /// Path to the simulation file to be used by the simulator
-    /// This can either be an absolute path, or relative path with respect to data_dir
-    #[clap(long, short, default_value = DEFAULT_SIM_FILE)]
-    sim_file: PathBuf,
-    /// Total time the simulator will be running
-    #[clap(long, short)]
-    total_time: Option<u32>,
-    /// Number of activity results to batch together before printing to csv file [min: 1]
-    #[clap(long, short, default_value_t = DEFAULT_PRINT_BATCH_SIZE, value_parser = clap::builder::RangedU64ValueParser::<u32>::new().range(1..u32::MAX as u64))]
-    print_batch_size: u32,
-    /// Level of verbosity of the messages displayed by the simulator.
-    /// Possible values: [off, error, warn, info, debug, trace]
-    #[clap(long, short, verbatim_doc_comment, default_value = "info")]
-    log_level: LevelFilter,
-    /// Expected payment amount for the random activity generator
-    #[clap(long, short, default_value_t = EXPECTED_PAYMENT_AMOUNT, value_parser = clap::builder::RangedU64ValueParser::<u64>::new().range(1..u64::MAX))]
-    expected_pmt_amt: u64,
-    /// Multiplier of the overall network capacity used by the random activity generator
-    #[clap(long, short, default_value_t = ACTIVITY_MULTIPLIER, value_parser = clap::builder::StringValueParser::new().try_map(deserialize_f64_greater_than_zero))]
-    capacity_multiplier: f64,
-    /// Do not create an output file containing the simulations results
-    #[clap(long, default_value_t = false)]
-    no_results: bool,
-}
+/// Colour pallette of the logger
+const COLOUR_PALETTE: &str = "b1;3;2;4;6";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    let logger_handle = Logger::try_with_str(DEFAULT_LOG_LEVEL)?
+        .set_palette(COLOUR_PALETTE.to_string())
+        .start()?;
 
-    SimpleLogger::new()
-        .with_level(LevelFilter::Warn)
-        .with_module_level("sim_lib", cli.log_level)
-        .with_module_level("sim_cli", cli.log_level)
-        .init()
-        .unwrap();
+    let cli = merge_cli()?;
+    let opts = cli.to_simulation_config();
 
-    let sim_path = read_sim_path(cli.data_dir.clone(), cli.sim_file).await?;
-    let SimParams { nodes, activity } =
-        serde_json::from_str(&std::fs::read_to_string(sim_path)?)
-            .map_err(|e| anyhow!("Could not deserialize node connection data or activity description from simulation file (line {}, col {}).", e.line(), e.column()))?;
+    logger_handle.set_new_spec(
+        LogSpecBuilder::new()
+            .default(LevelFilter::Warn)
+            .module("sim_lib", opts.log_level)
+            .module("sim_cli", opts.log_level)
+            .build(),
+    );
+
+    let sim_path = read_sim_path(opts.data_dir.clone(), opts.sim_file.clone()).await?;
+    let SimParams { nodes, activity } = serde_json::from_str(&std::fs::read_to_string(sim_path)?).map_err(|e| {
+        anyhow!(
+            "Nodes or activities not parsed from simulation file (line {}, col {}).",
+            e.line(),
+            e.column()
+        )
+    })?;
 
     let mut clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
     let mut pk_node_map = HashMap::new();
@@ -107,11 +59,7 @@ async fn main() -> anyhow::Result<()> {
 
         let node_info = node.lock().await.get_info().clone();
 
-        log::info!(
-            "Connected to {} - Node ID: {}.",
-            node_info.alias,
-            node_info.pubkey
-        );
+        log::info!("Connected to {} - Node ID: {}.", node_info.alias, node_info.pubkey);
 
         if clients.contains_key(&node_info.pubkey) {
             anyhow::bail!(LightningError::ValidationError(format!(
@@ -173,10 +121,7 @@ async fn main() -> anyhow::Result<()> {
                         .await
                         .map_err(|e| {
                             log::debug!("{}", e);
-                            LightningError::ValidationError(format!(
-                                "Destination node unknown or invalid: {}.",
-                                pk,
-                            ))
+                            LightningError::ValidationError(format!("Destination node unknown or invalid: {}.", pk,))
                         })?
                 }
             },
@@ -190,23 +135,7 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    let write_results = if !cli.no_results {
-        Some(WriteResults {
-            results_dir: mkdir(cli.data_dir.join("results")).await?,
-            batch_size: cli.print_batch_size,
-        })
-    } else {
-        None
-    };
-
-    let sim = Simulation::new(
-        clients,
-        validated_activities,
-        cli.total_time,
-        cli.expected_pmt_amt,
-        cli.capacity_multiplier,
-        write_results,
-    );
+    let sim = Simulation::new(clients, validated_activities, opts).await?;
     let sim2 = sim.clone();
 
     ctrlc::set_handler(move || {
@@ -248,10 +177,7 @@ async fn select_sim_file(data_dir: PathBuf) -> anyhow::Result<PathBuf> {
         .collect::<Vec<_>>();
 
     if sim_files.is_empty() {
-        anyhow::bail!(
-            "no simulation files found in {}.",
-            data_dir.canonicalize()?.display()
-        );
+        anyhow::bail!("no simulation files found in {}.", data_dir.canonicalize()?.display());
     }
 
     let selection = dialoguer::Select::new()
@@ -264,9 +190,4 @@ async fn select_sim_file(data_dir: PathBuf) -> anyhow::Result<PathBuf> {
         .interact()?;
 
     Ok(data_dir.join(sim_files[selection].clone()))
-}
-
-async fn mkdir(dir: PathBuf) -> anyhow::Result<PathBuf> {
-    tokio::fs::create_dir_all(&dir).await?;
-    Ok(dir)
 }

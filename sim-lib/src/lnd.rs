@@ -1,9 +1,7 @@
 use std::collections::HashSet;
 use std::{collections::HashMap, str::FromStr};
 
-use crate::{
-    serializers, LightningError, LightningNode, NodeId, NodeInfo, PaymentOutcome, PaymentResult,
-};
+use crate::{serializers, LightningError, LightningNode, NodeId, NodeInfo, PaymentOutcome, PaymentResult};
 use async_trait::async_trait;
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::PublicKey;
@@ -58,10 +56,9 @@ fn parse_node_features(features: HashSet<u32>) -> NodeFeatures {
 
 impl LndNode {
     pub async fn new(connection: LndConnection) -> Result<Self, LightningError> {
-        let mut client =
-            tonic_lnd::connect(connection.address, connection.cert, connection.macaroon)
-                .await
-                .map_err(|err| LightningError::ConnectionError(err.to_string()))?;
+        let mut client = tonic_lnd::connect(connection.address, connection.cert, connection.macaroon)
+            .await
+            .map_err(|err| LightningError::ConnectionError(err.to_string()))?;
 
         let GetInfoResponse {
             identity_pubkey,
@@ -75,8 +72,8 @@ impl LndNode {
             .map_err(|err| LightningError::GetInfoError(err.to_string()))?
             .into_inner();
 
-        let pubkey = PublicKey::from_str(&identity_pubkey)
-            .map_err(|err| LightningError::GetInfoError(err.to_string()))?;
+        let pubkey =
+            PublicKey::from_str(&identity_pubkey).map_err(|err| LightningError::GetInfoError(err.to_string()))?;
         connection.id.validate(&pubkey, &mut alias)?;
 
         Ok(Self {
@@ -123,21 +120,13 @@ impl LightningNode for LndNode {
 
         Ok(Network::from_str(match info.chains[0].network.as_str() {
             "mainnet" => "bitcoin",
-            "simnet" => {
-                return Err(LightningError::ValidationError(
-                    "simnet is not supported".to_string(),
-                ))
-            },
+            "simnet" => return Err(LightningError::ValidationError("simnet is not supported".to_string())),
             x => x,
         })
         .map_err(|err| LightningError::ValidationError(err.to_string()))?)
     }
 
-    async fn send_payment(
-        &mut self,
-        dest: PublicKey,
-        amount_msat: u64,
-    ) -> Result<PaymentHash, LightningError> {
+    async fn send_payment(&mut self, dest: PublicKey, amount_msat: u64) -> Result<PaymentHash, LightningError> {
         let amt_msat: i64 = amount_msat
             .try_into()
             .map_err(|_| LightningError::SendPaymentError("Invalid send amount".to_string()))?;
@@ -173,11 +162,7 @@ impl LightningNode for LndNode {
         Ok(payment_hash)
     }
 
-    async fn track_payment(
-        &mut self,
-        hash: PaymentHash,
-        shutdown: Listener,
-    ) -> Result<PaymentResult, LightningError> {
+    async fn track_payment(&mut self, hash: PaymentHash, shutdown: Listener) -> Result<PaymentResult, LightningError> {
         let response = self
             .client
             .router()
@@ -250,9 +235,7 @@ impl LightningNode for LndNode {
                 features: parse_node_features(node_info.features.keys().cloned().collect()),
             })
         } else {
-            Err(LightningError::GetNodeInfoError(
-                "Node not found".to_string(),
-            ))
+            Err(LightningError::GetNodeInfoError("Node not found".to_string()))
         }
     }
 
@@ -260,9 +243,7 @@ impl LightningNode for LndNode {
         let channels = self
             .client
             .lightning()
-            .list_channels(ListChannelsRequest {
-                ..Default::default()
-            })
+            .list_channels(ListChannelsRequest { ..Default::default() })
             .await
             .map_err(|err| LightningError::ListChannelsError(err.to_string()))?
             .into_inner();

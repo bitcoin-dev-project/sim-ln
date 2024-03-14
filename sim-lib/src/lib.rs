@@ -4,6 +4,7 @@ use bitcoin::Network;
 use csv::WriterBuilder;
 use lightning::ln::features::NodeFeatures;
 use lightning::ln::PaymentHash;
+use log::LevelFilter;
 use random_activity::RandomActivityError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -50,12 +51,18 @@ impl NodeId {
             crate::NodeId::PublicKey(pk) => {
                 if pk != node_id {
                     return Err(LightningError::ValidationError(format!(
-                    "the provided node id does not match the one returned by the backend ({} != {}).", pk, node_id)));
+                        "the provided node id does not match the one returned by the backend ({} != {}).",
+                        pk, node_id
+                    )));
                 }
             },
             crate::NodeId::Alias(a) => {
                 if alias != a {
-                    log::warn!("The provided alias does not match the one returned by the backend ({} != {}).", a, alias)
+                    log::warn!(
+                        "The provided alias does not match the one returned by the backend ({} != {}).",
+                        a,
+                        alias
+                    )
                 }
                 *alias = a.to_string();
             },
@@ -218,17 +225,9 @@ pub trait LightningNode: Send {
     /// Get the network this node is running at
     async fn get_network(&mut self) -> Result<Network, LightningError>;
     /// Keysend payment worth `amount_msat` from a source node to the destination node.
-    async fn send_payment(
-        &mut self,
-        dest: PublicKey,
-        amount_msat: u64,
-    ) -> Result<PaymentHash, LightningError>;
+    async fn send_payment(&mut self, dest: PublicKey, amount_msat: u64) -> Result<PaymentHash, LightningError>;
     /// Track a payment with the specified hash.
-    async fn track_payment(
-        &mut self,
-        hash: PaymentHash,
-        shutdown: Listener,
-    ) -> Result<PaymentResult, LightningError>;
+    async fn track_payment(&mut self, hash: PaymentHash, shutdown: Listener) -> Result<PaymentResult, LightningError>;
     /// Gets information on a specific node
     async fn get_node_info(&mut self, node_id: &PublicKey) -> Result<NodeInfo, LightningError>;
     /// Lists all channels, at present only returns a vector of channel capacities in msat because no further
@@ -251,10 +250,7 @@ pub trait PaymentGenerator: Display + Send {
     fn next_payment_wait(&self) -> time::Duration;
 
     /// Returns a payment amount based, with a destination capacity optionally provided to inform the amount picked.
-    fn payment_amount(
-        &self,
-        destination_capacity: Option<u64>,
-    ) -> Result<u64, PaymentGenerationError>;
+    fn payment_amount(&self, destination_capacity: Option<u64>) -> Result<u64, PaymentGenerationError>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -373,6 +369,8 @@ pub struct Simulation {
     activity_multiplier: f64,
     /// Configurations for printing results to CSV. Results are not written if this option is None.
     write_results: Option<WriteResults>,
+    /// Duration measuring how often the summary of results are logged.
+    log_interval: u64,
 }
 
 #[derive(Clone)]
@@ -394,25 +392,35 @@ struct ExecutorKit {
 }
 
 impl Simulation {
-    pub fn new(
+    pub async fn new(
         nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
         activity: Vec<ActivityDefinition>,
-        total_time: Option<u32>,
-        expected_payment_msat: u64,
-        activity_multiplier: f64,
-        write_results: Option<WriteResults>,
-    ) -> Self {
+        config_options: SimulationConfig,
+    ) -> Result<Self, SimulationError> {
         let (shutdown_trigger, shutdown_listener) = triggered::trigger();
-        Self {
+        let write_results = if !config_options.no_results {
+            Some(WriteResults {
+                results_dir: mkdir(config_options.data_dir.join("results")).await.map_err(|e| {
+                    log::error!("Failed to create results directory. Error: {e}.");
+                    SimulationError::FileError
+                })?,
+                batch_size: config_options.print_batch_size,
+            })
+        } else {
+            None
+        };
+
+        Ok(Self {
             nodes,
             activity,
             shutdown_trigger,
             shutdown_listener,
-            total_time: total_time.map(|x| Duration::from_secs(x as u64)),
-            expected_payment_msat,
-            activity_multiplier,
+            total_time: config_options.total_time.map(|x| Duration::from_secs(x as u64)),
+            expected_payment_msat: config_options.expected_pmt_amt,
+            activity_multiplier: config_options.capacity_multiplier,
             write_results,
-        }
+            log_interval: config_options.log_interval,
+        })
     }
 
     /// validate_activity validates that the user-provided activity description is achievable for the network that
@@ -429,7 +437,10 @@ impl Simulation {
                 for node in self.nodes.values() {
                     let node = node.lock().await;
                     if !node.get_info().features.supports_keysend() {
-                        return Err(LightningError::ValidationError(format!("All nodes eligible for random activity generation must support keysend, {} does not", node.get_info())));
+                        return Err(LightningError::ValidationError(format!(
+                            "All nodes eligible for random activity generation must support keysend, {} does not",
+                            node.get_info()
+                        )));
                     }
                 }
             }
@@ -462,8 +473,7 @@ impl Simulation {
     async fn validate_node_network(&self) -> Result<(), LightningError> {
         if self.nodes.is_empty() {
             return Err(LightningError::ValidationError(
-                "we don't control any nodes. Specify at least one node in your config file"
-                    .to_string(),
+                "we don't control any nodes. Specify at least one node in your config file".to_string(),
             ));
         }
         let mut running_network = Option::None;
@@ -471,9 +481,7 @@ impl Simulation {
         for node in self.nodes.values() {
             let network = node.lock().await.get_network().await?;
             if network == Network::Bitcoin {
-                return Err(LightningError::ValidationError(
-                    "mainnet is not supported".to_string(),
-                ));
+                return Err(LightningError::ValidationError("mainnet is not supported".to_string()));
             }
 
             running_network = running_network.take().or(Some(network));
@@ -537,10 +545,7 @@ impl Simulation {
 
             tasks.spawn(async move {
                 if time::timeout(total_time, l).await.is_err() {
-                    log::info!(
-                        "Simulation run for {}s. Shutting down.",
-                        total_time.as_secs()
-                    );
+                    log::info!("Simulation run for {}s. Shutting down.", total_time.as_secs());
                     t.trigger()
                 }
             });
@@ -566,11 +571,7 @@ impl Simulation {
 
     /// run_data_collection starts the tasks required for the simulation to report of the results of the activity that
     /// it generates. The simulation should report outputs via the receiver that is passed in.
-    fn run_data_collection(
-        &self,
-        output_receiver: Receiver<SimulationOutput>,
-        tasks: &mut JoinSet<()>,
-    ) {
+    fn run_data_collection(&self, output_receiver: Receiver<SimulationOutput>, tasks: &mut JoinSet<()>) {
         let listener = self.shutdown_listener.clone();
         log::debug!("Setting up simulator data collection.");
 
@@ -589,7 +590,7 @@ impl Simulation {
         tasks.spawn(run_results_logger(
             listener.clone(),
             result_logger.clone(),
-            Duration::from_secs(60),
+            Duration::from_secs(self.log_interval),
         ));
 
         tasks.spawn(consume_simulation_results(
@@ -643,9 +644,7 @@ impl Simulation {
         for (pk, node) in self.nodes.iter() {
             let chan_capacity = node.lock().await.list_channels().await?.iter().sum::<u64>();
 
-            if let Err(e) =
-                RandomPaymentActivity::validate_capacity(chan_capacity, self.expected_payment_msat)
-            {
+            if let Err(e) = RandomPaymentActivity::validate_capacity(chan_capacity, self.expected_payment_msat) {
                 log::warn!("Node: {} not eligible for activity generation: {e}.", *pk);
                 continue;
             }
@@ -662,22 +661,15 @@ impl Simulation {
                 .map_err(SimulationError::RandomActivityError)?,
         ));
 
-        log::info!(
-            "Created network generator: {}.",
-            network_generator.lock().await
-        );
+        log::info!("Created network generator: {}.", network_generator.lock().await);
 
         for (node_info, capacity) in active_nodes.values() {
             generators.push(ExecutorKit {
                 source_info: node_info.clone(),
                 network_generator: network_generator.clone(),
                 payment_generator: Box::new(
-                    RandomPaymentActivity::new(
-                        *capacity,
-                        self.expected_payment_msat,
-                        self.activity_multiplier,
-                    )
-                    .map_err(SimulationError::RandomActivityError)?,
+                    RandomPaymentActivity::new(*capacity, self.expected_payment_msat, self.activity_multiplier)
+                        .map_err(SimulationError::RandomActivityError)?,
                 ),
             });
         }
@@ -695,11 +687,7 @@ impl Simulation {
     ) -> HashMap<PublicKey, Sender<SimulationEvent>> {
         let mut channels = HashMap::new();
 
-        for (id, node) in self
-            .nodes
-            .iter()
-            .filter(|(id, _)| consuming_nodes.contains(id))
-        {
+        for (id, node) in self.nodes.iter().filter(|(id, _)| consuming_nodes.contains(id)) {
             // For each node we have execution on, we'll create a sender and receiver channel to produce and consumer
             // events and insert producer in our tracking map. We do not buffer channels as we expect events to clear
             // quickly.
@@ -728,12 +716,12 @@ impl Simulation {
         tasks: &mut JoinSet<()>,
     ) -> Result<(), SimulationError> {
         for executor in executors {
-            let sender = producer_channels.get(&executor.source_info.pubkey).ok_or(
-                SimulationError::RandomActivityError(RandomActivityError::ValueError(format!(
-                    "Activity producer for: {} not found.",
-                    executor.source_info.pubkey,
-                ))),
-            )?;
+            let sender =
+                producer_channels
+                    .get(&executor.source_info.pubkey)
+                    .ok_or(SimulationError::RandomActivityError(RandomActivityError::ValueError(
+                        format!("Activity producer for: {} not found.", executor.source_info.pubkey,),
+                    )))?;
 
             tasks.spawn(produce_events(
                 executor.source_info,
@@ -788,11 +776,7 @@ async fn consume_events(
                         SimulationOutput::SendPaymentSuccess(payment)
                     },
                     Err(e) => {
-                        log::error!(
-                            "Error while sending payment {} -> {}.",
-                            node.get_info(),
-                            dest
-                        );
+                        log::error!("Error while sending payment {} -> {}.", node.get_info(), dest);
 
                         match e {
                             LightningError::PermanentError(s) => {
@@ -800,10 +784,7 @@ async fn consume_events(
                                 shutdown.trigger();
                                 break;
                             },
-                            _ => SimulationOutput::SendPaymentFailure(
-                                payment,
-                                PaymentResult::not_dispatched(),
-                            ),
+                            _ => SimulationOutput::SendPaymentFailure(payment, PaymentResult::not_dispatched()),
                         }
                     },
                 };
@@ -957,9 +938,7 @@ struct PaymentResultLogger {
 
 impl PaymentResultLogger {
     fn new() -> Self {
-        PaymentResultLogger {
-            ..Default::default()
-        }
+        PaymentResultLogger { ..Default::default() }
     }
 
     fn report_result(&mut self, details: &Payment, result: &PaymentResult) {
@@ -985,11 +964,7 @@ impl Display for PaymentResultLogger {
     }
 }
 
-async fn run_results_logger(
-    listener: Listener,
-    logger: Arc<Mutex<PaymentResultLogger>>,
-    interval: Duration,
-) {
+async fn run_results_logger(listener: Listener, logger: Arc<Mutex<PaymentResultLogger>>, interval: Duration) {
     log::debug!("Results logger started.");
     log::info!("Summary of results will be reported every {:?}.", interval);
 
@@ -1098,9 +1073,7 @@ async fn track_payment_result(
         },
         // None means that the payment was not dispatched, so we cannot track it.
         None => {
-            log::error!(
-                "We cannot track a payment that has not been dispatched. Missing payment hash."
-            );
+            log::error!("We cannot track a payment that has not been dispatched. Missing payment hash.");
             PaymentResult::not_dispatched()
         },
     };
@@ -1110,4 +1083,23 @@ async fn track_payment_result(
     }
 
     log::trace!("Payment result tracker exiting.");
+}
+
+/// Configuration options for simulation
+#[derive(Debug)]
+pub struct SimulationConfig {
+    pub log_level: LevelFilter,
+    pub total_time: Option<u32>,
+    pub expected_pmt_amt: u64,
+    pub capacity_multiplier: f64,
+    pub no_results: bool,
+    pub print_batch_size: u32,
+    pub data_dir: PathBuf,
+    pub sim_file: PathBuf,
+    pub log_interval: u64,
+}
+
+async fn mkdir(dir: PathBuf) -> anyhow::Result<PathBuf> {
+    tokio::fs::create_dir_all(&dir).await?;
+    Ok(dir)
 }
