@@ -1,4 +1,6 @@
 use bitcoin::secp256k1::PublicKey;
+use sim_lib::sim_node::{ln_node_from_graph, populate_network_graph, SimGraph, SimulatedChannel};
+use sim_lib::{ActivityParser, NetworkParser, NodeInfo, SimulationError};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,6 +15,7 @@ use sim_lib::{
     NodeId, SimParams, Simulation, WriteResults,
 };
 use simple_logger::SimpleLogger;
+use triggered::Trigger;
 
 /// The default directory where the simulation files are stored and where the results will be written to.
 pub const DEFAULT_DATA_DIR: &str = ".";
@@ -87,11 +90,149 @@ async fn main() -> anyhow::Result<()> {
         .init()
         .unwrap();
 
-    let sim_path = read_sim_path(cli.data_dir.clone(), cli.sim_file).await?;
-    let SimParams { nodes, activity } =
-        serde_json::from_str(&std::fs::read_to_string(sim_path)?)
-            .map_err(|e| anyhow!("Could not deserialize node connection data or activity description from simulation file (line {}, col {}).", e.line(), e.column()))?;
+    let (sim, sim_network) = create_simulation(&cli).await?;
 
+    let sim2 = sim.clone();
+    ctrlc::set_handler(move || {
+        log::info!("Shutting down simulation.");
+        sim2.shutdown();
+    })?;
+
+    sim.run().await?;
+
+    if let Some(network) = sim_network {
+        network.lock().await.wait_for_shutdown().await;
+    }
+
+    Ok(())
+}
+
+/// Parses the cli options provided and creates a simulation to be run, connecting to lightning nodes and validating
+/// any activity described in the simulation file. If the simulation is also running in simulated network mode, it
+/// will return the simulated graph as well.
+async fn create_simulation(
+    cli: &Cli,
+) -> Result<(Simulation, Option<Arc<Mutex<SimGraph>>>), anyhow::Error> {
+    let sim_path = read_sim_path(cli.data_dir.clone(), cli.sim_file.clone()).await?;
+    let SimParams { nodes, sim_network: sim_nodes, activity } = serde_json::from_str(&std::fs::read_to_string(sim_path)?)
+        .map_err(|e| {
+        anyhow!(
+            "Could not deserialize node connection data or activity description from simulation file (line {}, col {}, err: {}).",
+            e.line(),
+            e.column(),
+            e.to_string()
+        )
+    })?;
+
+    let (shutdown_trigger, shutdown_listener) = triggered::trigger();
+
+    // Validate that nodes and sim_graph are exclusively set, and setup node clients from the populated field.
+    let (clients, pk_node_map, alias_node_map, graph) = if !nodes.is_empty()
+        && !sim_nodes.is_empty()
+    {
+        return Err(anyhow!(
+            "Simulation file cannot contain {} nodes and {} sim_graph entries, simulation can only be run with real 
+            or simulated nodes not both.", nodes.len(), sim_nodes.len(),
+        ));
+    } else if nodes.is_empty() && sim_nodes.is_empty() {
+        return Err(anyhow!(
+                "Simulation file must contain nodes to run with real lightning nodes or sim_graph to run with 
+                simulated nodes",
+        ));
+    } else if !nodes.is_empty() {
+        let (clients, pk, alias) = connect_nodes(nodes).await?;
+        (clients, pk, alias, None)
+    } else {
+        let (clients, pk, alias, graph) =
+            create_simulated_nodes(sim_nodes, shutdown_trigger.clone()).await?;
+        (clients, pk, alias, Some(graph))
+    };
+
+    let validated_activities =
+        validate_activities(activity, &clients, &pk_node_map, &alias_node_map).await?;
+
+    let write_results = if !cli.no_results {
+        Some(WriteResults {
+            results_dir: mkdir(cli.data_dir.join("results")).await?,
+            batch_size: cli.print_batch_size,
+        })
+    } else {
+        None
+    };
+
+    Ok((
+        Simulation::new(
+            clients,
+            validated_activities,
+            cli.total_time,
+            cli.expected_pmt_amt,
+            cli.capacity_multiplier,
+            write_results,
+            (shutdown_trigger, shutdown_listener),
+        ),
+        graph,
+    ))
+}
+
+/// Creates a set of simulated nodes from the channel set provided. Also responsible for creating the simulated
+/// graph that will be responsible for managing simulation of lightning nodes.
+async fn create_simulated_nodes(
+    nodes: Vec<NetworkParser>,
+    trigger: Trigger,
+) -> Result<
+    (
+        HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
+        HashMap<PublicKey, NodeInfo>,
+        HashMap<String, NodeInfo>,
+        Arc<Mutex<SimGraph>>,
+    ),
+    SimulationError,
+> {
+    // Convert nodes representation for parsing to SimulatedChannel.
+    let sim_channels = nodes
+        .into_iter()
+        .map(SimulatedChannel::from)
+        .collect::<Vec<SimulatedChannel>>();
+
+    // Setup a simulation graph that will handle propagation of payments through the network.
+    let simulation_graph = Arc::new(Mutex::new(
+        SimGraph::new(sim_channels.clone(), trigger)
+            .map_err(|e| SimulationError::SimulatedNetworkError(format!("{:?}", e)))?,
+    ));
+
+    // Copy all of our simulated channels into a read-only routing graph, allowing us to pathfind for individual
+    // payments without locking the simulation graph (this is a duplication of our channels, but the performance
+    // tradeoff is worthwhile for concurrent pathfinding).
+    let routing_graph = Arc::new(
+        populate_network_graph(sim_channels)
+            .map_err(|e| SimulationError::SimulatedNetworkError(format!("{:?}", e)))?,
+    );
+
+    let nodes = ln_node_from_graph(simulation_graph.clone(), routing_graph).await;
+
+    let mut clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
+    let mut pk_node_map = HashMap::new();
+    let mut alias_node_map = HashMap::new();
+
+    for (_, node) in nodes.into_iter() {
+        add_node_to_maps(node, &mut clients, &mut pk_node_map, &mut alias_node_map).await?;
+    }
+
+    Ok((clients, pk_node_map, alias_node_map, simulation_graph))
+}
+
+/// Connects to the set of nodes providing, returning a map of node public keys to LightningNode implementations and
+/// maps of public key/alias to node information for easy validation.
+async fn connect_nodes(
+    nodes: Vec<NodeConnection>,
+) -> Result<
+    (
+        HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
+        HashMap<PublicKey, NodeInfo>,
+        HashMap<String, NodeInfo>,
+    ),
+    LightningError,
+> {
     let mut clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
     let mut pk_node_map = HashMap::new();
     let mut alias_node_map = HashMap::new();
@@ -105,34 +246,61 @@ async fn main() -> anyhow::Result<()> {
             NodeConnection::CLN(c) => Arc::new(Mutex::new(ClnNode::new(c).await?)),
         };
 
-        let node_info = node.lock().await.get_info().clone();
+        add_node_to_maps(node, &mut clients, &mut pk_node_map, &mut alias_node_map).await?;
+    }
 
-        log::info!(
-            "Connected to {} - Node ID: {}.",
-            node_info.alias,
+    Ok((clients, pk_node_map, alias_node_map))
+}
+
+/// Adds a lightning node to a client map and tracking maps used to lookup node pubkeys and aliases.
+async fn add_node_to_maps(
+    node: Arc<Mutex<dyn LightningNode>>,
+    clients: &mut HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
+    pk_node_map: &mut HashMap<PublicKey, NodeInfo>,
+    alias_node_map: &mut HashMap<String, NodeInfo>,
+) -> Result<(), LightningError> {
+    let node_info = node.lock().await.get_info().clone();
+
+    log::info!(
+        "Connected to {} - Node ID: {}.",
+        node_info.alias,
+        node_info.pubkey
+    );
+
+    if clients.contains_key(&node_info.pubkey) {
+        return Err(LightningError::ValidationError(format!(
+            "duplicated node: {}.",
             node_info.pubkey
-        );
+        )));
+    }
 
-        if clients.contains_key(&node_info.pubkey) {
-            anyhow::bail!(LightningError::ValidationError(format!(
-                "duplicated node: {}.",
-                node_info.pubkey
-            )));
-        }
-
+    if !node_info.alias.is_empty() {
         if alias_node_map.contains_key(&node_info.alias) {
-            anyhow::bail!(LightningError::ValidationError(format!(
+            return Err(LightningError::ValidationError(format!(
                 "duplicated node: {}.",
                 node_info.alias
             )));
         }
 
-        clients.insert(node_info.pubkey, node);
-        pk_node_map.insert(node_info.pubkey, node_info.clone());
-        alias_node_map.insert(node_info.alias.clone(), node_info);
+        alias_node_map.insert(node_info.alias.clone(), node_info.clone());
     }
 
+    clients.insert(node_info.pubkey, node);
+    pk_node_map.insert(node_info.pubkey, node_info);
+
+    Ok(())
+}
+
+/// Validates a set of defined activities, cross-checking aliases and public keys against the set of clients that
+/// have been configured.
+async fn validate_activities(
+    activity: Vec<ActivityParser>,
+    clients: &HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
+    pk_node_map: &HashMap<PublicKey, NodeInfo>,
+    alias_node_map: &HashMap<String, NodeInfo>,
+) -> Result<Vec<ActivityDefinition>, LightningError> {
     let mut validated_activities = vec![];
+
     // Make all the activities identifiable by PK internally
     for act in activity.into_iter() {
         // We can only map aliases to nodes we control, so if either the source or destination alias
@@ -143,7 +311,7 @@ async fn main() -> anyhow::Result<()> {
         } {
             source.clone()
         } else {
-            anyhow::bail!(LightningError::ValidationError(format!(
+            return Err(LightningError::ValidationError(format!(
                 "activity source {} not found in nodes.",
                 act.source
             )));
@@ -154,7 +322,7 @@ async fn main() -> anyhow::Result<()> {
                 if let Some(info) = alias_node_map.get(a) {
                     info.clone()
                 } else {
-                    anyhow::bail!(LightningError::ValidationError(format!(
+                    return Err(LightningError::ValidationError(format!(
                         "unknown activity destination: {}.",
                         act.destination
                     )));
@@ -190,33 +358,7 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    let write_results = if !cli.no_results {
-        Some(WriteResults {
-            results_dir: mkdir(cli.data_dir.join("results")).await?,
-            batch_size: cli.print_batch_size,
-        })
-    } else {
-        None
-    };
-
-    let sim = Simulation::new(
-        clients,
-        validated_activities,
-        cli.total_time,
-        cli.expected_pmt_amt,
-        cli.capacity_multiplier,
-        write_results,
-    );
-    let sim2 = sim.clone();
-
-    ctrlc::set_handler(move || {
-        log::info!("Shutting down simulation.");
-        sim2.shutdown();
-    })?;
-
-    sim.run().await?;
-
-    Ok(())
+    Ok(validated_activities)
 }
 
 async fn read_sim_path(data_dir: PathBuf, sim_file: PathBuf) -> anyhow::Result<PathBuf> {

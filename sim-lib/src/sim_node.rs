@@ -1,5 +1,6 @@
 use crate::{
-    LightningError, LightningNode, NodeInfo, PaymentOutcome, PaymentResult, SimulationError,
+    LightningError, LightningNode, NetworkParser, NodeInfo, PaymentOutcome, PaymentResult,
+    SimulationError,
 };
 use async_trait::async_trait;
 use bitcoin::constants::ChainHash;
@@ -7,6 +8,7 @@ use bitcoin::hashes::{sha256::Hash as Sha256, Hash};
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Network, ScriptBuf, TxOut};
 use lightning::ln::chan_utils::make_funding_redeemscript;
+use serde::{Deserialize, Serialize};
 use std::collections::{hash_map::Entry, HashMap};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -110,7 +112,7 @@ struct Htlc {
 /// Represents one node in the channel's forwarding policy and restrictions. Note that this doesn't directly map to
 /// a single concept in the protocol, a few things have been combined for the sake of simplicity. Used to manage the
 /// lightning "state machine" and check that HTLCs are added in accordance of the advertised policy.
-#[derive(Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelPolicy {
     pub pubkey: PublicKey,
     pub max_htlc_count: u64,
@@ -120,6 +122,25 @@ pub struct ChannelPolicy {
     pub cltv_expiry_delta: u32,
     pub base_fee: u64,
     pub fee_rate_prop: u64,
+}
+
+impl ChannelPolicy {
+    /// Validates that the channel policy is acceptable for the size of the channel.
+    fn validate(&self, capacity_msat: u64) -> Result<(), SimulationError> {
+        if self.max_in_flight_msat > capacity_msat {
+            return Err(SimulationError::SimulatedNetworkError(format!(
+                "max_in_flight_msat {} > capacity {}",
+                self.max_in_flight_msat, capacity_msat
+            )));
+        }
+        if self.max_htlc_size_msat > capacity_msat {
+            return Err(SimulationError::SimulatedNetworkError(format!(
+                "max_htlc_size_msat {} > capacity {}",
+                self.max_htlc_size_msat, capacity_msat
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// Fails with the forwarding error provided if the value provided fails its inequality check.
@@ -291,6 +312,21 @@ impl SimulatedChannel {
         }
     }
 
+    /// Validates that a simulated channel has distinct node pairs and valid routing policies.
+    fn validate(&self) -> Result<(), SimulationError> {
+        if self.node_1.policy.pubkey == self.node_2.policy.pubkey {
+            return Err(SimulationError::SimulatedNetworkError(format!(
+                "Channel should have distinct node pubkeys, got: {} for both nodes.",
+                self.node_1.policy.pubkey
+            )));
+        }
+
+        self.node_1.policy.validate(self.capacity_msat)?;
+        self.node_2.policy.validate(self.capacity_msat)?;
+
+        Ok(())
+    }
+
     fn get_node_mut(&mut self, pubkey: &PublicKey) -> Result<&mut ChannelState, ForwardingError> {
         if pubkey == &self.node_1.policy.pubkey {
             Ok(&mut self.node_1)
@@ -389,6 +425,17 @@ impl SimulatedChannel {
     ) -> Result<(), ForwardingError> {
         self.get_node(forwarding_node)?
             .check_htlc_forward(cltv_delta, amount_msat, fee_msat)
+    }
+}
+
+impl From<NetworkParser> for SimulatedChannel {
+    fn from(network_parser: NetworkParser) -> Self {
+        SimulatedChannel::new(
+            network_parser.capacity_msat,
+            network_parser.scid,
+            network_parser.node_1,
+            network_parser.node_2,
+        )
     }
 }
 
@@ -617,13 +664,25 @@ impl SimGraph {
     pub fn new(
         graph_channels: Vec<SimulatedChannel>,
         shutdown_trigger: Trigger,
-    ) -> Result<Self, LdkError> {
+    ) -> Result<Self, SimulationError> {
         let mut nodes: HashMap<PublicKey, Vec<u64>> = HashMap::new();
         let mut channels = HashMap::new();
 
         for channel in graph_channels.iter() {
-            channels.insert(channel.short_channel_id, channel.clone());
+            // Assert that the channel is valid and that its short channel ID is unique within the simulation, required
+            // because we use scid to identify the channel.
+            channel.validate()?;
+            match channels.entry(channel.short_channel_id) {
+                Entry::Occupied(_) => {
+                    return Err(SimulationError::SimulatedNetworkError(format!(
+                        "Simulated short channel ID should be unique: {} duplicated",
+                        channel.short_channel_id
+                    )))
+                },
+                Entry::Vacant(v) => v.insert(channel.clone()),
+            };
 
+            // It's okay to have duplicate pubkeys because one node can have many channels.
             for pubkey in [channel.node_1.policy.pubkey, channel.node_2.policy.pubkey] {
                 match nodes.entry(pubkey) {
                     Entry::Occupied(o) => o.into_mut().push(channel.capacity_msat),
