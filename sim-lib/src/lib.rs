@@ -137,6 +137,8 @@ pub struct ActivityParser {
     pub interval_secs: u16,
     /// The amount of m_sat to used in this payment.
     pub amount_msat: u64,
+    /// An optional name for the activity.
+    pub activity_name: Option<String>,
 }
 
 /// Data structure used internally by the simulator. Both source and destination are represented as [PublicKey] here.
@@ -151,6 +153,8 @@ pub struct ActivityDefinition {
     pub interval_secs: u16,
     /// The amount of m_sat to used in this payment.
     pub amount_msat: u64,
+    /// An optional name for the activity.
+    pub activity_name: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -391,6 +395,7 @@ struct ExecutorKit {
     /// See [NetworkGraphView] for details.
     network_generator: Arc<Mutex<dyn DestinationGenerator>>,
     payment_generator: Box<dyn PaymentGenerator>,
+    activity_name: String,
 }
 
 impl Simulation {
@@ -607,12 +612,17 @@ impl Simulation {
         // Note: when we allow configuring both defined and random activity, this will no longer be an if/else, we'll
         // just populate with each type as configured.
         if !self.activity.is_empty() {
-            for description in self.activity.iter() {
+            for (index, description) in self.activity.iter().enumerate() {
                 let activity_generator = DefinedPaymentActivity::new(
                     description.destination.clone(),
                     Duration::from_secs(description.interval_secs.into()),
                     description.amount_msat,
                 );
+
+                let activity_name = match &description.activity_name {
+                    Some(name) => name.clone(),
+                    None => format!("index {}", index),
+                };
 
                 generators.push(ExecutorKit {
                     source_info: description.source.clone(),
@@ -620,6 +630,7 @@ impl Simulation {
                     // a single struct which we just cheaply clone.
                     network_generator: Arc::new(Mutex::new(activity_generator.clone())),
                     payment_generator: Box::new(activity_generator),
+                    activity_name,
                 });
             }
         } else {
@@ -671,6 +682,7 @@ impl Simulation {
             generators.push(ExecutorKit {
                 source_info: node_info.clone(),
                 network_generator: network_generator.clone(),
+                activity_name: "".to_string(),
                 payment_generator: Box::new(
                     RandomPaymentActivity::new(
                         *capacity,
@@ -737,6 +749,7 @@ impl Simulation {
 
             tasks.spawn(produce_events(
                 executor.source_info,
+                executor.activity_name,
                 executor.network_generator,
                 executor.payment_generator,
                 sender.clone(),
@@ -824,22 +837,28 @@ async fn consume_events(
 /// exit if other threads signal that they have errored out.
 async fn produce_events<N: DestinationGenerator + ?Sized, A: PaymentGenerator + ?Sized>(
     source: NodeInfo,
+    activity_name: String,
     network_generator: Arc<Mutex<N>>,
     node_generator: Box<A>,
     sender: Sender<SimulationEvent>,
     shutdown: Trigger,
     listener: Listener,
 ) {
-    log::info!("Started activity producer for {source}: {node_generator}.");
+    log::info!(
+        "Started {activity_name} activity => activity producer for {source}: {node_generator}."
+    );
 
     loop {
         let wait = node_generator.next_payment_wait();
-        log::debug!("Next payment for {source} in {:?} seconds.", wait);
+        log::debug!(
+            "{activity_name} activity => Next payment for {source} in {:?} seconds.",
+            wait
+        );
 
         select! {
             biased;
             _ = listener.clone() => {
-                log::debug!("Random activity generator for {source} received signal to shut down.");
+                log::debug!("{activity_name} activity => Random activity generator for {source} received signal to shut down.");
                 break;
             },
             // Wait until our time to next payment has elapsed then execute a random amount payment to a random
@@ -853,24 +872,24 @@ async fn produce_events<N: DestinationGenerator + ?Sized, A: PaymentGenerator + 
                 let amount = match node_generator.payment_amount(capacity) {
                     Ok(amt) => {
                         if amt == 0 {
-                            log::debug!("Skipping zero amount payment for {source} -> {destination}.");
+                            log::debug!("{activity_name} activity => Skipping zero amount payment for {source} -> {destination}.");
                             continue;
                         }
                         amt
                     },
                     Err(e) => {
-                        log::error!("Could not get amount for {source} -> {destination}: {e}. Please report a bug!");
+                        log::error!("{activity_name} activity => Could not get amount for {source} -> {destination}: {e}. Please report a bug!");
                         break;
                     },
                 };
 
-                log::debug!("Generated random payment: {source} -> {}: {amount} msat.", destination);
+                log::debug!("{activity_name} activity => Generated random payment: {source} -> {}: {amount} msat.", destination);
 
                 // Send the payment, exiting if we can no longer send to the consumer.
                 let event = SimulationEvent::SendPayment(destination.clone(), amount);
                 if let Err(e) = sender.send(event).await {
                     log::debug!(
-                        "Stopped random producer for {amount}: {source} -> {destination}. Consumer error: {e}.",
+                        "{activity_name} activity => Stopped random producer for {amount}: {source} -> {destination}. Consumer error: {e}.",
                     );
                     break;
                 }
@@ -878,7 +897,7 @@ async fn produce_events<N: DestinationGenerator + ?Sized, A: PaymentGenerator + 
         }
     }
 
-    log::debug!("Stopped random activity producer {source}.");
+    log::debug!("{activity_name} activity => Stopped random activity producer {source}.");
     shutdown.trigger();
 }
 
