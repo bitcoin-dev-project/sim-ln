@@ -1,3 +1,6 @@
+use self::defined_activity::DefinedPaymentActivity;
+use self::random_activity::{NetworkGraphView, RandomPaymentActivity};
+use self::sim_node::ChannelPolicy;
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
@@ -18,9 +21,6 @@ use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tokio::{select, time, time::Duration};
 use triggered::{Listener, Trigger};
-
-use self::defined_activity::DefinedPaymentActivity;
-use self::random_activity::{NetworkGraphView, RandomPaymentActivity};
 
 pub mod cln;
 mod defined_activity;
@@ -86,7 +86,7 @@ impl std::fmt::Display for NodeId {
 }
 
 /// Represents a short channel ID, expressed as a struct so that we can implement display for the trait.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Copy, Serialize, Deserialize)]
 pub struct ShortChannelID(u64);
 
 /// Utility function to easily convert from u64 to `ShortChannelID`
@@ -116,11 +116,25 @@ impl std::fmt::Display for ShortChannelID {
     }
 }
 
+/// Parameters for the simulation provided in our simulation file. Serde default
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SimParams {
+    #[serde(default)]
     pub nodes: Vec<NodeConnection>,
     #[serde(default)]
+    pub sim_network: Vec<NetworkParser>,
+    #[serde(default)]
     pub activity: Vec<ActivityParser>,
+}
+
+/// Data structure that is used to parse information from the simulation file, used to pair two node policies together
+/// without the other internal state that is used in our simulated network.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkParser {
+    pub scid: ShortChannelID,
+    pub capacity_msat: u64,
+    pub node_1: ChannelPolicy,
+    pub node_2: ChannelPolicy,
 }
 
 /// Data structure used to parse information from the simulation file. It allows source and destination to be
