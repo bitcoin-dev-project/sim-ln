@@ -894,7 +894,7 @@ async fn remove_htlcs(
     payment_hash: PaymentHash,
     success: bool,
 ) -> Result<(), ForwardingError> {
-    for (i, hop) in route.hops[0..resolution_idx].iter().enumerate().rev() {
+    for (i, hop) in route.hops[0..=resolution_idx].iter().enumerate().rev() {
         // When we add HTLCs, we do so on the state of the node that sent the htlc along the channel so we need to
         // look up our incoming node so that we can remove it when we go backwards. For the first htlc, this is just
         // the sending node, otherwise it's the hop before.
@@ -967,8 +967,15 @@ async fn propagate_payment(
         }
     } else {
         // If we successfully added the htlc, go ahead and remove all the htlcs in the route with successful resolution.
-        if let Err(e) =
-            remove_htlcs(nodes, route.hops.len(), source, route, payment_hash, true).await
+        if let Err(e) = remove_htlcs(
+            nodes,
+            route.hops.len() - 1,
+            source,
+            route,
+            payment_hash,
+            true,
+        )
+        .await
         {
             if e.is_critical() {
                 shutdown.trigger();
