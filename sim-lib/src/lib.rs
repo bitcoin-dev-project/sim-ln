@@ -50,7 +50,7 @@ impl NodeId {
             crate::NodeId::PublicKey(pk) => {
                 if pk != node_id {
                     return Err(LightningError::ValidationError(format!(
-                        "the provided node id does not match the one returned by the backend ({} != {}).",
+                        "The provided node id does not match the one returned by the backend ({} != {}).",
                         pk, node_id
                     )));
                 }
@@ -655,7 +655,7 @@ impl Simulation {
         // csr: consume simulation results
         let csr_write_results = self.write_results.clone();
         tasks.spawn(async move {
-            log::debug!("Staring simulation results consumer.");
+            log::debug!("Starting simulation results consumer.");
             if let Err(e) = consume_simulation_results(
                 result_logger,
                 results_receiver,
@@ -795,9 +795,9 @@ impl Simulation {
                     consume_events(ce_node, receiver, ce_output_sender, ce_listener).await
                 {
                     ce_shutdown.trigger();
-                    log::error!("Event consumer exited with error: {e:?}.");
+                    log::error!("Event consumer for node {node_info} exited with error: {e:?}.");
                 } else {
-                    log::debug!("Event consumer for node {node_info} received shutdown signal.");
+                    log::debug!("Event consumer for node {node_info} completed successfully.");
                 }
             });
         }
@@ -844,9 +844,9 @@ impl Simulation {
                 .await
                 {
                     pe_shutdown.trigger();
-                    log::debug!("Event producer exited with error {e}.");
+                    log::debug!("Activity producer for {source} exited with error {e}.");
                 } else {
-                    log::debug!("Random activity generator for {source} received shutdown signal.");
+                    log::debug!("Activity producer for {source} completed successfully.");
                 }
             });
         }
@@ -940,7 +940,7 @@ async fn produce_events<N: DestinationGenerator + ?Sized, A: PaymentGenerator + 
     loop {
         if let Some(c) = node_generator.payment_count() {
             if c == current_count {
-                log::info!("Payment count has been met: {c} payments. Stopping the activity.");
+                log::info!("Payment count has been met for {source}: {c} payments. Stopping the activity.");
                 return Ok(());
             }
         }
@@ -979,12 +979,12 @@ async fn produce_events<N: DestinationGenerator + ?Sized, A: PaymentGenerator + 
                     },
                 };
 
-                log::debug!("Generated random payment: {source} -> {}: {amount} msat.", destination);
+                log::debug!("Generated payment: {source} -> {}: {amount} msat.", destination);
 
                 // Send the payment, exiting if we can no longer send to the consumer.
                 let event = SimulationEvent::SendPayment(destination.clone(), amount);
                 if sender.send(event.clone()).await.is_err() {
-                    return Err(SimulationError::MpscChannelError (format!("Stopped random producer for {amount}: {source} -> {destination}.")));
+                    return Err(SimulationError::MpscChannelError (format!("Stopped activity producer for {amount}: {source} -> {destination}.")));
                 }
 
                 current_count += 1;
