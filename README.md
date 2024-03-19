@@ -136,8 +136,11 @@ of the random activity that is generated:
 ### Setup - Defined Activity
 If you would like SimLN to generate a specific payments between source 
 and destination nodes, you can provide `activity` descriptions of the 
-source, destination, frequency and amount for payments that you'd like 
-to execute. Note that `source` nodes *must* be contained in `nodes`, 
+source, destination, frequency, amount for payments that you'd like 
+to execute and an optional name for each `activity` description that is used
+as the logging prefix to relate logs to their corresponding activity description 
+(The index of each `activity` description will be used if a name is not 
+provided for the `activity` description). Note that `source` nodes *must* be contained in `nodes`, 
 but destination nodes can be any public node in the network (though 
 this may result in liquidity draining over time).
 
@@ -169,7 +172,8 @@ The example simulation file below sets up the following simulation:
       "source": "Alice",
       "destination": "02d804ad31429c8cc29e20ec43b4129553eb97623801e534ab5a66cdcd2149dbed",
       "interval_secs": 1,
-      "amount_msat": 2000
+      "amount_msat": 2000,
+      "activity_name": "Daily Contribution"
     },
     {
       "source": "0230a16a05c5ca120136b3a770a2adfdad88a68d526e63448a9eef88bddd6a30d8",
@@ -181,7 +185,8 @@ The example simulation file below sets up the following simulation:
       "source": "0230a16a05c5ca120136b3a770a2adfdad88a68d526e63448a9eef88bddd6a30d8",
       "destination": "03232e245059a2e7f6e32d6c4bca97fc4cda935c553ea3693adb3265a19050c3bf",
       "interval_secs": 2,
-      "amount_msat": 1000
+      "amount_msat": 1000,
+      "activity_name": "Seller Commission"
     }
   ]
 }
