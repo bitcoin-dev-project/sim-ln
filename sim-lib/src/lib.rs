@@ -940,7 +940,9 @@ async fn produce_events<N: DestinationGenerator + ?Sized, A: PaymentGenerator + 
     loop {
         if let Some(c) = node_generator.payment_count() {
             if c == current_count {
-                log::info!("Payment count has been met for {source}: {c} payments. Stopping the activity.");
+                log::info!(
+                    "Payment count has been met for {source}: {c} payments. Stopping the activity."
+                );
                 return Ok(());
             }
         }
