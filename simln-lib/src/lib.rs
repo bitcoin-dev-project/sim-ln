@@ -204,6 +204,8 @@ pub enum SimulationError {
     PaymentGenerationError(PaymentGenerationError),
     #[error("Destination Generation Error: {0}")]
     DestinationGenerationError(DestinationGenerationError),
+    #[error("Simulated Time Error: {0}")]
+    SimulatedTimeError(String),
 }
 
 #[derive(Debug, Error)]
