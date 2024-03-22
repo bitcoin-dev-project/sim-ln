@@ -94,24 +94,6 @@ async fn main() -> anyhow::Result<()> {
         serde_json::from_str(&std::fs::read_to_string(sim_path)?)
             .map_err(|e| anyhow!("Could not deserialize node connection data or activity description from simulation file (line {}, col {}).", e.line(), e.column()))?;
 
-    let mut clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
-    let mut clients_info: HashMap<PublicKey, NodeInfo> = HashMap::new();
-
-    for connection in nodes {
-        // TODO: Feels like there should be a better way of doing this without having to Arc<Mutex<T>>> it at this time.
-        // Box sort of works, but we won't know the size of the dyn LightningNode at compile time so the compiler will
-        // scream at us when trying to create the Arc<Mutex>> later on while adding the node to the clients map
-        let node: Arc<Mutex<dyn LightningNode>> = match connection {
-            NodeConnection::LND(c) => Arc::new(Mutex::new(LndNode::new(c).await?)),
-            NodeConnection::CLN(c) => Arc::new(Mutex::new(ClnNode::new(c).await?)),
-        };
-
-        let node_info = node.lock().await.get_info().clone();
-
-        clients.insert(node_info.pubkey, node);
-        clients_info.insert(node_info.pubkey, node_info);
-    }
-
     let write_results = if !cli.no_results {
         Some(WriteResults {
             results_dir: mkdir(cli.data_dir.join("results")).await?,
@@ -120,6 +102,8 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+
+    let (clients, clients_info) = connect_nodes(nodes).await?;
 
     // We need to be able to look up destination nodes in the graph, because we allow defined activities to send to
     // nodes that we do not control. To do this, we can just grab the first node in our map and perform the lookup.
@@ -133,7 +117,6 @@ async fn main() -> anyhow::Result<()> {
             "no nodes for query".to_string(),
         ))
     };
-
     let validated_activities = validate_activities(activity, &clients_info, get_node).await?;
 
     let sim = Simulation::new(
@@ -156,6 +139,38 @@ async fn main() -> anyhow::Result<()> {
     sim.run().await?;
 
     Ok(())
+}
+
+/// Connects to the set of nodes providing, returning a map of node public keys to LightningNode implementations and
+/// a map of public key to node info to be used for validation.
+async fn connect_nodes(
+    nodes: Vec<NodeConnection>,
+) -> Result<
+    (
+        HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
+        HashMap<PublicKey, NodeInfo>,
+    ),
+    LightningError,
+> {
+    let mut clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
+    let mut clients_info: HashMap<PublicKey, NodeInfo> = HashMap::new();
+
+    for connection in nodes {
+        // TODO: Feels like there should be a better way of doing this without having to Arc<Mutex<T>>> it at this time.
+        // Box sort of works, but we won't know the size of the dyn LightningNode at compile time so the compiler will
+        // scream at us when trying to create the Arc<Mutex>> later on while adding the node to the clients map
+        let node: Arc<Mutex<dyn LightningNode>> = match connection {
+            NodeConnection::LND(c) => Arc::new(Mutex::new(LndNode::new(c).await?)),
+            NodeConnection::CLN(c) => Arc::new(Mutex::new(ClnNode::new(c).await?)),
+        };
+
+        let node_info = node.lock().await.get_info().clone();
+
+        clients.insert(node_info.pubkey, node);
+        clients_info.insert(node_info.pubkey, node_info);
+    }
+
+    Ok((clients, clients_info))
 }
 
 /// Adds a lightning node to a client map and tracking maps used to lookup node pubkeys and aliases for activity
