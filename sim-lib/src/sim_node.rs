@@ -1,5 +1,6 @@
 use crate::{
-    LightningError, LightningNode, NodeInfo, PaymentOutcome, PaymentResult, SimulationError,
+    LightningError, LightningNode, NetworkParser, NodeInfo, PaymentOutcome, PaymentResult,
+    SimulationError,
 };
 use async_trait::async_trait;
 use bitcoin::constants::ChainHash;
@@ -7,6 +8,7 @@ use bitcoin::hashes::{sha256::Hash as Sha256, Hash};
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Network, ScriptBuf, TxOut};
 use lightning::ln::chan_utils::make_funding_redeemscript;
+use serde::{Deserialize, Serialize};
 use std::collections::{hash_map::Entry, HashMap};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -110,7 +112,7 @@ struct Htlc {
 /// Represents one node in the channel's forwarding policy and restrictions. Note that this doesn't directly map to
 /// a single concept in the protocol, a few things have been combined for the sake of simplicity. Used to manage the
 /// lightning "state machine" and check that HTLCs are added in accordance of the advertised policy.
-#[derive(Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelPolicy {
     pub pubkey: PublicKey,
     pub max_htlc_count: u64,
@@ -426,6 +428,17 @@ impl SimulatedChannel {
     }
 }
 
+impl From<NetworkParser> for SimulatedChannel {
+    fn from(network_parser: NetworkParser) -> Self {
+        SimulatedChannel::new(
+            network_parser.capacity_msat,
+            network_parser.scid,
+            network_parser.node_1,
+            network_parser.node_2,
+        )
+    }
+}
+
 /// SimNetwork represents a high level network coordinator that is responsible for the task of actually propagating
 /// payments through the simulated network.
 #[async_trait]
@@ -476,7 +489,7 @@ impl<'a, T: SimNetwork> SimNode<'a, T> {
 }
 
 /// Produces the node info for a mocked node, filling in the features that the simulator requires.
-fn node_info(pubkey: PublicKey) -> NodeInfo {
+pub fn node_info(pubkey: PublicKey) -> NodeInfo {
     // Set any features that the simulator requires here.
     let mut features = NodeFeatures::empty();
     features.set_keysend_optional();

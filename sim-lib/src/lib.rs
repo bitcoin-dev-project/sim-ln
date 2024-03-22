@@ -1,3 +1,8 @@
+use self::defined_activity::DefinedPaymentActivity;
+use self::random_activity::{NetworkGraphView, RandomPaymentActivity};
+use self::sim_node::{
+    ln_node_from_graph, populate_network_graph, ChannelPolicy, SimGraph, SimulatedChannel,
+};
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
@@ -18,9 +23,6 @@ use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tokio::{select, time, time::Duration};
 use triggered::{Listener, Trigger};
-
-use self::defined_activity::DefinedPaymentActivity;
-use self::random_activity::{NetworkGraphView, RandomPaymentActivity};
 
 pub mod cln;
 mod defined_activity;
@@ -92,7 +94,7 @@ impl std::fmt::Display for NodeId {
 }
 
 /// Represents a short channel ID, expressed as a struct so that we can implement display for the trait.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Copy, Serialize, Deserialize)]
 pub struct ShortChannelID(u64);
 
 /// Utility function to easily convert from u64 to `ShortChannelID`
@@ -122,11 +124,25 @@ impl std::fmt::Display for ShortChannelID {
     }
 }
 
+/// Parameters for the simulation provided in our simulation file. Serde default
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SimParams {
+    #[serde(default)]
     pub nodes: Vec<NodeConnection>,
     #[serde(default)]
+    pub sim_network: Vec<NetworkParser>,
+    #[serde(default)]
     pub activity: Vec<ActivityParser>,
+}
+
+/// Data structure that is used to parse information from the simulation file, used to pair two node policies together
+/// without the other internal state that is used in our simulated network.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkParser {
+    pub scid: ShortChannelID,
+    pub capacity_msat: u64,
+    pub node_1: ChannelPolicy,
+    pub node_2: ChannelPolicy,
 }
 
 /// Data structure used to parse information from the simulation file. It allows source and destination to be
@@ -466,6 +482,41 @@ impl Simulation {
             shutdown_trigger,
             shutdown_listener,
         }
+    }
+
+    pub async fn new_with_sim_network(
+        cfg: SimulationCfg,
+        channels: Vec<SimulatedChannel>,
+        activity: Vec<ActivityDefinition>,
+    ) -> Result<(Simulation, Arc<Mutex<SimGraph>>), SimulationError> {
+        let (shutdown_trigger, shutdown_listener) = triggered::trigger();
+
+        // Setup a simulation graph that will handle propagation of payments through the network.
+        let simulation_graph = Arc::new(Mutex::new(
+            SimGraph::new(channels.clone(), shutdown_trigger.clone())
+                .map_err(|e| SimulationError::SimulatedNetworkError(format!("{:?}", e)))?,
+        ));
+
+        // Copy all of our simulated channels into a read-only routing graph, allowing us to pathfind for individual
+        // payments without locking the simulation graph (this is a duplication of our channels, but the performance
+        // tradeoff is worthwhile for concurrent pathfinding).
+        let routing_graph = Arc::new(
+            populate_network_graph(channels)
+                .map_err(|e| SimulationError::SimulatedNetworkError(format!("{:?}", e)))?,
+        );
+
+        let nodes = ln_node_from_graph(simulation_graph.clone(), routing_graph).await;
+
+        Ok((
+            Self {
+                nodes,
+                activity,
+                shutdown_trigger,
+                shutdown_listener,
+                cfg,
+            },
+            simulation_graph,
+        ))
     }
 
     /// validate_activity validates that the user-provided activity description is achievable for the network that

@@ -1,5 +1,6 @@
 use bitcoin::secp256k1::PublicKey;
 use futures::executor::block_on;
+use sim_lib::sim_node::{SimGraph, SimulatedChannel};
 use sim_lib::{ActivityParser, NodeInfo, SimulationCfg};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -103,8 +104,7 @@ async fn main() -> anyhow::Result<()> {
         },
     );
 
-    let sim = create_simulation(&cli, sim_cfg).await?;
-
+    let (sim, sim_network) = create_simulation(&cli, sim_cfg).await?;
     let sim2 = sim.clone();
     ctrlc::set_handler(move || {
         log::info!("Shutting down simulation.");
@@ -112,39 +112,97 @@ async fn main() -> anyhow::Result<()> {
     })?;
 
     sim.run().await?;
+
+    if let Some(network) = sim_network {
+        network.lock().await.wait_for_shutdown().await;
+    }
+
     Ok(())
 }
 
 /// Parses the cli options provided and creates a simulation to be run, connecting to lightning nodes and validating
-/// any activity described in the simulation file.
-async fn create_simulation(cli: &Cli, cfg: SimulationCfg) -> Result<Simulation, anyhow::Error> {
+/// any activity described in the simulation file. If the simulation is also running in simulated network mode, it
+/// will return the simulated network graph as well.
+async fn create_simulation(
+    cli: &Cli,
+    cfg: SimulationCfg,
+) -> Result<(Simulation, Option<Arc<Mutex<SimGraph>>>), anyhow::Error> {
     let sim_path = read_sim_path(cli.data_dir.clone(), cli.sim_file.clone()).await?;
-    let SimParams { nodes, activity } = serde_json::from_str(&std::fs::read_to_string(sim_path)?)
+    let SimParams { nodes, sim_network, activity } = serde_json::from_str(&std::fs::read_to_string(sim_path)?)
         .map_err(|e| {
         anyhow!(
-            "Could not deserialize node connection data or activity description from simulation file (line {}, col {}).",
+            "Could not deserialize node connection data or activity description from simulation file (line {}, col {}, err: {}).",
             e.line(),
-            e.column()
+            e.column(),
+            e.to_string()
         )
     })?;
 
-    let (clients, clients_info) = connect_nodes(nodes).await?;
+    // Validate that nodes and sim_graph are exclusively set, and setup node clients from the populated field.
+    if !nodes.is_empty() && !sim_network.is_empty() {
+        Err(anyhow!(
+            "Simulation file cannot contain {} nodes and {} sim_graph entries, simulation can only be run with real 
+            or simulated nodes not both.", nodes.len(), sim_network.len(),
+        ))
+    } else if nodes.is_empty() && sim_network.is_empty() {
+        Err(anyhow!(
+                "Simulation file must contain nodes to run with real lightning nodes or sim_graph to run with 
+                simulated nodes",
+        ))
+    } else if !nodes.is_empty() {
+        let (clients, clients_info) = connect_nodes(nodes).await?;
+        // We need to be able to look up destination nodes in the graph, because we allow defined activities to send to
+        // nodes that we do not control. To do this, we can just grab the first node in our map and perform the lookup.
+        // block_on is used to avoid asynchronous closures, which is okay because we expect these lookups to be very cheap.
+        let get_node = |pk: &PublicKey| -> Result<NodeInfo, LightningError> {
+            if let Some(c) = clients.values().next() {
+                return block_on(async { c.lock().await.get_node_info(pk).await });
+            }
 
-    // We need to be able to look up destination nodes in the graph, because we allow defined activities to send to
-    // nodes that we do not control. To do this, we can just grab the first node in our map and perform the lookup.
-    // block_on is used to avoid asynchronous closures, which is okay because we expect these lookups to be very cheap.
-    let get_node = |pk: &PublicKey| -> Result<NodeInfo, LightningError> {
-        if let Some(c) = clients.values().next() {
-            return block_on(async { c.lock().await.get_node_info(pk).await });
+            Err(LightningError::GetNodeInfoError(
+                "no nodes for query".to_string(),
+            ))
+        };
+
+        let validated_activities = validate_activities(activity, &clients_info, get_node).await?;
+        Ok((Simulation::new(cfg, clients, validated_activities), None))
+    } else {
+        // Convert nodes representation for parsing to SimulatedChannel.
+        let channels = sim_network
+            .clone()
+            .into_iter()
+            .map(SimulatedChannel::from)
+            .collect::<Vec<SimulatedChannel>>();
+
+        let mut nodes_info = HashMap::new();
+        for sim_channel in sim_network {
+            nodes_info.insert(
+                sim_channel.node_1.pubkey,
+                sim_lib::sim_node::node_info(sim_channel.node_1.pubkey),
+            );
+            nodes_info.insert(
+                sim_channel.node_2.pubkey,
+                sim_lib::sim_node::node_info(sim_channel.node_2.pubkey),
+            );
         }
 
-        Err(LightningError::GetNodeInfoError(
-            "no nodes for query".to_string(),
-        ))
-    };
-    let validated_activities = validate_activities(activity, &clients_info, get_node).await?;
+        let get_node = |pk: &PublicKey| -> Result<NodeInfo, LightningError> {
+            if let Some(node) = nodes_info.get(pk) {
+                Ok(sim_lib::sim_node::node_info(node.pubkey))
+            } else {
+                Err(LightningError::GetNodeInfoError(format!(
+                    "node not found in simulated network: {}",
+                    pk
+                )))
+            }
+        };
 
-    Ok(Simulation::new(cfg, clients, validated_activities))
+        let validated_activities = validate_activities(activity, &nodes_info, get_node).await?;
+
+        let (simulation, graph) =
+            Simulation::new_with_sim_network(cfg, channels, validated_activities).await?;
+        Ok((simulation, Some(graph)))
+    }
 }
 
 /// Connects to the set of nodes providing, returning a map of node public keys to LightningNode implementations and
