@@ -89,19 +89,44 @@ async fn main() -> anyhow::Result<()> {
         .init()
         .unwrap();
 
-    let sim_path = read_sim_path(cli.data_dir.clone(), cli.sim_file).await?;
-    let SimParams { nodes, activity } =
-        serde_json::from_str(&std::fs::read_to_string(sim_path)?)
-            .map_err(|e| anyhow!("Could not deserialize node connection data or activity description from simulation file (line {}, col {}).", e.line(), e.column()))?;
+    let sim_cfg = SimulationCfg::new(
+        cli.total_time,
+        cli.expected_pmt_amt,
+        cli.capacity_multiplier,
+        if !cli.no_results {
+            Some(WriteResults {
+                results_dir: mkdir(cli.data_dir.join("results")).await?,
+                batch_size: cli.print_batch_size,
+            })
+        } else {
+            None
+        },
+    );
 
-    let write_results = if !cli.no_results {
-        Some(WriteResults {
-            results_dir: mkdir(cli.data_dir.join("results")).await?,
-            batch_size: cli.print_batch_size,
-        })
-    } else {
-        None
-    };
+    let sim = create_simulation(&cli, sim_cfg).await?;
+
+    let sim2 = sim.clone();
+    ctrlc::set_handler(move || {
+        log::info!("Shutting down simulation.");
+        sim2.shutdown();
+    })?;
+
+    sim.run().await?;
+    Ok(())
+}
+
+/// Parses the cli options provided and creates a simulation to be run, connecting to lightning nodes and validating
+/// any activity described in the simulation file.
+async fn create_simulation(cli: &Cli, cfg: SimulationCfg) -> Result<Simulation, anyhow::Error> {
+    let sim_path = read_sim_path(cli.data_dir.clone(), cli.sim_file.clone()).await?;
+    let SimParams { nodes, activity } = serde_json::from_str(&std::fs::read_to_string(sim_path)?)
+        .map_err(|e| {
+        anyhow!(
+            "Could not deserialize node connection data or activity description from simulation file (line {}, col {}).",
+            e.line(),
+            e.column()
+        )
+    })?;
 
     let (clients, clients_info) = connect_nodes(nodes).await?;
 
@@ -119,26 +144,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let validated_activities = validate_activities(activity, &clients_info, get_node).await?;
 
-    let sim = Simulation::new(
-        SimulationCfg::new(
-            cli.total_time,
-            cli.expected_pmt_amt,
-            cli.capacity_multiplier,
-            write_results,
-        ),
-        clients,
-        validated_activities,
-    );
-    let sim2 = sim.clone();
-
-    ctrlc::set_handler(move || {
-        log::info!("Shutting down simulation.");
-        sim2.shutdown();
-    })?;
-
-    sim.run().await?;
-
-    Ok(())
+    Ok(Simulation::new(cfg, clients, validated_activities))
 }
 
 /// Connects to the set of nodes providing, returning a map of node public keys to LightningNode implementations and
