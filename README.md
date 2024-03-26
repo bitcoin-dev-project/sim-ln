@@ -141,12 +141,31 @@ to execute. Note that `source` nodes *must* be contained in `nodes`,
 but destination nodes can be any public node in the network (though 
 this may result in liquidity draining over time).
 
+Required fields:
+```
+"source": the payer
+"destination": the payee
+"interval_secs": how often the payments should be sent
+"amount_msat": the amount of each payment
+```
+
+Optional fields:
+```
+"start_secs": the time to start sending payments
+"count": the total number of payments to send
+```
+
+> If `start_secs` is not provided the payments will begin as soon as the simulation starts (default=0)
+
+> If `count` is not provided the payments will continue for as long as the simulation runs (default=None)
+
 The example simulation file below sets up the following simulation:
 * Connect to `Alice` running LND to generate activity.
 * Connect to `Bob` running CLN to generate activity.
 * Dispatch 2000 msat payments from `Alice` to `Carol` every 1 seconds.
 * Dispatch 140000 msat payments from `Bob` to `Alice` every 50 seconds.
 * Dispatch 1000 msat payments from `Bob` to `Dave` every 2 seconds.
+* Dispatch 10 payments (5000 msat each) from `Erin` to `Frank` at 2 second intervals, starting 20 seconds into the sim.
 ```
 {
   "nodes": [
@@ -162,6 +181,18 @@ The example simulation file below sets up the following simulation:
       "ca_cert": "/path/ca.pem",
       "client_cert": "/path/client.pem",
       "client_key": "/path/client-key.pem"
+    },
+    {
+      "id": "Erin",
+      "address": "https://localhost:10012",
+      "macaroon": "/path/admin.macaroon",
+      "cert": "/path/tls.cert"      
+    },
+    {
+      "id": "Frank",
+      "address": "https://localhost:10014",
+      "macaroon": "/path/admin.macaroon",
+      "cert": "/path/tls.cert"      
     }
   ],
   "activity": [
@@ -182,6 +213,14 @@ The example simulation file below sets up the following simulation:
       "destination": "03232e245059a2e7f6e32d6c4bca97fc4cda935c553ea3693adb3265a19050c3bf",
       "interval_secs": 2,
       "amount_msat": 1000
+    },
+    {
+      "source": "Erin",
+      "destination": "Frank",
+      "start_secs": 20,
+      "count": 10,
+      "interval_secs": 2,
+      "amount_msat": 5000
     }
   ]
 }
