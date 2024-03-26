@@ -139,10 +139,10 @@ pub struct ActivityParser {
     /// The destination of the payment.
     #[serde(with = "serializers::serde_node_id")]
     pub destination: NodeId,
-    /// The time in the simulation to start the payment
+    /// The time in the simulation to start the payment.
     #[serde(default)]
     pub start_secs: u16,
-    /// The number of payments to send over the course of the simulation
+    /// The number of payments to send over the course of the simulation.
     #[serde(default)]
     pub count: Option<u64>,
     /// The interval of the event, as in every how many seconds the payment is performed.
@@ -159,9 +159,9 @@ pub struct ActivityDefinition {
     pub source: NodeInfo,
     /// The destination of the payment.
     pub destination: NodeInfo,
-    /// The time in the simulation to start the payment
+    /// The time in the simulation to start the payment.
     pub start_secs: u16,
-    /// The number of payments to send over the course of the simulation
+    /// The number of payments to send over the course of the simulation.
     pub count: Option<u64>,
     /// The interval of the event, as in every how many seconds the payment is performed.
     pub interval_secs: u16,
@@ -570,9 +570,25 @@ impl Simulation {
         );
 
         // Next, we'll spin up our actual producers that will be responsible for triggering the configured activity.
-        self.dispatch_producers(activities, consumer_channels, &mut tasks)
+        // The producers will use their own JoinSet so that the simulation can be shutdown if they all finish.
+        let mut producer_tasks = JoinSet::new();
+        self.dispatch_producers(activities, consumer_channels, &mut producer_tasks)
             .await?;
 
+        // Start a task that waits for the producers to finish.
+        // If all producers finish, then there is nothing left to do and the simulation can be shutdown.
+        let producer_trigger = self.shutdown_trigger.clone();
+        tasks.spawn(async move {
+            while let Some(res) = producer_tasks.join_next().await {
+                if let Err(e) = res {
+                    log::error!("Producer exited with error: {e}.");
+                }
+            }
+            log::info!("All producers finished. Shutting down.");
+            producer_trigger.trigger()
+        });
+
+        // Start a task that will shutdown the simulation if the total_time is met.
         if let Some(total_time) = self.total_time {
             let t = self.shutdown_trigger.clone();
             let l = self.shutdown_listener.clone();
@@ -948,6 +964,10 @@ async fn produce_events<N: DestinationGenerator + ?Sized, A: PaymentGenerator + 
         }
 
         let wait: Duration = if current_count == 0 {
+            log::debug!(
+                "Using a start delay. The first payment for {source} will be at {:?} seconds.",
+                node_generator.payment_start()
+            );
             node_generator.payment_start()
         } else {
             node_generator.next_payment_wait()
