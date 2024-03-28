@@ -34,8 +34,8 @@ stop-docker:
 	docker stop sim-ln
 
 check-code:
-	cargo fmt --check --all
-	cargo clippy --all-features
+	cargo fmt --verbose --check --all -- --color always
+	cargo clippy --all-features --all-targets --color always -- -D warnings
 
 stable-output:
 	@if [ -n "$$(git status --porcelain)" ]; then \
