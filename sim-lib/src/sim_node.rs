@@ -1139,7 +1139,7 @@ mod tests {
         // Add a few HTLCs to our internal state and assert that balances are as expected. We'll test
         // `check_outgoing_addition` in more detail in another test, so we just assert that we can add the htlc in
         // this test.
-        let hash_1 = PaymentHash { 0: [1; 32] };
+        let hash_1 = PaymentHash([1; 32]);
         let htlc_1 = Htlc {
             amount_msat: 1000,
             cltv_expiry: 40,
@@ -1161,7 +1161,7 @@ mod tests {
         ));
 
         // Add a second, distinct htlc to our in-flight state.
-        let hash_2 = PaymentHash { 0: [2; 32] };
+        let hash_2 = PaymentHash([2; 32]);
         let htlc_2 = Htlc {
             amount_msat: 1000,
             cltv_expiry: 40,
@@ -1267,7 +1267,7 @@ mod tests {
         ));
 
         // Add two large htlcs so that we will start to run into our in-flight total amount limit.
-        let hash_1 = PaymentHash { 0: [1; 32] };
+        let hash_1 = PaymentHash([1; 32]);
         let htlc_1 = Htlc {
             amount_msat: channel_state.policy.max_in_flight_msat / 2,
             cltv_expiry: channel_state.policy.cltv_expiry_delta,
@@ -1276,7 +1276,7 @@ mod tests {
         assert!(channel_state.check_outgoing_addition(&htlc_1).is_ok());
         assert!(channel_state.add_outgoing_htlc(hash_1, htlc_1).is_ok());
 
-        let hash_2 = PaymentHash { 0: [2; 32] };
+        let hash_2 = PaymentHash([2; 32]);
         let htlc_2 = Htlc {
             amount_msat: channel_state.policy.max_in_flight_msat / 2,
             cltv_expiry: channel_state.policy.cltv_expiry_delta,
@@ -1301,9 +1301,7 @@ mod tests {
 
         // Now we're going to add many htlcs so that we hit our in-flight count limit (unique payment hash per htlc).
         for i in 0..channel_state.policy.max_htlc_count {
-            let hash = PaymentHash {
-                0: [i.try_into().unwrap(); 32],
-            };
+            let hash = PaymentHash([i.try_into().unwrap(); 32]);
             assert!(channel_state.check_outgoing_addition(&htlc).is_ok());
             assert!(channel_state.add_outgoing_htlc(hash, htlc).is_ok());
         }
@@ -1321,15 +1319,13 @@ mod tests {
 
         // Resolve all in-flight htlcs.
         for i in 0..channel_state.policy.max_htlc_count {
-            let hash = PaymentHash {
-                0: [i.try_into().unwrap(); 32],
-            };
+            let hash = PaymentHash([i.try_into().unwrap(); 32]);
             assert!(channel_state.remove_outgoing_htlc(&hash).is_ok());
             channel_state.settle_outgoing_htlc(htlc.amount_msat, true)
         }
 
         // Add and settle another htlc to move more liquidity away from our local balance.
-        let hash_4 = PaymentHash { 0: [1; 32] };
+        let hash_4 = PaymentHash([1; 32]);
         let htlc_4 = Htlc {
             amount_msat: channel_state.policy.max_htlc_size_msat,
             cltv_expiry: channel_state.policy.cltv_expiry_delta,
@@ -1367,7 +1363,7 @@ mod tests {
         };
 
         // Assert that we're not able to send a htlc over node_2 -> node_1 (no liquidity).
-        let hash_1 = PaymentHash { 0: [1; 32] };
+        let hash_1 = PaymentHash([1; 32]);
         let htlc_1 = Htlc {
             amount_msat: node_2.policy.min_htlc_size_msat,
             cltv_expiry: node_1.policy.cltv_expiry_delta,
@@ -1379,7 +1375,7 @@ mod tests {
         ));
 
         // Assert that we can send a htlc over node_1 -> node_2.
-        let hash_2 = PaymentHash { 0: [1; 32] };
+        let hash_2 = PaymentHash([1; 32]);
         let htlc_2 = Htlc {
             amount_msat: node_1.policy.max_htlc_size_msat,
             cltv_expiry: node_2.policy.cltv_expiry_delta,
@@ -1484,7 +1480,7 @@ mod tests {
                         panic!("unknown mocked receiver");
                     };
 
-                    let _ = sender.send(Ok(result)).unwrap();
+                    sender.send(Ok(result)).unwrap();
                 },
             );
 
@@ -1589,7 +1585,7 @@ mod tests {
 
             let (sender, receiver) = oneshot::channel();
             self.graph
-                .dispatch_payment(source, route.clone(), PaymentHash { 0: [1; 32] }, sender);
+                .dispatch_payment(source, route.clone(), PaymentHash([1; 32]), sender);
 
             // Assert that we receive from the channel or fail.
             assert!(timeout(Duration::from_millis(10), receiver).await.is_ok());

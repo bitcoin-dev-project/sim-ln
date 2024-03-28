@@ -14,14 +14,14 @@ jobs:
         run: sudo apt install -y protobuf-compiler
       - name: Checkout source code
         uses: actions/checkout@v4
-    - name: Install Rust stable toolchain
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        components: rustfmt, clippy
-    - name: Run rustfmt
-      run: cargo fmt --verbose --check -- --color always
-    - name: Run clippy
-      run: cargo clippy --all-features --all-targets --color always -- --deny warnings
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Run rustfmt
+        run: cargo fmt --verbose --check -- --color always
+      - name: Run clippy
+        run: cargo clippy --all-features --all-targets --color always -- --deny warnings
 
   build:
     name: Build and test
