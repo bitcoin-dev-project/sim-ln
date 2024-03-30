@@ -964,16 +964,21 @@ async fn produce_events<N: DestinationGenerator + ?Sized, A: PaymentGenerator + 
         }
 
         let wait: Duration = if current_count == 0 {
-            log::debug!(
-                "Using a start delay. The first payment for {source} will be at {:?} seconds.",
-                node_generator.payment_start()
-            );
-            node_generator.payment_start()
+            let start = node_generator.payment_start();
+            if start != Duration::from_secs(0) {
+                log::debug!(
+                    "Using a start delay. The first payment for {source} will be at {:?}.",
+                    start
+                );
+            }
+            start
         } else {
+            log::debug!(
+                "Next payment for {source} in {:?}.",
+                node_generator.next_payment_wait()
+            );
             node_generator.next_payment_wait()
         };
-
-        log::debug!("Next payment for {source} in {:?} seconds.", wait);
 
         select! {
             biased;
