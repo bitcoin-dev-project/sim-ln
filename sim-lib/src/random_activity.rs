@@ -194,6 +194,16 @@ fn events_per_month(source_capacity_msat: u64, multiplier: f64, expected_payment
 }
 
 impl PaymentGenerator for RandomPaymentActivity {
+    /// Returns the time that the payments should start. This will always be 0 for the RandomPaymentActivity type.
+    fn payment_start(&self) -> Duration {
+        Duration::from_secs(0)
+    }
+
+    /// Returns the number of payments that should be made. This will always be None for the RandomPaymentActivity type.
+    fn payment_count(&self) -> Option<u64> {
+        None
+    }
+
     /// Returns the amount of time until the next payment should be scheduled for the node.
     fn next_payment_wait(&self) -> Duration {
         let mut rng = rand::thread_rng();

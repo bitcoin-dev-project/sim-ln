@@ -5,14 +5,24 @@ use tokio::time::Duration;
 #[derive(Clone)]
 pub struct DefinedPaymentActivity {
     destination: NodeInfo,
+    start: Duration,
+    count: Option<u64>,
     wait: Duration,
     amount: u64,
 }
 
 impl DefinedPaymentActivity {
-    pub fn new(destination: NodeInfo, wait: Duration, amount: u64) -> Self {
+    pub fn new(
+        destination: NodeInfo,
+        start: Duration,
+        count: Option<u64>,
+        wait: Duration,
+        amount: u64,
+    ) -> Self {
         DefinedPaymentActivity {
             destination,
+            start,
+            count,
             wait,
             amount,
         }
@@ -36,6 +46,14 @@ impl DestinationGenerator for DefinedPaymentActivity {
 }
 
 impl PaymentGenerator for DefinedPaymentActivity {
+    fn payment_start(&self) -> Duration {
+        self.start
+    }
+
+    fn payment_count(&self) -> Option<u64> {
+        self.count
+    }
+
     fn next_payment_wait(&self) -> Duration {
         self.wait
     }
@@ -69,8 +87,13 @@ mod tests {
         let source = get_random_keypair();
         let payment_amt = 50;
 
-        let generator =
-            DefinedPaymentActivity::new(node.clone(), Duration::from_secs(60), payment_amt);
+        let generator = DefinedPaymentActivity::new(
+            node.clone(),
+            Duration::from_secs(0),
+            None,
+            Duration::from_secs(60),
+            payment_amt,
+        );
 
         let (dest, dest_capacity) = generator.choose_destination(source.1);
         assert_eq!(node.pubkey, dest.pubkey);
