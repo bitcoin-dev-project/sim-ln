@@ -769,16 +769,23 @@ impl Simulation {
 
         // Start a task that will shutdown the simulation if the total_time is met.
         if let Some(total_time) = self.cfg.total_time {
-            let t = self.shutdown_trigger.clone();
-            let l = self.shutdown_listener.clone();
+            let shutdown = self.shutdown_trigger.clone();
+            let listener = self.shutdown_listener.clone();
 
             self.tasks.spawn(async move {
-                if time::timeout(total_time, l).await.is_err() {
-                    log::info!(
-                        "Simulation run for {}s. Shutting down.",
-                        total_time.as_secs()
-                    );
-                    t.trigger()
+                select! {
+                    biased;
+                    _ = listener.clone() => {
+                        log::debug!("Timeout task exited on listener signal");
+                    }
+
+                    _ = time::sleep(total_time) => {
+                        log::info!(
+                            "Simulation run for {}s. Shutting down.",
+                            total_time.as_secs()
+                        );
+                        shutdown.trigger()
+                    }
                 }
             });
         }
