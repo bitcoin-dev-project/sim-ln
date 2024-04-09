@@ -475,6 +475,12 @@ impl Simulation {
         }
 
         for payment_flow in self.activity.iter() {
+            // lets validate the amount_msats to be greater than zero
+            if payment_flow.amount_msat==0 {
+                return Err(LightningError::ValidationError(
+                    "Expected amount_msat should be greater than zero.".to_string(),
+                ));
+            }
             // We need every source node that is configured to execute some activity to be included in our set of
             // nodes so that we can execute events on it.
             self.nodes
