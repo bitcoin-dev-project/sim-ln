@@ -188,7 +188,7 @@ impl LightningNode for ClnNode {
 
     async fn track_payment(
         &mut self,
-        hash: PaymentHash,
+        hash: &PaymentHash,
         shutdown: Listener,
     ) -> Result<PaymentResult, LightningError> {
         loop {

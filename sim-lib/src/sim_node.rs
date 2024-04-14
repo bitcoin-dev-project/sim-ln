@@ -557,10 +557,10 @@ impl<T: SimNetwork> LightningNode for SimNode<'_, T> {
     /// provided is triggered. This call will fail if the hash provided was not obtained by calling send_payment first.
     async fn track_payment(
         &mut self,
-        hash: PaymentHash,
+        hash: &PaymentHash,
         listener: Listener,
     ) -> Result<PaymentResult, LightningError> {
-        match self.in_flight.remove(&hash) {
+        match self.in_flight.remove(hash) {
             Some(receiver) => {
                 select! {
                     biased;
@@ -1491,13 +1491,13 @@ mod tests {
         let (_, shutdown_listener) = triggered::trigger();
 
         let result_1 = node
-            .track_payment(hash_1, shutdown_listener.clone())
+            .track_payment(&hash_1, shutdown_listener.clone())
             .await
             .unwrap();
         assert!(matches!(result_1.payment_outcome, PaymentOutcome::Success));
 
         let result_2 = node
-            .track_payment(hash_2, shutdown_listener.clone())
+            .track_payment(&hash_2, shutdown_listener.clone())
             .await
             .unwrap();
         assert!(matches!(

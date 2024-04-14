@@ -250,7 +250,7 @@ pub trait LightningNode: Send {
     /// Track a payment with the specified hash.
     async fn track_payment(
         &mut self,
-        hash: PaymentHash,
+        hash: &PaymentHash,
         shutdown: Listener,
     ) -> Result<PaymentResult, LightningError>;
     /// Gets information on a specific node
@@ -1214,7 +1214,7 @@ async fn track_payment_result(
     let res = match payment.hash {
         Some(hash) => {
             log::debug!("Tracking payment outcome for: {}.", hex::encode(hash.0));
-            let track_payment = node.track_payment(hash, listener.clone());
+            let track_payment = node.track_payment(&hash, listener.clone());
 
             match track_payment.await {
                 Ok(res) => {
