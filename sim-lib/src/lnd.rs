@@ -175,7 +175,7 @@ impl LightningNode for LndNode {
 
     async fn track_payment(
         &mut self,
-        hash: PaymentHash,
+        hash: &PaymentHash,
         shutdown: Listener,
     ) -> Result<PaymentResult, LightningError> {
         let response = self
