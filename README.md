@@ -153,11 +153,14 @@ Optional fields:
 ```
 "start_secs": the time to start sending payments
 "count": the total number of payments to send
+"activity_name": an optional name for each activity description, used as the logging prefix to relate logs to their corresponding activity
 ```
 
 > If `start_secs` is not provided the payments will begin as soon as the simulation starts (default=0)
 
 > If `count` is not provided the payments will continue for as long as the simulation runs (default=None)
+
+> If `activity_name` is not provided the index of each activity description will be used as the logging prefix
 
 The example simulation file below sets up the following simulation:
 * Connect to `Alice` running LND to generate activity.
@@ -200,7 +203,8 @@ The example simulation file below sets up the following simulation:
       "source": "Alice",
       "destination": "02d804ad31429c8cc29e20ec43b4129553eb97623801e534ab5a66cdcd2149dbed",
       "interval_secs": 1,
-      "amount_msat": 2000
+      "amount_msat": 2000,
+      "activity_name": "Daily Contribution"
     },
     {
       "source": "0230a16a05c5ca120136b3a770a2adfdad88a68d526e63448a9eef88bddd6a30d8",
