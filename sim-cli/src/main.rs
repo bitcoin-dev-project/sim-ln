@@ -1,5 +1,5 @@
 use bitcoin::secp256k1::PublicKey;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -95,6 +95,7 @@ async fn main() -> anyhow::Result<()> {
     let mut clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
     let mut pk_node_map = HashMap::new();
     let mut alias_node_map = HashMap::new();
+    let mut activity_name_map = HashSet::new();
 
     for connection in nodes {
         // TODO: Feels like there should be a better way of doing this without having to Arc<Mutex<T>>> it at this time.
@@ -182,6 +183,17 @@ async fn main() -> anyhow::Result<()> {
             },
         };
 
+        if act.activity_name.is_some() {
+            if activity_name_map.contains(&act.activity_name) {
+                anyhow::bail!(LightningError::ValidationError(format!(
+                    "Duplicate activity name {:?} is not allowed.",
+                    act.activity_name.unwrap()
+                )));
+            }
+
+            activity_name_map.insert(act.activity_name.clone());
+        }
+
         validated_activities.push(ActivityDefinition {
             source,
             destination,
@@ -189,6 +201,7 @@ async fn main() -> anyhow::Result<()> {
             count: act.count,
             interval_secs: act.interval_secs,
             amount_msat: act.amount_msat,
+            activity_name: act.activity_name,
         });
     }
 

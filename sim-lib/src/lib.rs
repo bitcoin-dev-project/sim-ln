@@ -193,6 +193,8 @@ pub struct ActivityParser {
     /// The amount of m_sat to used in this payment.
     #[serde(with = "serializers::serde_value_or_range")]
     pub amount_msat: Amount,
+    /// An optional name for the activity.
+    pub activity_name: Option<String>,
 }
 
 /// Data structure used internally by the simulator. Both source and destination are represented as [PublicKey] here.
@@ -211,6 +213,8 @@ pub struct ActivityDefinition {
     pub interval_secs: Interval,
     /// The amount of m_sat to used in this payment.
     pub amount_msat: Amount,
+    /// An optional name for the activity.
+    pub activity_name: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -380,7 +384,7 @@ pub enum PaymentOutcome {
 }
 
 /// Describes a payment from a source node to a destination node.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct Payment {
     /// Pubkey of the source node dispatching the payment.
     source: PublicKey,
@@ -471,6 +475,7 @@ struct ExecutorKit {
     /// See [NetworkGraphView] for details.
     network_generator: Arc<Mutex<dyn DestinationGenerator>>,
     payment_generator: Box<dyn PaymentGenerator>,
+    activity_name: String,
 }
 
 impl Simulation {
@@ -770,7 +775,12 @@ impl Simulation {
         // Note: when we allow configuring both defined and random activity, this will no longer be an if/else, we'll
         // just populate with each type as configured.
         if !self.activity.is_empty() {
-            for description in self.activity.iter() {
+            for (index, description) in self.activity.iter().enumerate() {
+                let activity_name = match &description.activity_name {
+                    Some(name) => name.clone(),
+                    None => format!("Index {}", index),
+                };
+
                 let activity_generator = DefinedPaymentActivity::new(
                     description.destination.clone(),
                     Duration::from_secs(description.start_secs.into()),
@@ -785,6 +795,7 @@ impl Simulation {
                     // a single struct which we just cheaply clone.
                     network_generator: Arc::new(Mutex::new(activity_generator.clone())),
                     payment_generator: Box::new(activity_generator),
+                    activity_name,
                 });
             }
         } else {
@@ -832,10 +843,11 @@ impl Simulation {
             network_generator.lock().await
         );
 
-        for (node_info, capacity) in active_nodes.values() {
+        for (i, (node_info, capacity)) in active_nodes.values().enumerate() {
             generators.push(ExecutorKit {
                 source_info: node_info.clone(),
                 network_generator: network_generator.clone(),
+                activity_name: format!("Random index {i}"),
                 payment_generator: Box::new(
                     RandomPaymentActivity::new(
                         *capacity,
@@ -919,13 +931,15 @@ impl Simulation {
                 let source = executor.source_info.clone();
 
                 log::info!(
-                    "Starting activity producer for {}: {}.",
+                    "{} activity: Starting activity producer for {}: {}.",
+                    executor.activity_name,
                     source,
                     executor.payment_generator
                 );
 
                 if let Err(e) = produce_events(
                     executor.source_info,
+                    executor.activity_name,
                     executor.network_generator,
                     executor.payment_generator,
                     pe_sender,
@@ -1021,6 +1035,7 @@ async fn consume_events(
 /// exit if other threads signal that they have errored out.
 async fn produce_events<N: DestinationGenerator + ?Sized, A: PaymentGenerator + ?Sized>(
     source: NodeInfo,
+    activity_name: String,
     network_generator: Arc<Mutex<N>>,
     node_generator: Box<A>,
     sender: Sender<SimulationEvent>,
@@ -1070,7 +1085,7 @@ async fn produce_events<N: DestinationGenerator + ?Sized, A: PaymentGenerator + 
                 let amount = match node_generator.payment_amount(capacity) {
                     Ok(amt) => {
                         if amt == 0 {
-                            log::debug!("Skipping zero amount payment for {source} -> {destination}.");
+                            log::debug!("{activity_name} activity : Skipping zero amount payment for {source} -> {destination}.");
                             continue;
                         }
                         amt
@@ -1083,7 +1098,7 @@ async fn produce_events<N: DestinationGenerator + ?Sized, A: PaymentGenerator + 
                 log::debug!("Generated payment: {source} -> {}: {amount} msat.", destination);
 
                 // Send the payment, exiting if we can no longer send to the consumer.
-                let event = SimulationEvent::SendPayment(destination.clone(), amount);
+                let event = SimulationEvent::SendPayment(destination.clone(), amount,);
                 if sender.send(event.clone()).await.is_err() {
                     return Err(SimulationError::MpscChannelError (format!("Stopped activity producer for {amount}: {source} -> {destination}.")));
                 }
@@ -1241,14 +1256,14 @@ async fn produce_simulation_results(
                             SimulationOutput::SendPaymentSuccess(payment) => {
                                 if let Some(source_node) = nodes.get(&payment.source) {
                                     set.spawn(track_payment_result(
-                                        source_node.clone(), results.clone(), payment, listener.clone()
+                                        source_node.clone(), results.clone(), payment.clone(), listener.clone()
                                     ));
                                 } else {
                                     break Err(SimulationError::MissingNodeError(format!("Source node with public key: {} unavailable.", payment.source)));
                                 }
                             },
                             SimulationOutput::SendPaymentFailure(payment, result) => {
-                                if results.send((payment, result.clone())).await.is_err() {
+                                if results.send((payment.clone(), result.clone())).await.is_err() {
                                     break Err(SimulationError::MpscChannelError(
                                         format!("Failed to send payment result: {result} for payment {:?} dispatched at {:?}.", payment.hash, payment.dispatch_time),
                                     ));
@@ -1316,7 +1331,7 @@ async fn track_payment_result(
         _ = listener.clone() => {
             log::debug!("Track payment result received a shutdown signal.");
         },
-        send_payment_result = results.send((payment, res.clone())) => {
+        send_payment_result = results.send((payment.clone(), res.clone())) => {
             if send_payment_result.is_err() {
                 return Err(SimulationError::MpscChannelError(format!("Failed to send payment result {res} for payment {payment}.")))
             }
