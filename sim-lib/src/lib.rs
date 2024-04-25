@@ -171,7 +171,7 @@ pub struct ActivityDefinition {
 
 #[derive(Debug, Error)]
 pub enum SimulationError {
-    #[error("Lightning Error: {0:?}")]
+    #[error("Lightning Error")]
     LightningError(#[from] LightningError),
     #[error("TaskError")]
     TaskError,
@@ -195,19 +195,19 @@ pub enum SimulationError {
 
 #[derive(Debug, Error)]
 pub enum LightningError {
-    #[error("Node connection error: {0}")]
+    #[error("Node connection error\nCaused by: {0}")]
     ConnectionError(String),
-    #[error("Get info error: {0}")]
+    #[error("Get info error\n{0}")]
     GetInfoError(String),
-    #[error("Send payment error: {0}")]
+    #[error("Send payment error\n{0}")]
     SendPaymentError(String),
-    #[error("Track payment error: {0}")]
+    #[error("Track payment error\n{0}")]
     TrackPaymentError(String),
     #[error("Invalid payment hash")]
     InvalidPaymentHash,
-    #[error("Get node info error: {0}")]
+    #[error("Get node info error\n{0}")]
     GetNodeInfoError(String),
-    #[error("Config validation failed: {0}")]
+    #[error("Config validation failed {0}")]
     ValidationError(String),
     #[error("Permanent error: {0:?}")]
     PermanentError(String),
@@ -466,7 +466,7 @@ impl Simulation {
                     let node = node.lock().await;
                     if !node.get_info().features.supports_keysend() {
                         return Err(LightningError::ValidationError(format!(
-                            "All nodes eligible for random activity generation must support keysend, {} does not",
+                            "All nodes eligible for random activity generation must support keysend,\n{} does not",
                             node.get_info()
                         )));
                     }

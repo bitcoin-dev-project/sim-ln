@@ -114,17 +114,17 @@ async fn main() -> anyhow::Result<()> {
         );
 
         if clients.contains_key(&node_info.pubkey) {
-            anyhow::bail!(LightningError::ValidationError(format!(
-                "duplicated node: {}.",
-                node_info.pubkey
-            )));
+            anyhow::bail!(
+                "Lightning Error\nCaused by: {}",
+                LightningError::ValidationError(format!("duplicated node: {}.", node_info.pubkey))
+            );
         }
 
         if alias_node_map.contains_key(&node_info.alias) {
-            anyhow::bail!(LightningError::ValidationError(format!(
-                "duplicated node: {}.",
-                node_info.alias
-            )));
+            anyhow::bail!(
+                "Lightning Error\nCaused by: {}",
+                LightningError::ValidationError(format!("duplicated node: {}.", node_info.alias))
+            );
         }
 
         clients.insert(node_info.pubkey, node);
@@ -143,10 +143,13 @@ async fn main() -> anyhow::Result<()> {
         } {
             source.clone()
         } else {
-            anyhow::bail!(LightningError::ValidationError(format!(
-                "activity source {} not found in nodes.",
-                act.source
-            )));
+            anyhow::bail!(
+                "Lightning Error\nCaused by: {}",
+                LightningError::ValidationError(format!(
+                    "activity source {} not found in nodes.",
+                    act.source
+                ))
+            );
         };
 
         let destination = match &act.destination {
@@ -154,10 +157,13 @@ async fn main() -> anyhow::Result<()> {
                 if let Some(info) = alias_node_map.get(a) {
                     info.clone()
                 } else {
-                    anyhow::bail!(LightningError::ValidationError(format!(
-                        "unknown activity destination: {}.",
-                        act.destination
-                    )));
+                    anyhow::bail!(
+                        "Lightning Error\nCaused by: {}",
+                        LightningError::ValidationError(format!(
+                            "unknown activity destination: {}.",
+                            act.destination
+                        ))
+                    );
                 }
             },
             NodeId::PublicKey(pk) => {
@@ -174,7 +180,7 @@ async fn main() -> anyhow::Result<()> {
                         .map_err(|e| {
                             log::debug!("{}", e);
                             LightningError::ValidationError(format!(
-                                "Destination node unknown or invalid: {}.",
+                                "Lightning Error\nDestination node unknown or invalid: {}.",
                                 pk,
                             ))
                         })?

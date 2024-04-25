@@ -13,7 +13,7 @@ const SECONDS_PER_MONTH: u64 = HOURS_PER_MONTH * 60 * 60;
 
 #[derive(Debug, Error)]
 pub enum RandomActivityError {
-    #[error("Value error: {0}")]
+    #[error("Value error\nCaused by: {0}")]
     ValueError(String),
     #[error("InsufficientCapacity: {0}")]
     InsufficientCapacity(String),
