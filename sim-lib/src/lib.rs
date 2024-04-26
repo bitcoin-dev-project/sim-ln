@@ -1184,11 +1184,11 @@ async fn produce_simulation_results(
 ) -> Result<(), SimulationError> {
     let mut set = tokio::task::JoinSet::new();
 
-    loop {
+    let result = loop {
         tokio::select! {
             biased;
             _ = listener.clone() => {
-                break;
+                break Ok(())
             },
             output = output_receiver.recv() => {
                 match output {
@@ -1200,23 +1200,23 @@ async fn produce_simulation_results(
                                         source_node.clone(), results.clone(), payment, listener.clone()
                                     ));
                                 } else {
-                                    return Err(SimulationError::MissingNodeError(format!("Source node with public key: {} unavailable.", payment.source)));
+                                    break Err(SimulationError::MissingNodeError(format!("Source node with public key: {} unavailable.", payment.source)));
                                 }
                             },
                             SimulationOutput::SendPaymentFailure(payment, result) => {
                                 if results.send((payment, result.clone())).await.is_err() {
-                                    return Err(SimulationError::MpscChannelError(
+                                    break Err(SimulationError::MpscChannelError(
                                         format!("Failed to send payment result: {result} for payment {:?} dispatched at {:?}.", payment.hash, payment.dispatch_time),
                                     ));
                                 }
                             }
                         };
                     },
-                    None => return Ok(())
+                    None => break Ok(())
                 }
             }
         }
-    }
+    };
 
     log::debug!("Simulation results producer exiting.");
     while let Some(res) = set.join_next().await {
@@ -1224,7 +1224,8 @@ async fn produce_simulation_results(
             log::error!("Simulation results producer task exited with error: {e}.");
         }
     }
-    Ok(())
+
+    result
 }
 
 async fn track_payment_result(
