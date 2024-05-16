@@ -1,4 +1,5 @@
 use bitcoin::secp256k1::PublicKey;
+use sim_lib::SimulationCfg;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -202,12 +203,14 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let sim = Simulation::new(
+        SimulationCfg::new(
+            cli.total_time,
+            cli.expected_pmt_amt,
+            cli.capacity_multiplier,
+            write_results,
+        ),
         clients,
         validated_activities,
-        cli.total_time,
-        cli.expected_pmt_amt,
-        cli.capacity_multiplier,
-        write_results,
     );
     let sim2 = sim.clone();
 
