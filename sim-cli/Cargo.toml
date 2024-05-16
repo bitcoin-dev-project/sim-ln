@@ -20,3 +20,4 @@ sim-lib = { path = "../sim-lib" }
 tokio = { version = "1.26.0", features = ["full"] }
 bitcoin = { version = "0.30.1" }
 ctrlc = "3.4.0"
+futures = "0.3.30"

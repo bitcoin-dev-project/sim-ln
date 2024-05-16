@@ -1,5 +1,6 @@
 use bitcoin::secp256k1::PublicKey;
-use sim_lib::SimulationCfg;
+use futures::executor::block_on;
+use sim_lib::{ActivityParser, NodeInfo, SimulationCfg};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -94,8 +95,7 @@ async fn main() -> anyhow::Result<()> {
             .map_err(|e| anyhow!("Could not deserialize node connection data or activity description from simulation file (line {}, col {}).", e.line(), e.column()))?;
 
     let mut clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
-    let mut pk_node_map = HashMap::new();
-    let mut alias_node_map = HashMap::new();
+    let mut clients_info: HashMap<PublicKey, NodeInfo> = HashMap::new();
 
     for connection in nodes {
         // TODO: Feels like there should be a better way of doing this without having to Arc<Mutex<T>>> it at this time.
@@ -108,89 +108,8 @@ async fn main() -> anyhow::Result<()> {
 
         let node_info = node.lock().await.get_info().clone();
 
-        log::info!(
-            "Connected to {} - Node ID: {}.",
-            node_info.alias,
-            node_info.pubkey
-        );
-
-        if clients.contains_key(&node_info.pubkey) {
-            anyhow::bail!(LightningError::ValidationError(format!(
-                "duplicated node: {}.",
-                node_info.pubkey
-            )));
-        }
-
-        if alias_node_map.contains_key(&node_info.alias) {
-            anyhow::bail!(LightningError::ValidationError(format!(
-                "duplicated node: {}.",
-                node_info.alias
-            )));
-        }
-
         clients.insert(node_info.pubkey, node);
-        pk_node_map.insert(node_info.pubkey, node_info.clone());
-        alias_node_map.insert(node_info.alias.clone(), node_info);
-    }
-
-    let mut validated_activities = vec![];
-    // Make all the activities identifiable by PK internally
-    for act in activity.into_iter() {
-        // We can only map aliases to nodes we control, so if either the source or destination alias
-        // is not in alias_node_map, we fail
-        let source = if let Some(source) = match &act.source {
-            NodeId::PublicKey(pk) => pk_node_map.get(pk),
-            NodeId::Alias(a) => alias_node_map.get(a),
-        } {
-            source.clone()
-        } else {
-            anyhow::bail!(LightningError::ValidationError(format!(
-                "activity source {} not found in nodes.",
-                act.source
-            )));
-        };
-
-        let destination = match &act.destination {
-            NodeId::Alias(a) => {
-                if let Some(info) = alias_node_map.get(a) {
-                    info.clone()
-                } else {
-                    anyhow::bail!(LightningError::ValidationError(format!(
-                        "unknown activity destination: {}.",
-                        act.destination
-                    )));
-                }
-            },
-            NodeId::PublicKey(pk) => {
-                if let Some(info) = pk_node_map.get(pk) {
-                    info.clone()
-                } else {
-                    clients
-                        .get(&source.pubkey)
-                        .unwrap()
-                        .lock()
-                        .await
-                        .get_node_info(pk)
-                        .await
-                        .map_err(|e| {
-                            log::debug!("{}", e);
-                            LightningError::ValidationError(format!(
-                                "Destination node unknown or invalid: {}.",
-                                pk,
-                            ))
-                        })?
-                }
-            },
-        };
-
-        validated_activities.push(ActivityDefinition {
-            source,
-            destination,
-            start_secs: act.start_secs,
-            count: act.count,
-            interval_secs: act.interval_secs,
-            amount_msat: act.amount_msat,
-        });
+        clients_info.insert(node_info.pubkey, node_info);
     }
 
     let write_results = if !cli.no_results {
@@ -201,6 +120,21 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+
+    // We need to be able to look up destination nodes in the graph, because we allow defined activities to send to
+    // nodes that we do not control. To do this, we can just grab the first node in our map and perform the lookup.
+    // block_on is used to avoid asynchronous closures, which is okay because we expect these lookups to be very cheap.
+    let get_node = |pk: &PublicKey| -> Result<NodeInfo, LightningError> {
+        if let Some(c) = clients.values().next() {
+            return block_on(async { c.lock().await.get_node_info(pk).await });
+        }
+
+        Err(LightningError::GetNodeInfoError(
+            "no nodes for query".to_string(),
+        ))
+    };
+
+    let validated_activities = validate_activities(activity, &clients_info, get_node).await?;
 
     let sim = Simulation::new(
         SimulationCfg::new(
@@ -222,6 +156,111 @@ async fn main() -> anyhow::Result<()> {
     sim.run().await?;
 
     Ok(())
+}
+
+/// Adds a lightning node to a client map and tracking maps used to lookup node pubkeys and aliases for activity
+/// validation.
+async fn add_node_to_maps(
+    nodes: &HashMap<PublicKey, NodeInfo>,
+) -> Result<(HashMap<PublicKey, NodeInfo>, HashMap<String, NodeInfo>), LightningError> {
+    let mut pk_node_map = HashMap::new();
+    let mut alias_node_map = HashMap::new();
+
+    for node_info in nodes.values() {
+        log::info!(
+            "Connected to {} - Node ID: {}.",
+            node_info.alias,
+            node_info.pubkey
+        );
+
+        if nodes.contains_key(&node_info.pubkey) {
+            return Err(LightningError::ValidationError(format!(
+                "duplicated node: {}.",
+                node_info.pubkey
+            )));
+        }
+
+        if alias_node_map.contains_key(&node_info.alias) {
+            return Err(LightningError::ValidationError(format!(
+                "duplicated node: {}.",
+                node_info.alias
+            )));
+        }
+
+        pk_node_map.insert(node_info.pubkey, node_info.clone());
+        alias_node_map.insert(node_info.alias.clone(), node_info.clone());
+    }
+
+    Ok((pk_node_map, alias_node_map))
+}
+
+/// Validates a set of defined activities, cross-checking aliases and public keys against the set of clients that
+/// have been configured.
+async fn validate_activities(
+    activity: Vec<ActivityParser>,
+    nodes: &HashMap<PublicKey, NodeInfo>,
+    get_node_info: impl Fn(&PublicKey) -> Result<NodeInfo, LightningError>,
+) -> Result<Vec<ActivityDefinition>, LightningError> {
+    if activity.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let mut validated_activities = vec![];
+    let (pk_node_map, alias_node_map) = add_node_to_maps(nodes).await?;
+
+    // Make all the activities identifiable by PK internally
+    for act in activity.into_iter() {
+        // We can only map aliases to nodes we control, so if either the source or destination alias
+        // is not in alias_node_map, we fail
+        let source = if let Some(source) = match &act.source {
+            NodeId::PublicKey(pk) => pk_node_map.get(pk),
+            NodeId::Alias(a) => alias_node_map.get(a),
+        } {
+            source.clone()
+        } else {
+            return Err(LightningError::ValidationError(format!(
+                "activity source {} not found in nodes.",
+                act.source
+            )));
+        };
+
+        let destination = match &act.destination {
+            NodeId::Alias(a) => {
+                if let Some(info) = alias_node_map.get(a) {
+                    info.clone()
+                } else {
+                    return Err(LightningError::ValidationError(format!(
+                        "unknown activity destination: {}.",
+                        act.destination
+                    )));
+                }
+            },
+            NodeId::PublicKey(pk) => {
+                if let Some(info) = pk_node_map.get(pk) {
+                    info.clone()
+                } else {
+                    get_node_info(pk).map_err(|e| {
+                        log::debug!("{}", e);
+                        LightningError::ValidationError(format!(
+                            "Destination node unknown or invalid: {}.",
+                            pk,
+                        ))
+                    })?
+                }
+            },
+        };
+
+        validated_activities.push(ActivityDefinition {
+            source,
+            destination,
+            interval_secs: act.interval_secs,
+            amount_msat: act.amount_msat,
+            count: act.count,
+            start_secs: act.start_secs,
+        });
+    }
+
+    Ok(validated_activities)
 }
 
 async fn read_sim_path(data_dir: PathBuf, sim_file: PathBuf) -> anyhow::Result<PathBuf> {
