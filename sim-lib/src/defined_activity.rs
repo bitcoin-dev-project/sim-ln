@@ -1,4 +1,6 @@
-use crate::{DestinationGenerator, NodeInfo, PaymentGenerationError, PaymentGenerator};
+use crate::{
+    DestinationGenerator, NodeInfo, PaymentGenerationError, PaymentGenerator, ValueOrRange,
+};
 use std::fmt;
 use tokio::time::Duration;
 
@@ -7,8 +9,8 @@ pub struct DefinedPaymentActivity {
     destination: NodeInfo,
     start: Duration,
     count: Option<u64>,
-    wait: Duration,
-    amount: u64,
+    wait: ValueOrRange<u16>,
+    amount: ValueOrRange<u64>,
 }
 
 impl DefinedPaymentActivity {
@@ -16,8 +18,8 @@ impl DefinedPaymentActivity {
         destination: NodeInfo,
         start: Duration,
         count: Option<u64>,
-        wait: Duration,
-        amount: u64,
+        wait: ValueOrRange<u16>,
+        amount: ValueOrRange<u64>,
     ) -> Self {
         DefinedPaymentActivity {
             destination,
@@ -33,7 +35,7 @@ impl fmt::Display for DefinedPaymentActivity {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "static payment of {} to {} every {:?}",
+            "static payment of {} to {} every {}s",
             self.amount, self.destination, self.wait
         )
     }
@@ -55,7 +57,7 @@ impl PaymentGenerator for DefinedPaymentActivity {
     }
 
     fn next_payment_wait(&self) -> Duration {
-        self.wait
+        Duration::from_secs(self.wait.value() as u64)
     }
 
     fn payment_amount(
@@ -67,7 +69,7 @@ impl PaymentGenerator for DefinedPaymentActivity {
                 "destination amount must not be set for defined activity generator".to_string(),
             ))
         } else {
-            Ok(self.amount)
+            Ok(self.amount.value())
         }
     }
 }
@@ -75,9 +77,9 @@ impl PaymentGenerator for DefinedPaymentActivity {
 #[cfg(test)]
 mod tests {
     use super::DefinedPaymentActivity;
+    use super::*;
     use crate::test_utils::{create_nodes, get_random_keypair};
     use crate::{DestinationGenerator, PaymentGenerationError, PaymentGenerator};
-    use std::time::Duration;
 
     #[test]
     fn test_defined_activity_generator() {
@@ -91,8 +93,8 @@ mod tests {
             node.clone(),
             Duration::from_secs(0),
             None,
-            Duration::from_secs(60),
-            payment_amt,
+            crate::ValueOrRange::Value(60),
+            crate::ValueOrRange::Value(payment_amt),
         );
 
         let (dest, dest_capacity) = generator.choose_destination(source.1);
