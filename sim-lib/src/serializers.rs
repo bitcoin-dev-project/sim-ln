@@ -47,7 +47,7 @@ pub mod serde_node_id {
 
 pub mod serde_value_or_range {
     use super::*;
-    use serde::de::Error;
+    use serde::{de::Error, ser::SerializeTuple};
 
     use crate::ValueOrRange;
 
@@ -55,11 +55,17 @@ pub mod serde_value_or_range {
     where
         S: serde::Serializer,
         T: std::fmt::Display,
+        T: serde::Serialize,
     {
-        serializer.serialize_str(&match x {
-            ValueOrRange::Value(p) => p.to_string(),
-            ValueOrRange::Range(x, y) => format!("[{}, {}]", x, y),
-        })
+        match x {
+            ValueOrRange::Value(p) => serializer.serialize_some(p),
+            ValueOrRange::Range(x, y) => {
+                let mut tup = serializer.serialize_tuple(2)?;
+                tup.serialize_element(x)?;
+                tup.serialize_element(y)?;
+                tup.end()
+            },
+        }
     }
 
     pub fn deserialize<'de, D, T>(deserializer: D) -> Result<ValueOrRange<T>, D::Error>
