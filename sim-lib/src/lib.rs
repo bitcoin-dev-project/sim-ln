@@ -185,8 +185,7 @@ pub struct ActivityParser {
     #[serde(with = "serializers::serde_node_id")]
     pub destination: NodeId,
     /// The time in the simulation to start the payment.
-    #[serde(default)]
-    pub start_secs: u16,
+    pub start_secs: Option<u16>,
     /// The number of payments to send over the course of the simulation.
     #[serde(default)]
     pub count: Option<u64>,
@@ -207,7 +206,7 @@ pub struct ActivityDefinition {
     /// The destination of the payment.
     pub destination: NodeInfo,
     /// The time in the simulation to start the payment.
-    pub start_secs: u16,
+    pub start_secs: Option<u16>,
     /// The number of payments to send over the course of the simulation.
     pub count: Option<u64>,
     /// The interval of the event, as in every how many seconds the payment is performed.
@@ -328,7 +327,7 @@ pub struct PaymentGenerationError(String);
 
 pub trait PaymentGenerator: Display + Send {
     /// Returns the time that the payments should start
-    fn payment_start(&self) -> Duration;
+    fn payment_start(&self) -> Option<Duration>;
 
     /// Returns the number of payments that should be made
     fn payment_count(&self) -> Option<u64>;
@@ -819,7 +818,9 @@ impl Simulation {
             for description in self.activity.iter() {
                 let activity_generator = DefinedPaymentActivity::new(
                     description.destination.clone(),
-                    Duration::from_secs(description.start_secs.into()),
+                    description
+                        .start_secs
+                        .map(|start| Duration::from_secs(start.into())),
                     description.count,
                     description.interval_secs,
                     description.amount_msat,
@@ -1087,22 +1088,7 @@ async fn produce_events<N: DestinationGenerator + ?Sized, A: PaymentGenerator + 
             }
         }
 
-        let wait: Duration = if current_count == 0 {
-            let start = node_generator.payment_start();
-            if start != Duration::from_secs(0) {
-                log::debug!(
-                    "Using a start delay. The first payment for {source} will be at {:?}.",
-                    start
-                );
-            }
-            start
-        } else {
-            let wait = node_generator
-                .next_payment_wait()
-                .map_err(SimulationError::PaymentGenerationError)?;
-            log::debug!("Next payment for {source} in {:?}.", wait);
-            wait
-        };
+        let wait = get_payment_delay(current_count, &source, node_generator.as_ref())?;
 
         select! {
             biased;
@@ -1141,6 +1127,38 @@ async fn produce_events<N: DestinationGenerator + ?Sized, A: PaymentGenerator + 
                 current_count += 1;
             },
         }
+    }
+}
+
+/// Gets the wait time for the next payment. If this is the first payment being generated, and a specific start delay
+/// was set we return a once-off delay. Otherwise, the interval between payments is used.
+fn get_payment_delay<A: PaymentGenerator + ?Sized>(
+    call_count: u64,
+    source: &NodeInfo,
+    node_generator: &A,
+) -> Result<Duration, SimulationError> {
+    // Note: we can't check if let Some() && call_count (syntax not allowed) so we add an additional branch in here.
+    // The alternative is to call payment_start twice (which is _technically_ fine because it always returns the same
+    // value), but this approach only costs us a few extra lines so we go for the more verbose approach so that we
+    // don't have to make any assumptions about the underlying operation of payment_start.
+    if call_count != 0 {
+        let wait = node_generator
+            .next_payment_wait()
+            .map_err(SimulationError::PaymentGenerationError)?;
+        log::debug!("Next payment for {source} in {:?}.", wait);
+        Ok(wait)
+    } else if let Some(start) = node_generator.payment_start() {
+        log::debug!(
+            "First payment for {source} will be after a start delay of {:?}.",
+            start
+        );
+        Ok(start)
+    } else {
+        let wait = node_generator
+            .next_payment_wait()
+            .map_err(SimulationError::PaymentGenerationError)?;
+        log::debug!("First payment for {source} in {:?}.", wait);
+        Ok(wait)
     }
 }
 
@@ -1380,7 +1398,10 @@ async fn track_payment_result(
 
 #[cfg(test)]
 mod tests {
-    use crate::MutRng;
+    use crate::{get_payment_delay, test_utils, MutRng, PaymentGenerationError, PaymentGenerator};
+    use mockall::mock;
+    use std::fmt;
+    use std::time::Duration;
 
     #[test]
     fn create_seeded_mut_rng() {
@@ -1406,5 +1427,75 @@ mod tests {
         let mut rng_2 = mut_rng_2.0.lock().unwrap();
 
         assert_ne!(rng_1.next_u64(), rng_2.next_u64())
+    }
+
+    mock! {
+        pub Generator {}
+
+        impl fmt::Display for Generator {
+            fn fmt<'a>(&self, f: &mut fmt::Formatter<'a>) -> fmt::Result;
+        }
+
+        impl PaymentGenerator for Generator {
+            fn payment_start(&self) -> Option<Duration>;
+            fn payment_count(&self) -> Option<u64>;
+            fn next_payment_wait(&self) -> Result<Duration, PaymentGenerationError>;
+            fn payment_amount(&self, destination_capacity: Option<u64>) -> Result<u64, PaymentGenerationError>;
+        }
+    }
+
+    #[test]
+    fn test_no_payment_delay() {
+        let node = test_utils::create_nodes(1, 100_000)
+            .first()
+            .unwrap()
+            .0
+            .clone();
+
+        // Setup mocked generator to have no start time and send payments every 5 seconds.
+        let mut mock_generator = MockGenerator::new();
+        mock_generator.expect_payment_start().return_once(|| None);
+        let payment_interval = Duration::from_secs(5);
+        mock_generator
+            .expect_next_payment_wait()
+            .returning(move || Ok(payment_interval));
+
+        assert_eq!(
+            get_payment_delay(0, &node, &mock_generator).unwrap(),
+            payment_interval
+        );
+        assert_eq!(
+            get_payment_delay(1, &node, &mock_generator).unwrap(),
+            payment_interval
+        );
+    }
+
+    #[test]
+    fn test_payment_delay() {
+        let node = test_utils::create_nodes(1, 100_000)
+            .first()
+            .unwrap()
+            .0
+            .clone();
+
+        // Setup mocked generator to have a start delay and payment interval with different values.
+        let mut mock_generator = MockGenerator::new();
+        let start_delay = Duration::from_secs(10);
+        mock_generator
+            .expect_payment_start()
+            .return_once(move || Some(start_delay));
+        let payment_interval = Duration::from_secs(5);
+        mock_generator
+            .expect_next_payment_wait()
+            .returning(move || Ok(payment_interval));
+
+        assert_eq!(
+            get_payment_delay(0, &node, &mock_generator).unwrap(),
+            start_delay
+        );
+        assert_eq!(
+            get_payment_delay(1, &node, &mock_generator).unwrap(),
+            payment_interval
+        );
     }
 }
