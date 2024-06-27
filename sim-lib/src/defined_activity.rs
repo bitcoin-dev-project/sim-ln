@@ -7,7 +7,7 @@ use tokio::time::Duration;
 #[derive(Clone)]
 pub struct DefinedPaymentActivity {
     destination: NodeInfo,
-    start: Duration,
+    start: Option<Duration>,
     count: Option<u64>,
     wait: ValueOrRange<u16>,
     amount: ValueOrRange<u64>,
@@ -16,7 +16,7 @@ pub struct DefinedPaymentActivity {
 impl DefinedPaymentActivity {
     pub fn new(
         destination: NodeInfo,
-        start: Duration,
+        start: Option<Duration>,
         count: Option<u64>,
         wait: ValueOrRange<u16>,
         amount: ValueOrRange<u64>,
@@ -48,7 +48,7 @@ impl DestinationGenerator for DefinedPaymentActivity {
 }
 
 impl PaymentGenerator for DefinedPaymentActivity {
-    fn payment_start(&self) -> Duration {
+    fn payment_start(&self) -> Option<Duration> {
         self.start
     }
 
@@ -77,7 +77,6 @@ impl PaymentGenerator for DefinedPaymentActivity {
 #[cfg(test)]
 mod tests {
     use super::DefinedPaymentActivity;
-    use super::*;
     use crate::test_utils::{create_nodes, get_random_keypair};
     use crate::{DestinationGenerator, PaymentGenerationError, PaymentGenerator};
 
@@ -91,7 +90,7 @@ mod tests {
 
         let generator = DefinedPaymentActivity::new(
             node.clone(),
-            Duration::from_secs(0),
+            None,
             None,
             crate::ValueOrRange::Value(60),
             crate::ValueOrRange::Value(payment_amt),
