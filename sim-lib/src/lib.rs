@@ -182,8 +182,7 @@ pub struct ActivityParser {
     #[serde(with = "serializers::serde_node_id")]
     pub destination: NodeId,
     /// The time in the simulation to start the payment.
-    #[serde(default)]
-    pub start_secs: u16,
+    pub start_secs: Option<u16>,
     /// The number of payments to send over the course of the simulation.
     #[serde(default)]
     pub count: Option<u64>,
@@ -204,7 +203,7 @@ pub struct ActivityDefinition {
     /// The destination of the payment.
     pub destination: NodeInfo,
     /// The time in the simulation to start the payment.
-    pub start_secs: u16,
+    pub start_secs: Option<u16>,
     /// The number of payments to send over the course of the simulation.
     pub count: Option<u64>,
     /// The interval of the event, as in every how many seconds the payment is performed.
@@ -316,7 +315,7 @@ pub struct PaymentGenerationError(String);
 
 pub trait PaymentGenerator: Display + Send {
     /// Returns the time that the payments should start
-    fn payment_start(&self) -> Duration;
+    fn payment_start(&self) -> Option<Duration>;
 
     /// Returns the number of payments that should be made
     fn payment_count(&self) -> Option<u64>;
@@ -773,7 +772,9 @@ impl Simulation {
             for description in self.activity.iter() {
                 let activity_generator = DefinedPaymentActivity::new(
                     description.destination.clone(),
-                    Duration::from_secs(description.start_secs.into()),
+                    description
+                        .start_secs
+                        .map(|start| Duration::from_secs(start.into())),
                     description.count,
                     description.interval_secs,
                     description.amount_msat,
@@ -1037,14 +1038,15 @@ async fn produce_events<N: DestinationGenerator + ?Sized, A: PaymentGenerator + 
             }
         }
 
-        let wait: Duration = if current_count == 0 {
-            let start = node_generator.payment_start();
-            if start != Duration::from_secs(0) {
-                log::debug!(
-                    "Using a start delay. The first payment for {source} will be at {:?}.",
-                    start
-                );
-            }
+        // On our first run, add a one-time start delay if set for our payment.
+        let opt_start = node_generator.payment_start();
+        let wait = if current_count == 0 && opt_start.is_some() {
+            let start = opt_start.unwrap(); // Safe due to is_some check above.
+            log::debug!(
+                "Using a start delay. The first payment for {source} will be at {:?}.",
+                start
+            );
+
             start
         } else {
             log::debug!(
