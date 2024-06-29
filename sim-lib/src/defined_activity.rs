@@ -1,5 +1,6 @@
 use crate::{
-    DestinationGenerator, NodeInfo, PaymentGenerationError, PaymentGenerator, ValueOrRange,
+    DestinationGenerationError, DestinationGenerator, NodeInfo, PaymentGenerationError,
+    PaymentGenerator, ValueOrRange,
 };
 use std::fmt;
 use tokio::time::Duration;
@@ -42,8 +43,11 @@ impl fmt::Display for DefinedPaymentActivity {
 }
 
 impl DestinationGenerator for DefinedPaymentActivity {
-    fn choose_destination(&self, _: bitcoin::secp256k1::PublicKey) -> (NodeInfo, Option<u64>) {
-        (self.destination.clone(), None)
+    fn choose_destination(
+        &self,
+        _: bitcoin::secp256k1::PublicKey,
+    ) -> Result<(NodeInfo, Option<u64>), DestinationGenerationError> {
+        Ok((self.destination.clone(), None))
     }
 }
 
@@ -56,8 +60,8 @@ impl PaymentGenerator for DefinedPaymentActivity {
         self.count
     }
 
-    fn next_payment_wait(&self) -> Duration {
-        Duration::from_secs(self.wait.value() as u64)
+    fn next_payment_wait(&self) -> Result<Duration, PaymentGenerationError> {
+        Ok(Duration::from_secs(self.wait.value() as u64))
     }
 
     fn payment_amount(
@@ -97,7 +101,7 @@ mod tests {
             crate::ValueOrRange::Value(payment_amt),
         );
 
-        let (dest, dest_capacity) = generator.choose_destination(source.1);
+        let (dest, dest_capacity) = generator.choose_destination(source.1).unwrap();
         assert_eq!(node.pubkey, dest.pubkey);
         assert!(dest_capacity.is_none());
 

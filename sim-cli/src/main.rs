@@ -74,6 +74,9 @@ struct Cli {
     /// Do not create an output file containing the simulations results
     #[clap(long, default_value_t = false)]
     no_results: bool,
+    /// Seed to run random activity generator deterministically
+    #[clap(long, short)]
+    fix_seed: Option<u64>,
 }
 
 #[tokio::main]
@@ -208,6 +211,7 @@ async fn main() -> anyhow::Result<()> {
         cli.expected_pmt_amt,
         cli.capacity_multiplier,
         write_results,
+        cli.fix_seed,
     );
     let sim2 = sim.clone();
 

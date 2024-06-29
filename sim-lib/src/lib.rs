@@ -4,13 +4,16 @@ use bitcoin::Network;
 use csv::WriterBuilder;
 use lightning::ln::features::NodeFeatures;
 use lightning::ln::PaymentHash;
-use rand::Rng;
+use rand::rngs::StdRng;
+use rand::{Rng, RngCore, SeedableRng};
+use rand_chacha::ChaCha8Rng;
 use random_activity::RandomActivityError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
 use std::marker::Send;
 use std::path::PathBuf;
+use std::sync::Mutex as StdMutex;
 use std::time::{SystemTimeError, UNIX_EPOCH};
 use std::{collections::HashMap, sync::Arc, time::SystemTime};
 use thiserror::Error;
@@ -235,6 +238,8 @@ pub enum SimulationError {
     MpscChannelError(String),
     #[error("Payment Generation Error: {0}")]
     PaymentGenerationError(PaymentGenerationError),
+    #[error("Destination Generation Error: {0}")]
+    DestinationGenerationError(DestinationGenerationError),
 }
 
 #[derive(Debug, Error)]
@@ -304,10 +309,17 @@ pub trait LightningNode: Send {
     async fn list_channels(&mut self) -> Result<Vec<u64>, LightningError>;
 }
 
+#[derive(Debug, Error)]
+#[error("Destination generation error: {0}")]
+pub struct DestinationGenerationError(String);
+
 pub trait DestinationGenerator: Send {
     /// choose_destination picks a destination node within the network, returning the node's information and its
     /// capacity (if available).
-    fn choose_destination(&self, source: PublicKey) -> (NodeInfo, Option<u64>);
+    fn choose_destination(
+        &self,
+        source: PublicKey,
+    ) -> Result<(NodeInfo, Option<u64>), DestinationGenerationError>;
 }
 
 #[derive(Debug, Error)]
@@ -322,7 +334,7 @@ pub trait PaymentGenerator: Display + Send {
     fn payment_count(&self) -> Option<u64>;
 
     /// Returns the number of seconds that a node should wait until firing its next payment.
-    fn next_payment_wait(&self) -> time::Duration;
+    fn next_payment_wait(&self) -> Result<time::Duration, PaymentGenerationError>;
 
     /// Returns a payment amount based, with a destination capacity optionally provided to inform the amount picked.
     fn payment_amount(
@@ -435,6 +447,36 @@ enum SimulationOutput {
     SendPaymentFailure(Payment, PaymentResult),
 }
 
+/// MutRngType is a convenient type alias for any random number generator (RNG) type that
+/// allows shared and exclusive access. This is necessary because a single RNG
+/// is to be shared across multiple `DestinationGenerator`s and `PaymentGenerator`s
+/// for deterministic outcomes.
+///
+/// **Note**: `StdMutex`, i.e. (`std::sync::Mutex`), is used here to avoid making the traits
+/// `DestinationGenerator` and `PaymentGenerator` async.
+type MutRngType = Arc<StdMutex<Box<dyn RngCore + Send>>>;
+
+/// Newtype for `MutRngType` to encapsulate and hide implementation details for
+/// creating new `MutRngType` types. Provides convenient API for the same purpose.
+#[derive(Clone)]
+struct MutRng(pub MutRngType);
+
+impl MutRng {
+    /// Creates a new MutRng given an optional `u64` argument. If `seed_opt` is `Some`,
+    /// random activity generation in the simulator occurs near-deterministically.
+    /// If it is `None`, activity generation is truly random, and based on a
+    /// non-deterministic source of entropy.
+    pub fn new(seed_opt: Option<u64>) -> Self {
+        if let Some(seed) = seed_opt {
+            Self(Arc::new(StdMutex::new(
+                Box::new(ChaCha8Rng::seed_from_u64(seed)) as Box<dyn RngCore + Send>,
+            )))
+        } else {
+            Self(Arc::new(StdMutex::new(Box::new(StdRng::from_entropy()))))
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Simulation {
     /// The lightning node that is being simulated.
@@ -453,6 +495,8 @@ pub struct Simulation {
     activity_multiplier: f64,
     /// Configurations for printing results to CSV. Results are not written if this option is None.
     write_results: Option<WriteResults>,
+    /// Random number generator created from fixed seed.
+    seeded_rng: MutRng,
 }
 
 #[derive(Clone)]
@@ -462,7 +506,7 @@ pub struct WriteResults {
     /// The number of activity results to batch before printing in CSV.
     pub batch_size: u32,
 }
-///
+
 /// ExecutorKit contains the components required to spin up an activity configured by the user, to be used to
 /// spin up the appropriate producers and consumers for the activity.
 struct ExecutorKit {
@@ -481,6 +525,7 @@ impl Simulation {
         expected_payment_msat: u64,
         activity_multiplier: f64,
         write_results: Option<WriteResults>,
+        seed: Option<u64>,
     ) -> Self {
         let (shutdown_trigger, shutdown_listener) = triggered::trigger();
         Self {
@@ -492,6 +537,7 @@ impl Simulation {
             expected_payment_msat,
             activity_multiplier,
             write_results,
+            seeded_rng: MutRng::new(seed),
         }
     }
 
@@ -823,8 +869,11 @@ impl Simulation {
         }
 
         let network_generator = Arc::new(Mutex::new(
-            NetworkGraphView::new(active_nodes.values().cloned().collect())
-                .map_err(SimulationError::RandomActivityError)?,
+            NetworkGraphView::new(
+                active_nodes.values().cloned().collect(),
+                self.seeded_rng.clone(),
+            )
+            .map_err(SimulationError::RandomActivityError)?,
         ));
 
         log::info!(
@@ -841,6 +890,7 @@ impl Simulation {
                         *capacity,
                         self.expected_payment_msat,
                         self.activity_multiplier,
+                        self.seeded_rng.clone(),
                     )
                     .map_err(SimulationError::RandomActivityError)?,
                 ),
@@ -1047,11 +1097,11 @@ async fn produce_events<N: DestinationGenerator + ?Sized, A: PaymentGenerator + 
             }
             start
         } else {
-            log::debug!(
-                "Next payment for {source} in {:?}.",
-                node_generator.next_payment_wait()
-            );
-            node_generator.next_payment_wait()
+            let wait = node_generator
+                .next_payment_wait()
+                .map_err(SimulationError::PaymentGenerationError)?;
+            log::debug!("Next payment for {source} in {:?}.", wait);
+            wait
         };
 
         select! {
@@ -1062,7 +1112,7 @@ async fn produce_events<N: DestinationGenerator + ?Sized, A: PaymentGenerator + 
             // Wait until our time to next payment has elapsed then execute a random amount payment to a random
             // destination.
             _ = time::sleep(wait) => {
-                let (destination, capacity) = network_generator.lock().await.choose_destination(source.pubkey);
+                let (destination, capacity) = network_generator.lock().await.choose_destination(source.pubkey).map_err(SimulationError::DestinationGenerationError)?;
 
                 // Only proceed with a payment if the amount is non-zero, otherwise skip this round. If we can't get
                 // a payment amount something has gone wrong (because we should have validated that we can always
@@ -1326,4 +1376,35 @@ async fn track_payment_result(
     log::trace!("Result tracking complete. Payment result tracker exiting.");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::MutRng;
+
+    #[test]
+    fn create_seeded_mut_rng() {
+        let seeds = vec![u64::MIN, u64::MAX];
+
+        for seed in seeds {
+            let mut_rng_1 = MutRng::new(Some(seed));
+            let mut_rng_2 = MutRng::new(Some(seed));
+
+            let mut rng_1 = mut_rng_1.0.lock().unwrap();
+            let mut rng_2 = mut_rng_2.0.lock().unwrap();
+
+            assert_eq!(rng_1.next_u64(), rng_2.next_u64())
+        }
+    }
+
+    #[test]
+    fn create_unseeded_mut_rng() {
+        let mut_rng_1 = MutRng::new(None);
+        let mut_rng_2 = MutRng::new(None);
+
+        let mut rng_1 = mut_rng_1.0.lock().unwrap();
+        let mut rng_2 = mut_rng_2.0.lock().unwrap();
+
+        assert_ne!(rng_1.next_u64(), rng_2.next_u64())
+    }
 }
