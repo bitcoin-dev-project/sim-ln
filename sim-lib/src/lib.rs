@@ -453,12 +453,12 @@ enum SimulationOutput {
 ///
 /// **Note**: `StdMutex`, i.e. (`std::sync::Mutex`), is used here to avoid making the traits
 /// `DestinationGenerator` and `PaymentGenerator` async.
-type MutRngType = Arc<StdMutex<Box<dyn RngCore + Send>>>;
+type MutRngType = Arc<StdMutex<dyn RngCore + Send>>;
 
 /// Newtype for `MutRngType` to encapsulate and hide implementation details for
 /// creating new `MutRngType` types. Provides convenient API for the same purpose.
 #[derive(Clone)]
-struct MutRng(pub MutRngType);
+struct MutRng(MutRngType);
 
 impl MutRng {
     /// Creates a new MutRng given an optional `u64` argument. If `seed_opt` is `Some`,
@@ -467,11 +467,9 @@ impl MutRng {
     /// non-deterministic source of entropy.
     pub fn new(seed_opt: Option<u64>) -> Self {
         if let Some(seed) = seed_opt {
-            Self(Arc::new(StdMutex::new(
-                Box::new(ChaCha8Rng::seed_from_u64(seed)) as Box<dyn RngCore + Send>,
-            )))
+            Self(Arc::new(StdMutex::new(ChaCha8Rng::seed_from_u64(seed))))
         } else {
-            Self(Arc::new(StdMutex::new(Box::new(StdRng::from_entropy()))))
+            Self(Arc::new(StdMutex::new(StdRng::from_entropy())))
         }
     }
 }

@@ -132,7 +132,12 @@ of the random activity that is generated:
      capacity in a month.
   * `capacity-multiplier=0.5` means that each node sends half their 
     capacity in a month.
-* `--fix-seed`: a `u64` value that allows you to generate random activities deterministically from the provided seed, albeit with some limitations. The  simulations are not guaranteed to be perfectly deterministic because tasks complete in slightly different orders on each run of the simulator. With a fixed seed, we can guarantee that the order in which activities are dispatched will be deterministic.
+* `--fix-seed`: a `u64` value that allows you to generate random activities 
+  deterministically from the provided seed, albeit with some limitations. 
+  The simulations are not guaranteed to be perfectly deterministic because 
+  tasks complete in slightly different orders on each run of the simulator. 
+  With a fixed seed, we can guarantee that the order in which activities are
+  dispatched will be deterministic.
 
 ### Setup - Defined Activity
 If you would like SimLN to generate a specific payments between source 
