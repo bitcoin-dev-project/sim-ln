@@ -446,22 +446,22 @@ enum SimulationOutput {
     SendPaymentFailure(Payment, PaymentResult),
 }
 
-/// MutRngType is a convenient type alias for any random number generator (RNG) type that
+/// RngSendType is a convenient type alias for any random number generator (RNG) type that
 /// allows shared and exclusive access. This is necessary because a single RNG
 /// is to be shared across multiple `DestinationGenerator`s and `PaymentGenerator`s
 /// for deterministic outcomes.
 ///
 /// **Note**: `StdMutex`, i.e. (`std::sync::Mutex`), is used here to avoid making the traits
 /// `DestinationGenerator` and `PaymentGenerator` async.
-type MutRngType = Arc<StdMutex<dyn RngCore + Send>>;
+type RngSendType = Arc<StdMutex<dyn RngCore + Send>>;
 
-/// Newtype for `MutRngType` to encapsulate and hide implementation details for
-/// creating new `MutRngType` types. Provides convenient API for the same purpose.
+/// Newtype for `RngSendType` to encapsulate and hide implementation details for
+/// creating new `RngSendType` types. Provides convenient API for the same purpose.
 #[derive(Clone)]
-struct MutRng(MutRngType);
+struct RngSend(RngSendType);
 
-impl MutRng {
-    /// Creates a new MutRng given an optional `u64` argument. If `seed_opt` is `Some`,
+impl RngSend {
+    /// Creates a new RngSend given an optional `u64` argument. If `seed_opt` is `Some`,
     /// random activity generation in the simulator occurs near-deterministically.
     /// If it is `None`, activity generation is truly random, and based on a
     /// non-deterministic source of entropy.
@@ -487,7 +487,7 @@ pub struct SimulationCfg {
     /// Configurations for printing results to CSV. Results are not written if this option is None.
     write_results: Option<WriteResults>,
     /// Random number generator created from fixed seed.
-    seeded_rng: MutRng,
+    seeded_rng: RngSend,
 }
 
 impl SimulationCfg {
@@ -503,7 +503,7 @@ impl SimulationCfg {
             expected_payment_msat,
             activity_multiplier,
             write_results,
-            seeded_rng: MutRng::new(seed),
+            seeded_rng: RngSend::new(seed),
         }
     }
 }
@@ -1414,7 +1414,7 @@ async fn track_payment_result(
 
 #[cfg(test)]
 mod tests {
-    use crate::{get_payment_delay, test_utils, MutRng, PaymentGenerationError, PaymentGenerator};
+    use crate::{get_payment_delay, test_utils, PaymentGenerationError, PaymentGenerator, RngSend};
     use mockall::mock;
     use std::fmt;
     use std::time::Duration;
@@ -1424,8 +1424,8 @@ mod tests {
         let seeds = vec![u64::MIN, u64::MAX];
 
         for seed in seeds {
-            let mut_rng_1 = MutRng::new(Some(seed));
-            let mut_rng_2 = MutRng::new(Some(seed));
+            let mut_rng_1 = RngSend::new(Some(seed));
+            let mut_rng_2 = RngSend::new(Some(seed));
 
             let mut rng_1 = mut_rng_1.0.lock().unwrap();
             let mut rng_2 = mut_rng_2.0.lock().unwrap();
@@ -1436,8 +1436,8 @@ mod tests {
 
     #[test]
     fn create_unseeded_mut_rng() {
-        let mut_rng_1 = MutRng::new(None);
-        let mut_rng_2 = MutRng::new(None);
+        let mut_rng_1 = RngSend::new(None);
+        let mut_rng_2 = RngSend::new(None);
 
         let mut rng_1 = mut_rng_1.0.lock().unwrap();
         let mut rng_2 = mut_rng_2.0.lock().unwrap();
