@@ -462,10 +462,11 @@ pub struct RngSend(RngSendType);
 impl RngSend {
     /// Creates a new RngSend given an optional `u64` argument. If `seed_opt` is `Some`, random activity generation
     /// in the simulator occurs near-deterministically. If it is `None`, activity generation is truly random, and
-    /// based on a non-deterministic source of entropy.
-    pub fn new(seed_opt: Option<u64>) -> Self {
+    /// based on a non-deterministic source of entropy. We also pass in "salt" for each RngSend that is created so
+    /// that individual callers with the same seed can still produce unique RNGs.
+    pub fn new(seed_opt: Option<u64>, salt: u64) -> Self {
         if let Some(seed) = seed_opt {
-            RngSend(Box::new(ChaCha8Rng::seed_from_u64(seed)))
+            RngSend(Box::new(ChaCha8Rng::seed_from_u64(seed + salt)))
         } else {
             RngSend(Box::new(StdRng::from_entropy()))
         }
@@ -1091,10 +1092,19 @@ async fn produce_events<N: DestinationGenerator + ?Sized, A: PaymentGenerator + 
     seed: Option<u64>,
     listener: Listener,
 ) -> Result<(), SimulationError> {
+    // Pubkey is only exposed via to_string API, so we grab the last 15 digits to get an identifier for this
+    // node to feed into our RNG creation below.
+    let pk_str = source.pubkey.to_string();
+    let pk = u64::from_str_radix(&pk_str[pk_str.len() - 15..], 16)
+        .map_err(|e| SimulationError::FixedSeedError(e.to_string()))?;
+
     // We create one RNG per payment activity generator so that when we have a fixed seed, each generator will get the
     // same set of values across runs (with a shared RNG, the order in which tasks access the shared RNG would change
-    // the value that each generator gets).
-    let mut rng = RngSend::new(seed);
+    // the value that each generator gets). We "salt" the set seed with a value based on the node's public key so that
+    // each generator will start with a different seed, but it will be the same across runs. It is not critical is the
+    // value is the same for two nodes (and it's very unlikely). We can't use an index here because order of iteration
+    // through hashmaps is random.
+    let mut rng = RngSend::new(seed, pk);
 
     let mut current_count = 0;
     loop {
@@ -1429,8 +1439,8 @@ mod tests {
         let seeds = vec![u64::MIN, u64::MAX];
 
         for seed in seeds {
-            let mut_rng_1 = RngSend::new(Some(seed));
-            let mut_rng_2 = RngSend::new(Some(seed));
+            let mut_rng_1 = RngSend::new(Some(seed), 0);
+            let mut_rng_2 = RngSend::new(Some(seed), 0);
 
             let mut rng_1 = mut_rng_1.0;
             let mut rng_2 = mut_rng_2.0;
@@ -1440,9 +1450,17 @@ mod tests {
     }
 
     #[test]
+    fn create_salted_rng() {
+        let mut rng_1 = RngSend::new(Some(1234), 0);
+        let mut rng_2 = RngSend::new(Some(1234), 1);
+
+        assert!(rng_1.0.next_u64() != rng_2.0.next_u64())
+    }
+
+    #[test]
     fn create_unseeded_mut_rng() {
-        let mut_rng_1 = RngSend::new(None);
-        let mut_rng_2 = RngSend::new(None);
+        let mut_rng_1 = RngSend::new(None, 0);
+        let mut_rng_2 = RngSend::new(None, 0);
 
         let mut rng_1 = mut_rng_1.0;
         let mut rng_2 = mut_rng_2.0;
@@ -1481,7 +1499,7 @@ mod tests {
             .expect_next_payment_wait()
             .returning(move |_| Ok(payment_interval));
 
-        let mut rng = RngSend::new(None);
+        let mut rng = RngSend::new(None, 0);
         assert_eq!(
             get_payment_delay(0, &node, &mock_generator, &mut rng).unwrap(),
             payment_interval
@@ -1511,7 +1529,7 @@ mod tests {
             .expect_next_payment_wait()
             .returning(move |_| Ok(payment_interval));
 
-        let mut rng = RngSend::new(None);
+        let mut rng = RngSend::new(None, 0);
         assert_eq!(
             get_payment_delay(0, &node, &mock_generator, &mut rng).unwrap(),
             start_delay
