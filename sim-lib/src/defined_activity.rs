@@ -102,7 +102,7 @@ mod tests {
             crate::ValueOrRange::Value(payment_amt),
         );
 
-        let mut rng = RngSend::new(None);
+        let mut rng = RngSend::new(None, 0);
         let (dest, dest_capacity) = generator.choose_destination(&mut rng, source.1).unwrap();
         assert_eq!(node.pubkey, dest.pubkey);
         assert!(dest_capacity.is_none());

@@ -343,7 +343,7 @@ mod tests {
             let view = NetworkGraphView::new(nodes).unwrap();
 
             for _ in 0..10 {
-                view.choose_destination(&mut RngSend::new(None), big_node)
+                view.choose_destination(&mut RngSend::new(None, 0), big_node)
                     .unwrap();
             }
         }
@@ -411,7 +411,7 @@ mod tests {
             // All of them will yield a sigma squared smaller than 0, which we have a sanity check for.
             let expected_payment = get_random_int(1, 100);
             let source_capacity = 2 * expected_payment;
-            let mut rng = RngSend::new(Some(u64::MAX));
+            let mut rng = RngSend::new(Some(u64::MAX), 0);
             let pag = RandomPaymentActivity::new(source_capacity, expected_payment, 1.0).unwrap();
 
             // Wrong cases
