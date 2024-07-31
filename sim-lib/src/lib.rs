@@ -1053,8 +1053,17 @@ async fn consume_events(
                                 }
                             };
 
-                            if sender.send(outcome.clone()).await.is_err() {
-                                return Err(SimulationError::MpscChannelError(format!("Error sending simulation output {outcome:?}.")));
+                            select!{
+                                biased;
+                                _ = listener.clone() => {
+                                    return Ok(())
+                                }
+                                send_result = sender.send(outcome.clone()) => {
+                                    if send_result.is_err() {
+                                        return Err(SimulationError::MpscChannelError(
+                                                format!("Error sending simulation output {outcome:?}.")));
+                                    }
+                                }
                             }
                         }
                     }
@@ -1118,8 +1127,17 @@ async fn produce_events<N: DestinationGenerator + ?Sized, A: PaymentGenerator + 
 
                 // Send the payment, exiting if we can no longer send to the consumer.
                 let event = SimulationEvent::SendPayment(destination.clone(), amount);
-                if sender.send(event.clone()).await.is_err() {
-                    return Err(SimulationError::MpscChannelError (format!("Stopped activity producer for {amount}: {source} -> {destination}.")));
+                select!{
+                    biased;
+                    _ = listener.clone() => {
+                        return Ok(());
+                    },
+                    send_result = sender.send(event.clone()) => {
+                        if send_result.is_err(){
+                            return Err(SimulationError::MpscChannelError(
+                                    format!("Stopped activity producer for {amount}: {source} -> {destination}.")));
+                        }
+                    },
                 }
 
                 current_count += 1;
@@ -1314,10 +1332,18 @@ async fn produce_simulation_results(
                                 }
                             },
                             SimulationOutput::SendPaymentFailure(payment, result) => {
-                                if results.send((payment, result.clone())).await.is_err() {
-                                    break Err(SimulationError::MpscChannelError(
-                                        format!("Failed to send payment result: {result} for payment {:?} dispatched at {:?}.", payment.hash, payment.dispatch_time),
-                                    ));
+                                select!{
+                                    _ = listener.clone() => {
+                                        return Ok(());
+                                    },
+                                    send_result = results.send((payment, result.clone())) => {
+                                        if send_result.is_err(){
+                                            break Err(SimulationError::MpscChannelError(
+                                                format!("Failed to send payment result: {result} for payment {:?} dispatched at {:?}.",
+                                                        payment.hash, payment.dispatch_time),
+                                            ));
+                                        }
+                                    },
                                 }
                             }
                         };
@@ -1384,7 +1410,8 @@ async fn track_payment_result(
         },
         send_payment_result = results.send((payment, res.clone())) => {
             if send_payment_result.is_err() {
-                return Err(SimulationError::MpscChannelError(format!("Failed to send payment result {res} for payment {payment}.")))
+                return Err(SimulationError::MpscChannelError(
+                        format!("Failed to send payment result {res} for payment {payment}.")))
             }
         }
     }
