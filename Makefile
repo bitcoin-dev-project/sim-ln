@@ -46,3 +46,9 @@ stable-output:
 	fi
 
 check: check-code stable-output
+
+install:
+	cargo install --locked --path sim-cli
+
+dev-install:
+	RUSTFLAGS="--cfg tokio_unstable" cargo install --locked --path sim-cli --features dev
