@@ -81,6 +81,12 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Enable tracing if building in developer mode.
+    #[cfg(feature = "dev")]
+    {
+        console_subscriber::init();
+    }
+
     let cli = Cli::parse();
 
     SimpleLogger::new()
