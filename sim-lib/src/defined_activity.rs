@@ -1,6 +1,6 @@
 use crate::{
     DestinationGenerationError, DestinationGenerator, NodeInfo, PaymentGenerationError,
-    PaymentGenerator, ValueOrRange,
+    PaymentGenerator, RngSend, ValueOrRange,
 };
 use std::fmt;
 use tokio::time::Duration;
@@ -45,6 +45,7 @@ impl fmt::Display for DefinedPaymentActivity {
 impl DestinationGenerator for DefinedPaymentActivity {
     fn choose_destination(
         &self,
+        _: &mut RngSend,
         _: bitcoin::secp256k1::PublicKey,
     ) -> Result<(NodeInfo, Option<u64>), DestinationGenerationError> {
         Ok((self.destination.clone(), None))
@@ -60,12 +61,13 @@ impl PaymentGenerator for DefinedPaymentActivity {
         self.count
     }
 
-    fn next_payment_wait(&self) -> Result<Duration, PaymentGenerationError> {
+    fn next_payment_wait(&self, _: &mut RngSend) -> Result<Duration, PaymentGenerationError> {
         Ok(Duration::from_secs(self.wait.value() as u64))
     }
 
     fn payment_amount(
         &self,
+        _: &mut RngSend,
         destination_capacity: Option<u64>,
     ) -> Result<u64, crate::PaymentGenerationError> {
         if destination_capacity.is_some() {
@@ -82,7 +84,7 @@ impl PaymentGenerator for DefinedPaymentActivity {
 mod tests {
     use super::DefinedPaymentActivity;
     use crate::test_utils::{create_nodes, get_random_keypair};
-    use crate::{DestinationGenerator, PaymentGenerationError, PaymentGenerator};
+    use crate::{DestinationGenerator, PaymentGenerationError, PaymentGenerator, RngSend};
 
     #[test]
     fn test_defined_activity_generator() {
@@ -100,13 +102,17 @@ mod tests {
             crate::ValueOrRange::Value(payment_amt),
         );
 
-        let (dest, dest_capacity) = generator.choose_destination(source.1).unwrap();
+        let mut rng = RngSend::new(None, 0);
+        let (dest, dest_capacity) = generator.choose_destination(&mut rng, source.1).unwrap();
         assert_eq!(node.pubkey, dest.pubkey);
         assert!(dest_capacity.is_none());
 
-        assert_eq!(payment_amt, generator.payment_amount(None).unwrap());
+        assert_eq!(
+            payment_amt,
+            generator.payment_amount(&mut rng, None).unwrap()
+        );
         assert!(matches!(
-            generator.payment_amount(Some(10)),
+            generator.payment_amount(&mut rng, Some(10)),
             Err(PaymentGenerationError(..))
         ));
     }
