@@ -494,6 +494,8 @@ pub struct Simulation {
     write_results: Option<WriteResults>,
     /// Random number generator created from fixed seed.
     seeded_rng: MutRng,
+    /// Results logger that holds the simulation statistics.
+    results: Arc<Mutex<PaymentResultLogger>>,
 }
 
 #[derive(Clone)]
@@ -535,6 +537,7 @@ impl Simulation {
             activity_multiplier,
             write_results,
             seeded_rng: MutRng::new(seed),
+            results: Arc::new(Mutex::new(PaymentResultLogger::new())),
         }
     }
 
@@ -739,6 +742,14 @@ impl Simulation {
         self.shutdown_trigger.trigger()
     }
 
+    pub async fn get_total_payments(&self) -> u64 {
+        self.results.lock().await.total_attempts()
+    }
+
+    pub async fn get_success_rate(&self) -> f64 {
+        self.results.lock().await.success_rate()
+    }
+
     /// run_data_collection starts the tasks required for the simulation to report of the results of the activity that
     /// it generates. The simulation should report outputs via the receiver that is passed in.
     fn run_data_collection(
@@ -770,7 +781,7 @@ impl Simulation {
             }
         });
 
-        let result_logger = Arc::new(Mutex::new(PaymentResultLogger::new()));
+        let result_logger = self.results.clone();
 
         let result_logger_clone = result_logger.clone();
         let result_logger_listener = listener.clone();
@@ -1238,17 +1249,24 @@ impl PaymentResultLogger {
 
         self.total_sent += details.amount_msat;
     }
+
+    fn total_attempts(&self) -> u64 {
+        self.success_payment + self.failed_payment
+    }
+
+    fn success_rate(&self) -> f64 {
+        (self.success_payment as f64 / self.total_attempts() as f64) * 100.0
+    }
 }
 
 impl Display for PaymentResultLogger {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let total_payments = self.success_payment + self.failed_payment;
         write!(
             f,
             "Processed {} payments sending {} msat total with {:.2}% success rate.",
-            total_payments,
+            self.total_attempts(),
             self.total_sent,
-            (self.success_payment as f64 / total_payments as f64) * 100.0
+            self.success_rate()
         )
     }
 }
