@@ -38,7 +38,7 @@ cd sim-ln
 
 Install the CLI: 
 ```
-cargo install --locked --path sim-cli/
+make install
 ```
 
 To run the simulation, create a simulation file `sim.json` in the working directory (see [setup instructions](#simulation-file-setup) for details) and run:
@@ -255,3 +255,8 @@ project.
 
 ## Docker
 If you want to run the cli in a containerized environment, see the docker set up docs [here](./docker/README.md)
+
+## Developers 
+
+* [Developer documentation](docs/DEVELOPER.md)
+* [Architecture](docs/ARCHITECTURE.md) 
