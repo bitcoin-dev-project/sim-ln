@@ -30,13 +30,29 @@ See our [tracking issue](https://github.com/bitcoin-dev-project/sim-ln/issues/26
 for updates on implementation support (contributions welcome!).
 
 ## Getting Started
-Clone the repo: 
+First of all make sure protobuf is installed on your machine. 
+### Installing Protobuf on Debian based Linux:
+```
+$ sudo apt install protobuf-compiler
+$ protoc --version 
+```
+
+### Installing protobuf on Mac:
+```
+$ brew install protobuf 
+$ protoc --version
+```
+For other operating systems , you can find installation insturctions here [install protobuf](https://grpc.io/docs/protoc-installation/)
+
+
+
+### Clone the repo: 
 ```
 git clone https://github.com/bitcoin-dev-project/sim-ln
 cd sim-ln
 ```
 
-Install the CLI: 
+### Install the CLI: 
 ```
 make install
 ```
