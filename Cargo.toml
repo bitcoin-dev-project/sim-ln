@@ -3,5 +3,5 @@ resolver = "2"
 
 members = [
     "sim-cli",
-    "sim-lib",
+    "simln-lib",
 ]

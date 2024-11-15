@@ -1,5 +1,4 @@
 use bitcoin::secp256k1::PublicKey;
-use sim_lib::SimulationCfg;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -9,9 +8,9 @@ use anyhow::anyhow;
 use clap::builder::TypedValueParser;
 use clap::Parser;
 use log::LevelFilter;
-use sim_lib::{
+use simln_lib::{
     cln::ClnNode, lnd::LndNode, ActivityDefinition, LightningError, LightningNode, NodeConnection,
-    NodeId, SimParams, Simulation, WriteResults,
+    NodeId, SimParams, Simulation, SimulationCfg, WriteResults,
 };
 use simple_logger::SimpleLogger;
 
