@@ -122,6 +122,25 @@ pub struct ChannelPolicy {
     pub fee_rate_prop: u64,
 }
 
+impl ChannelPolicy {
+    /// Validates that the channel policy is acceptable for the size of the channel.
+    fn validate(&self, capacity_msat: u64) -> Result<(), SimulationError> {
+        if self.max_in_flight_msat > capacity_msat {
+            return Err(SimulationError::SimulatedNetworkError(format!(
+                "max_in_flight_msat {} > capacity {}",
+                self.max_in_flight_msat, capacity_msat
+            )));
+        }
+        if self.max_htlc_size_msat > capacity_msat {
+            return Err(SimulationError::SimulatedNetworkError(format!(
+                "max_htlc_size_msat {} > capacity {}",
+                self.max_htlc_size_msat, capacity_msat
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// Fails with the forwarding error provided if the value provided fails its inequality check.
 macro_rules! fail_forwarding_inequality {
     ($value_1:expr, $op:tt, $value_2:expr, $error_variant:ident $(, $opt:expr)*) => {
@@ -289,6 +308,21 @@ impl SimulatedChannel {
             node_1: ChannelState::new(node_1, capacity_msat / 2),
             node_2: ChannelState::new(node_2, capacity_msat / 2),
         }
+    }
+
+    /// Validates that a simulated channel has distinct node pairs and valid routing policies.
+    fn validate(&self) -> Result<(), SimulationError> {
+        if self.node_1.policy.pubkey == self.node_2.policy.pubkey {
+            return Err(SimulationError::SimulatedNetworkError(format!(
+                "Channel should have distinct node pubkeys, got: {} for both nodes.",
+                self.node_1.policy.pubkey
+            )));
+        }
+
+        self.node_1.policy.validate(self.capacity_msat)?;
+        self.node_2.policy.validate(self.capacity_msat)?;
+
+        Ok(())
     }
 
     fn get_node_mut(&mut self, pubkey: &PublicKey) -> Result<&mut ChannelState, ForwardingError> {
@@ -617,13 +651,25 @@ impl SimGraph {
     pub fn new(
         graph_channels: Vec<SimulatedChannel>,
         shutdown_trigger: Trigger,
-    ) -> Result<Self, LdkError> {
+    ) -> Result<Self, SimulationError> {
         let mut nodes: HashMap<PublicKey, Vec<u64>> = HashMap::new();
         let mut channels = HashMap::new();
 
         for channel in graph_channels.iter() {
-            channels.insert(channel.short_channel_id, channel.clone());
+            // Assert that the channel is valid and that its short channel ID is unique within the simulation, required
+            // because we use scid to identify the channel.
+            channel.validate()?;
+            match channels.entry(channel.short_channel_id) {
+                Entry::Occupied(_) => {
+                    return Err(SimulationError::SimulatedNetworkError(format!(
+                        "Simulated short channel ID should be unique: {} duplicated",
+                        channel.short_channel_id
+                    )))
+                },
+                Entry::Vacant(v) => v.insert(channel.clone()),
+            };
 
+            // It's okay to have duplicate pubkeys because one node can have many channels.
             for pubkey in [channel.node_1.policy.pubkey, channel.node_2.policy.pubkey] {
                 match nodes.entry(pubkey) {
                     Entry::Occupied(o) => o.into_mut().push(channel.capacity_msat),
