@@ -474,15 +474,9 @@ impl MutRng {
     }
 }
 
+/// Contains the configuration options for our simulation.
 #[derive(Clone)]
-pub struct Simulation {
-    /// The lightning node that is being simulated.
-    nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
-    /// The activity that are to be executed on the node.
-    activity: Vec<ActivityDefinition>,
-    /// High level triggers used to manage simulation tasks and shutdown.
-    shutdown_trigger: Trigger,
-    shutdown_listener: Listener,
+pub struct SimulationCfg {
     /// Total simulation time. The simulation will run forever if undefined.
     total_time: Option<time::Duration>,
     /// The expected payment size for the network.
@@ -496,6 +490,38 @@ pub struct Simulation {
     seeded_rng: MutRng,
     /// Results logger that holds the simulation statistics.
     results: Arc<Mutex<PaymentResultLogger>>,
+}
+
+impl SimulationCfg {
+    pub fn new(
+        total_time: Option<u32>,
+        expected_payment_msat: u64,
+        activity_multiplier: f64,
+        write_results: Option<WriteResults>,
+        seed: Option<u64>,
+    ) -> Self {
+        Self {
+            total_time: total_time.map(|x| Duration::from_secs(x as u64)),
+            expected_payment_msat,
+            activity_multiplier,
+            write_results,
+            seeded_rng: MutRng::new(seed),
+            results: Arc::new(Mutex::new(PaymentResultLogger::new())),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct Simulation {
+    /// Config for the simulation itself.
+    cfg: SimulationCfg,
+    /// The lightning node that is being simulated.
+    nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
+    /// The activity that are to be executed on the node.
+    activity: Vec<ActivityDefinition>,
+    /// High level triggers used to manage simulation tasks and shutdown.
+    shutdown_trigger: Trigger,
+    shutdown_listener: Listener,
 }
 
 #[derive(Clone)]
@@ -518,26 +544,17 @@ struct ExecutorKit {
 
 impl Simulation {
     pub fn new(
+        cfg: SimulationCfg,
         nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
         activity: Vec<ActivityDefinition>,
-        total_time: Option<u32>,
-        expected_payment_msat: u64,
-        activity_multiplier: f64,
-        write_results: Option<WriteResults>,
-        seed: Option<u64>,
     ) -> Self {
         let (shutdown_trigger, shutdown_listener) = triggered::trigger();
         Self {
+            cfg,
             nodes,
             activity,
             shutdown_trigger,
             shutdown_listener,
-            total_time: total_time.map(|x| Duration::from_secs(x as u64)),
-            expected_payment_msat,
-            activity_multiplier,
-            write_results,
-            seeded_rng: MutRng::new(seed),
-            results: Arc::new(Mutex::new(PaymentResultLogger::new())),
         }
     }
 
@@ -623,7 +640,7 @@ impl Simulation {
     }
 
     pub async fn run(&self) -> Result<(), SimulationError> {
-        if let Some(total_time) = self.total_time {
+        if let Some(total_time) = self.cfg.total_time {
             log::info!("Running the simulation for {}s.", total_time.as_secs());
         } else {
             log::info!("Running the simulation forever.");
@@ -709,7 +726,7 @@ impl Simulation {
         });
 
         // Start a task that will shutdown the simulation if the total_time is met.
-        if let Some(total_time) = self.total_time {
+        if let Some(total_time) = self.cfg.total_time {
             let t = self.shutdown_trigger.clone();
             let l = self.shutdown_listener.clone();
 
@@ -743,11 +760,11 @@ impl Simulation {
     }
 
     pub async fn get_total_payments(&self) -> u64 {
-        self.results.lock().await.total_attempts()
+        self.cfg.results.lock().await.total_attempts()
     }
 
     pub async fn get_success_rate(&self) -> f64 {
-        self.results.lock().await.success_rate()
+        self.cfg.results.lock().await.success_rate()
     }
 
     /// run_data_collection starts the tasks required for the simulation to report of the results of the activity that
@@ -781,7 +798,7 @@ impl Simulation {
             }
         });
 
-        let result_logger = self.results.clone();
+        let result_logger = self.cfg.results.clone();
 
         let result_logger_clone = result_logger.clone();
         let result_logger_listener = listener.clone();
@@ -797,7 +814,7 @@ impl Simulation {
         });
 
         // csr: consume simulation results
-        let csr_write_results = self.write_results.clone();
+        let csr_write_results = self.cfg.write_results.clone();
         tasks.spawn(async move {
             log::debug!("Starting simulation results consumer.");
             if let Err(e) = consume_simulation_results(
@@ -864,9 +881,10 @@ impl Simulation {
         for (pk, node) in self.nodes.iter() {
             let chan_capacity = node.lock().await.list_channels().await?.iter().sum::<u64>();
 
-            if let Err(e) =
-                RandomPaymentActivity::validate_capacity(chan_capacity, self.expected_payment_msat)
-            {
+            if let Err(e) = RandomPaymentActivity::validate_capacity(
+                chan_capacity,
+                self.cfg.expected_payment_msat,
+            ) {
                 log::warn!("Node: {} not eligible for activity generation: {e}.", *pk);
                 continue;
             }
@@ -881,7 +899,7 @@ impl Simulation {
         let network_generator = Arc::new(Mutex::new(
             NetworkGraphView::new(
                 active_nodes.values().cloned().collect(),
-                self.seeded_rng.clone(),
+                self.cfg.seeded_rng.clone(),
             )
             .map_err(SimulationError::RandomActivityError)?,
         ));
@@ -898,9 +916,9 @@ impl Simulation {
                 payment_generator: Box::new(
                     RandomPaymentActivity::new(
                         *capacity,
-                        self.expected_payment_msat,
-                        self.activity_multiplier,
-                        self.seeded_rng.clone(),
+                        self.cfg.expected_payment_msat,
+                        self.cfg.activity_multiplier,
+                        self.cfg.seeded_rng.clone(),
                     )
                     .map_err(SimulationError::RandomActivityError)?,
                 ),
