@@ -91,7 +91,7 @@ async fn main() -> anyhow::Result<()> {
 
     SimpleLogger::new()
         .with_level(LevelFilter::Warn)
-        .with_module_level("sim_lib", cli.log_level)
+        .with_module_level("simln_lib", cli.log_level)
         .with_module_level("sim_cli", cli.log_level)
         .init()
         .unwrap();
