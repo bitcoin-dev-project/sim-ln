@@ -488,8 +488,6 @@ pub struct SimulationCfg {
     write_results: Option<WriteResults>,
     /// Random number generator created from fixed seed.
     seeded_rng: MutRng,
-    /// Results logger that holds the simulation statistics.
-    results: Arc<Mutex<PaymentResultLogger>>,
 }
 
 impl SimulationCfg {
@@ -506,7 +504,6 @@ impl SimulationCfg {
             activity_multiplier,
             write_results,
             seeded_rng: MutRng::new(seed),
-            results: Arc::new(Mutex::new(PaymentResultLogger::new())),
         }
     }
 }
@@ -519,6 +516,8 @@ pub struct Simulation {
     nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
     /// The activity that are to be executed on the node.
     activity: Vec<ActivityDefinition>,
+    /// Results logger that holds the simulation statistics.
+    results: Arc<Mutex<PaymentResultLogger>>,
     /// High level triggers used to manage simulation tasks and shutdown.
     shutdown_trigger: Trigger,
     shutdown_listener: Listener,
@@ -553,6 +552,7 @@ impl Simulation {
             cfg,
             nodes,
             activity,
+            results: Arc::new(Mutex::new(PaymentResultLogger::new())),
             shutdown_trigger,
             shutdown_listener,
         }
@@ -760,11 +760,11 @@ impl Simulation {
     }
 
     pub async fn get_total_payments(&self) -> u64 {
-        self.cfg.results.lock().await.total_attempts()
+        self.results.lock().await.total_attempts()
     }
 
     pub async fn get_success_rate(&self) -> f64 {
-        self.cfg.results.lock().await.success_rate()
+        self.results.lock().await.success_rate()
     }
 
     /// run_data_collection starts the tasks required for the simulation to report of the results of the activity that
@@ -798,7 +798,7 @@ impl Simulation {
             }
         });
 
-        let result_logger = self.cfg.results.clone();
+        let result_logger = self.results.clone();
 
         let result_logger_clone = result_logger.clone();
         let result_logger_listener = listener.clone();
