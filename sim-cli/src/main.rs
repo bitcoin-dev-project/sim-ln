@@ -1,10 +1,5 @@
-use bitcoin::secp256k1::PublicKey;
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::Mutex;
-
 use anyhow::anyhow;
+use bitcoin::secp256k1::PublicKey;
 use clap::builder::TypedValueParser;
 use clap::Parser;
 use log::LevelFilter;
@@ -13,6 +8,10 @@ use simln_lib::{
     NodeId, SimParams, Simulation, SimulationCfg, WriteResults,
 };
 use simple_logger::SimpleLogger;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 /// The default directory where the simulation files are stored and where the results will be written to.
 pub const DEFAULT_DATA_DIR: &str = ".";
