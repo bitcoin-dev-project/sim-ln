@@ -1,10 +1,5 @@
-use bitcoin::secp256k1::PublicKey;
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::Mutex;
-
 use anyhow::anyhow;
+use bitcoin::secp256k1::PublicKey;
 use clap::builder::TypedValueParser;
 use clap::Parser;
 use log::LevelFilter;
@@ -13,6 +8,10 @@ use simln_lib::{
     NodeId, SimParams, Simulation, SimulationCfg, WriteResults,
 };
 use simple_logger::SimpleLogger;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 /// The default directory where the simulation files are stored and where the results will be written to.
 pub const DEFAULT_DATA_DIR: &str = ".";
@@ -21,10 +20,10 @@ pub const DEFAULT_DATA_DIR: &str = ".";
 pub const DEFAULT_SIM_FILE: &str = "sim.json";
 
 /// The default expected payment amount for the simulation, around ~$10 at the time of writing.
-pub const EXPECTED_PAYMENT_AMOUNT: u64 = 3_800_000;
+pub const DEFAULT_EXPECTED_PAYMENT_AMOUNT: u64 = 3_800_000;
 
 /// The number of times over each node in the network sends its total deployed capacity in a calendar month.
-pub const ACTIVITY_MULTIPLIER: f64 = 2.0;
+pub const DEFAULT_ACTIVITY_MULTIPLIER: f64 = 2.0;
 
 /// Default batch size to flush result data to disk
 const DEFAULT_PRINT_BATCH_SIZE: u32 = 500;
@@ -66,10 +65,10 @@ struct Cli {
     #[clap(long, short, verbatim_doc_comment, default_value = "info")]
     log_level: LevelFilter,
     /// Expected payment amount for the random activity generator
-    #[clap(long, short, default_value_t = EXPECTED_PAYMENT_AMOUNT, value_parser = clap::builder::RangedU64ValueParser::<u64>::new().range(1..u64::MAX))]
+    #[clap(long, short, default_value_t = DEFAULT_EXPECTED_PAYMENT_AMOUNT, value_parser = clap::builder::RangedU64ValueParser::<u64>::new().range(1..u64::MAX))]
     expected_pmt_amt: u64,
     /// Multiplier of the overall network capacity used by the random activity generator
-    #[clap(long, short, default_value_t = ACTIVITY_MULTIPLIER, value_parser = clap::builder::StringValueParser::new().try_map(deserialize_f64_greater_than_zero))]
+    #[clap(long, short, default_value_t = DEFAULT_ACTIVITY_MULTIPLIER, value_parser = clap::builder::StringValueParser::new().try_map(deserialize_f64_greater_than_zero))]
     capacity_multiplier: f64,
     /// Do not create an output file containing the simulations results
     #[clap(long, default_value_t = false)]
