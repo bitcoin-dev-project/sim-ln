@@ -87,7 +87,8 @@ impl ClnNode {
             .map_err(|err| LightningError::GetInfoError(err.to_string()))?;
         connection.id.validate(&pubkey, &mut alias)?;
 
-        let features = if let Some(features) = our_features {
+        let features = if let Some(mut features) = our_features {
+            features.node.reverse();
             NodeFeatures::from_le_bytes(features.node)
         } else {
             NodeFeatures::empty()
