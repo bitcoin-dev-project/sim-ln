@@ -87,9 +87,8 @@ impl ClnNode {
             .map_err(|err| LightningError::GetInfoError(err.to_string()))?;
         connection.id.validate(&pubkey, &mut alias)?;
 
-        let features = if let Some(mut features) = our_features {
-            features.node.reverse();
-            NodeFeatures::from_le_bytes(features.node)
+        let features = if let Some(features) = our_features {
+            NodeFeatures::from_be_bytes(features.node)
         } else {
             NodeFeatures::empty()
         };
@@ -249,11 +248,7 @@ impl LightningNode for ClnNode {
                 features: node
                     .features
                     .clone()
-                    .map_or(NodeFeatures::empty(), |mut f| {
-                        // We need to reverse this given it has the CLN wire encoding which is BE
-                        f.reverse();
-                        NodeFeatures::from_le_bytes(f)
-                    }),
+                    .map_or(NodeFeatures::empty(), NodeFeatures::from_be_bytes),
             })
         } else {
             Err(LightningError::GetNodeInfoError(
