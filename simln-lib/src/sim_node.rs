@@ -3,7 +3,6 @@ use crate::{
 };
 use async_trait::async_trait;
 use bitcoin::constants::ChainHash;
-use bitcoin::hashes::{sha256::Hash as Sha256, Hash};
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Network, ScriptBuf, TxOut};
 use lightning::ln::chan_utils::make_funding_redeemscript;
@@ -541,7 +540,7 @@ impl<T: SimNetwork> LightningNode for SimNode<'_, T> {
         // our internal tracking state along with the chosen payment hash.
         let (sender, receiver) = channel();
         let preimage = PaymentPreimage(rand::random());
-        let payment_hash = PaymentHash(Sha256::hash(&preimage.0).to_byte_array());
+        let payment_hash = preimage.into();
 
         // Check for payment hash collision, failing the payment if we happen to repeat one.
         match self.in_flight.entry(payment_hash) {
