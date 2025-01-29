@@ -236,7 +236,7 @@ impl ChannelState {
     /// reported.
     fn add_outgoing_htlc(&mut self, hash: PaymentHash, htlc: Htlc) -> Result<(), ForwardingError> {
         self.check_outgoing_addition(&htlc)?;
-        if self.in_flight.get(&hash).is_some() {
+        if self.in_flight.contains_key(&hash) {
             return Err(ForwardingError::PaymentHashExists(hash));
         }
         self.local_balance_msat -= htlc.amount_msat;
@@ -704,7 +704,7 @@ impl SimGraph {
 }
 
 /// Produces a map of node public key to lightning node implementation to be used for simulations.
-pub async fn ln_node_from_graph<'a>(
+pub async fn ln_node_from_graph(
     graph: Arc<Mutex<SimGraph>>,
     routing_graph: Arc<NetworkGraph<&'_ WrappedLog>>,
 ) -> HashMap<PublicKey, Arc<Mutex<dyn LightningNode + '_>>> {
@@ -1560,7 +1560,7 @@ mod tests {
         shutdown: triggered::Trigger,
     }
 
-    impl<'a> DispatchPaymentTestKit<'a> {
+    impl DispatchPaymentTestKit<'_> {
         /// Creates a test graph with a set of nodes connected by three channels, with all the capacity of the channel
         /// on the side of the first node. For example, if called with capacity = 100 it will set up the following
         /// network:

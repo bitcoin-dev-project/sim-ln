@@ -13,7 +13,7 @@ jobs:
       - name: Install protoc
         run: sudo apt install -y protobuf-compiler
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.76.0
+      - uses: dtolnay/rust-toolchain@1.84.0
       - name: Install Clippy
         run: rustup component add clippy
       - name: Install Rustfmt
