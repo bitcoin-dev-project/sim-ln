@@ -26,6 +26,7 @@ const SEND_PAYMENT_TIMEOUT_SECS: i32 = 300;
 pub struct LndConnection {
     #[serde(with = "serializers::serde_node_id")]
     pub id: NodeId,
+    #[serde(with = "serializers::serde_address")]
     pub address: String,
     #[serde(deserialize_with = "serializers::deserialize_path")]
     pub macaroon: String,
