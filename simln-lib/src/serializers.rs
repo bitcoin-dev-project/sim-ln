@@ -45,6 +45,29 @@ pub mod serde_node_id {
     }
 }
 
+pub mod serde_address {
+    use super::*;
+
+    pub fn serialize<S>(address: &str, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(address)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<String, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        if s.starts_with("https://") {
+            Ok(s)
+        } else {
+            Ok(format!("https://{}", s))
+        }
+    }
+}
+
 pub mod serde_value_or_range {
     use super::*;
     use serde::{de::Error, ser::SerializeTuple};
