@@ -24,6 +24,7 @@ use crate::{
 pub struct ClnConnection {
     #[serde(with = "serializers::serde_node_id")]
     pub id: NodeId,
+    #[serde(with = "serializers::serde_address")]
     pub address: String,
     #[serde(deserialize_with = "serializers::deserialize_path")]
     pub ca_cert: String,
@@ -57,7 +58,7 @@ impl ClnNode {
             ));
 
         let mut client = NodeClient::new(
-            Channel::from_shared(connection.address.to_string())
+            Channel::from_shared(connection.address)
                 .map_err(|err| LightningError::ConnectionError(err.to_string()))?
                 .tls_config(tls)
                 .map_err(|_| {
