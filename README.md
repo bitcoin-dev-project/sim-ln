@@ -63,7 +63,7 @@ information is required:
 ```
 {
   "id": <node_id>,
-  "address": https://<ip:port or domain:port>,
+  "address": <ip:port or domain:port>,
   "macaroon": <path_to_selected_macaroon>,
   "cert": <path_to_tls_cert>
 }
@@ -74,14 +74,13 @@ Whereas for CLN nodes, the following information is required:
 ```
 { 
   "id": <node_id>,
-  "address": https://<ip:port or domain:port>,
+  "address": <ip:port or domain:port>,
   "ca_cert": <path_to_ca_cert>,
   "client_cert": <path_to_client_cert>,
   "client_key": <path_to_client_key>
 }
 ```
 
-**Note that node addresses must be declare with HTTPS transport, i.e. <https://ip-or-domain:port>**
 
 Payment activity can be simulated in two different ways:
 * Random activity: generate random activity on the `nodes` provided, 
@@ -102,13 +101,13 @@ not "drain" from the simulation.
   "nodes": [
     {
       "id": "Alice",
-      "address": "https://127.0.0.1:10011",
+      "address": "127.0.0.1:10011",
       "macaroon": "/path/admin.macaroon",
       "cert": "/path/tls.cert"
     },
     { 
       "id": "0230a16a05c5ca120136b3a770a2adfdad88a68d526e63448a9eef88bddd6a30d8",
-      "address": "https://localhost:10013",
+      "address": "localhost:10013",
       "ca_cert": "/path/ca.pem",
       "client_cert": "/path/client.pem",
       "client_key": "/path/client-key.pem"
@@ -177,26 +176,26 @@ The example simulation file below sets up the following simulation:
   "nodes": [
     {
       "id": "Alice",
-      "address": "https://localhost:10011",
+      "address": "localhost:10011",
       "macaroon": "/path/admin.macaroon",
       "cert": "/path/tls.cert"
     },
     {
       "id": "0230a16a05c5ca120136b3a770a2adfdad88a68d526e63448a9eef88bddd6a30d8",
-      "address": "https://127.0.0.1:10013",
+      "address": "127.0.0.1:10013",
       "ca_cert": "/path/ca.pem",
       "client_cert": "/path/client.pem",
       "client_key": "/path/client-key.pem"
     },
     {
       "id": "Erin",
-      "address": "https://localhost:10012",
+      "address": "localhost:10012",
       "macaroon": "/path/admin.macaroon",
       "cert": "/path/tls.cert"      
     },
     {
       "id": "Frank",
-      "address": "https://localhost:10014",
+      "address": "localhost:10014",
       "macaroon": "/path/admin.macaroon",
       "cert": "/path/tls.cert"      
     }
@@ -232,7 +231,6 @@ The example simulation file below sets up the following simulation:
 }
 ```
 
-**Note that node addresses must be declare with HTTPS transport, i.e <https://ip-or-domain>**
 
 Nodes can be identified by their public key or an id string (as 
 described above). Activity sources and destinations may reference the 
