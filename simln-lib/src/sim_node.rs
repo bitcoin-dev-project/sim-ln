@@ -817,6 +817,14 @@ impl SimNetwork for SimGraph {
             },
         };
 
+        // This fixes it, but is a super weird way to do this!
+        while let Some(res) = self.tasks.try_join_next() {
+            if let Err(e) = res {
+                log::error!("Error completing task {e}");
+                self.shutdown_trigger.trigger();
+            }
+        }
+
         self.tasks.spawn(propagate_payment(
             self.channels.clone(),
             source,
