@@ -60,7 +60,7 @@ pub mod serde_address {
         D: serde::Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        if s.starts_with("https://") {
+        if s.starts_with("https://") || s.starts_with("http://") {
             Ok(s)
         } else {
             Ok(format!("https://{}", s))
