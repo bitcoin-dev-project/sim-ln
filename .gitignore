@@ -4,3 +4,4 @@ node_modules
 activity-generator/releases/*
 .DS_Store
 /results
+/.idea

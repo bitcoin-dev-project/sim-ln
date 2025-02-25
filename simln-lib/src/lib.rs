@@ -28,6 +28,7 @@ use self::random_activity::{NetworkGraphView, RandomPaymentActivity};
 
 pub mod cln;
 mod defined_activity;
+pub mod eclair;
 pub mod lnd;
 mod random_activity;
 mod serializers;
@@ -40,6 +41,7 @@ mod test_utils;
 pub enum NodeConnection {
     LND(lnd::LndConnection),
     CLN(cln::ClnConnection),
+    ECLAIR(eclair::EclairConnection),
 }
 
 #[derive(Serialize, Debug, Clone)]

@@ -23,7 +23,7 @@ on. You will need:
 ## LN Implementation Support
 * LND ✅ 
 * CLN ✅ 
-* Eclair 🏗️
+* Eclair ✅️
 * LDK-node 🏗️
 
 See our [tracking issue](https://github.com/bitcoin-dev-project/sim-ln/issues/26)
@@ -56,6 +56,7 @@ The simulator requires access details for a set of `nodes` that you
 have permission to execute commands on. Note that the current version 
 of the simulator uses keysend to execute payments, which must be 
 enabled in LND using `--accept-keysend` (for CLN node it is enabled by default).
+Use `--features.keysend=optional` to enable keysend in Eclair.
 
 The required access details will depend on the node implementation. For LND, the following
 information is required:
@@ -81,6 +82,15 @@ Whereas for CLN nodes, the following information is required:
 }
 ```
 
+For Eclair, the following information is required:
+```
+{ 
+  "id": <node_id>,
+  "base_url": <scheme://ip:port or scheme://domain:port>,
+  "api_username": <username_to_authorize>,
+  "api_password": <password_to_authorize>
+}
+```
 
 Payment activity can be simulated in two different ways:
 * Random activity: generate random activity on the `nodes` provided, 
@@ -111,6 +121,12 @@ not "drain" from the simulation.
       "ca_cert": "/path/ca.pem",
       "client_cert": "/path/client.pem",
       "client_key": "/path/client-key.pem"
+    },
+    { 
+      "id": "carol",
+      "base_url": "http://127.0.0.1:8286",
+      "api_username": "",
+      "api_password": "eclairpw"
     }
   ]
 }
