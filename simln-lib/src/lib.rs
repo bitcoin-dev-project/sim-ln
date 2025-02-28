@@ -28,6 +28,7 @@ use self::random_activity::{NetworkGraphView, RandomPaymentActivity};
 
 pub mod cln;
 mod defined_activity;
+pub mod ldk;
 pub mod lnd;
 mod random_activity;
 mod serializers;
