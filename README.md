@@ -19,6 +19,7 @@ on. You will need:
   topology of channels.
 * Access to execute commands on _at least_ one node in the network.
 * Rust compiler [installed](https://www.rust-lang.org/tools/install).
+* Protoc [installed](https://grpc.io/docs/protoc-installation).
 
 ## LN Implementation Support
 * LND ✅ 
@@ -30,7 +31,8 @@ See our [tracking issue](https://github.com/bitcoin-dev-project/sim-ln/issues/26
 for updates on implementation support (contributions welcome!).
 
 ## Getting Started
-Clone the repo: 
+
+Once you have all the pre-requisites installed, clone the repo:
 ```
 git clone https://github.com/bitcoin-dev-project/sim-ln
 cd sim-ln
