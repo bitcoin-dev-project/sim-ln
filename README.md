@@ -20,6 +20,13 @@ on. You will need:
 * Access to execute commands on _at least_ one node in the network.
 * Rust compiler [installed](https://www.rust-lang.org/tools/install).
 
+The simulator requires access details for a set of `nodes` that you
+have permission to execute commands on. Note that the current version
+of the simulator uses keysend to execute payments, which must be enabled as follows:
+* CLN: enabled by default
+* LND: `--accept-keysend`
+* Eclair: `--features.keysend=optional`
+
 ## LN Implementation Support
 * LND ✅ 
 * CLN ✅ 
@@ -52,12 +59,6 @@ Run `sim-cli -h` for details on `--data-dir` and `--sim-file` options that allow
 Interested in contributing to the project? See [CONTRIBUTING](CONTRIBUTING.md) for more details.
 
 ### Simulation File Setup
-The simulator requires access details for a set of `nodes` that you 
-have permission to execute commands on. Note that the current version 
-of the simulator uses keysend to execute payments, which must be 
-enabled in LND using `--accept-keysend` (for CLN node it is enabled by default).
-Use `--features.keysend=optional` to enable keysend in Eclair.
-
 The required access details will depend on the node implementation. For LND, the following
 information is required:
 
