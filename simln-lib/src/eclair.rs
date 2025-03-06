@@ -20,6 +20,7 @@ use triggered::Listener;
 pub struct EclairConnection {
     #[serde(with = "serializers::serde_node_id")]
     pub id: NodeId,
+    #[serde(with = "serializers::serde_address")]
     pub base_url: String,
     pub api_username: String,
     pub api_password: String,
