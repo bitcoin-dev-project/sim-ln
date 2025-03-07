@@ -27,16 +27,14 @@ pub struct EclairConnection {
     pub api_password: String,
 }
 
-pub struct EclairNode {
+struct EclairClient {
     base_url: Url,
     api_username: String,
     api_password: String,
     http_client: Client,
-    info: NodeInfo,
-    network: Network,
 }
 
-impl EclairNode {
+impl EclairClient {
     async fn request_static<T: for<'de> Deserialize<'de>>(
         client: &Client,
         base_url: &Url,
@@ -73,7 +71,7 @@ impl EclairNode {
         endpoint: &str,
         params: Option<HashMap<String, String>>,
     ) -> Result<T, Box<dyn Error>> {
-        EclairNode::request_static(
+        EclairClient::request_static(
             &self.http_client,
             &self.base_url,
             &self.api_username,
@@ -83,12 +81,20 @@ impl EclairNode {
         )
         .await
     }
+}
 
+pub struct EclairNode {
+    client: EclairClient,
+    info: NodeInfo,
+    network: Network,
+}
+
+impl EclairNode {
     pub async fn new(connection: EclairConnection) -> Result<Self, LightningError> {
         let base_url = Url::parse(&connection.base_url)
             .map_err(|err| LightningError::GetInfoError(err.to_string()))?;
         let client = Client::new();
-        let info: GetInfoResponse = EclairNode::request_static(
+        let info: GetInfoResponse = EclairClient::request_static(
             &client,
             &base_url,
             &connection.api_username,
@@ -113,10 +119,12 @@ impl EclairNode {
         let features = parse_json_to_node_features(&info.features);
 
         Ok(Self {
-            base_url,
-            api_username: connection.api_username,
-            api_password: connection.api_password,
-            http_client: client,
+            client: EclairClient {
+                base_url,
+                api_username: connection.api_username,
+                api_password: connection.api_password,
+                http_client: client,
+            },
             info: NodeInfo {
                 pubkey,
                 alias: info.alias,
@@ -148,6 +156,7 @@ impl LightningNode for EclairNode {
         params.insert("amountMsat".to_string(), amount_msat.to_string());
         params.insert("paymentHash".to_string(), hex::encode(preimage));
         let uuid: String = self
+            .client
             .request("sendtonode", Some(params))
             .await
             .map_err(|err| LightningError::SendPaymentError(err.to_string()))?;
@@ -156,6 +165,7 @@ impl LightningNode for EclairNode {
         params.insert("paymentHash".to_string(), hex::encode(preimage));
         params.insert("id".to_string(), uuid);
         let payment_parts: PaymentInfoResponse = self
+            .client
             .request("getsentinfo", Some(params))
             .await
             .map_err(|_| LightningError::InvalidPaymentHash)?;
@@ -182,7 +192,9 @@ impl LightningNode for EclairNode {
                     let mut params = HashMap::new();
                     params.insert("paymentHash".to_string(), hex::encode(hash.0));
 
-                    let payment_parts: PaymentInfoResponse = self.request("getsentinfo", Some(params))
+                    let payment_parts: PaymentInfoResponse = self
+                    .client
+                    .request("getsentinfo", Some(params))
                     .await
                     .map_err(|err| LightningError::TrackPaymentError(err.to_string()))?;
 
@@ -211,6 +223,7 @@ impl LightningNode for EclairNode {
         params.insert("nodeId".to_string(), hex::encode(node_id.serialize()));
 
         let node_info: NodeResponse = self
+            .client
             .request("node", Some(params))
             .await
             .map_err(|err| LightningError::GetNodeInfoError(err.to_string()))?;
@@ -231,6 +244,7 @@ impl LightningNode for EclairNode {
         );
 
         let channels: ChannelsResponse = self
+            .client
             .request("channels", Some(params))
             .await
             .map_err(|err| LightningError::ListChannelsError(err.to_string()))?;
