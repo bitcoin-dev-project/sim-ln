@@ -191,7 +191,8 @@ impl LightningNode for EclairNode {
                         let payment_outcome = match payment.status.r#type {
                             PaymentStatus::Pending => continue,
                             PaymentStatus::Sent => PaymentOutcome::Success,
-                            // Task: https://github.com/bitcoin-dev-project/sim-ln/issues/26#issuecomment-1691780018
+                            // PaymentStatus::Failed means API call failed (can happen for various reasons).
+                            // Task to improve it: https://github.com/bitcoin-dev-project/sim-ln/issues/26#issuecomment-1691780018
                             PaymentStatus::Failed => PaymentOutcome::UnexpectedError,
                         };
 
