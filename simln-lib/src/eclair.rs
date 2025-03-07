@@ -27,14 +27,10 @@ pub struct EclairConnection {
     pub api_password: String,
 }
 
-impl EclairConnection {
-    fn construct_url(&self, endpoint: &str) -> Result<Url, Box<dyn Error>> {
-        Ok(Url::parse(&self.base_url)?.join(endpoint)?)
-    }
-}
-
 pub struct EclairNode {
-    connection: EclairConnection,
+    base_url: Url,
+    api_username: String,
+    api_password: String,
     http_client: Client,
     info: NodeInfo,
     network: Network,
@@ -42,15 +38,17 @@ pub struct EclairNode {
 
 impl EclairNode {
     async fn request_static<T: for<'de> Deserialize<'de>>(
-        connection: &EclairConnection,
         client: &Client,
+        base_url: &Url,
+        api_username: &str,
+        api_password: &str,
         endpoint: &str,
         params: Option<HashMap<String, String>>,
     ) -> Result<T, Box<dyn Error>> {
-        let url = connection.construct_url(endpoint)?;
+        let url = base_url.join(endpoint)?;
         let mut request = client
             .request(Method::POST, url)
-            .basic_auth(&connection.api_username, Some(&connection.api_password));
+            .basic_auth(api_username, Some(api_password));
 
         if let Some(params) = params {
             let mut form = Form::new();
@@ -75,15 +73,31 @@ impl EclairNode {
         endpoint: &str,
         params: Option<HashMap<String, String>>,
     ) -> Result<T, Box<dyn Error>> {
-        EclairNode::request_static(&self.connection, &self.http_client, endpoint, params).await
+        EclairNode::request_static(
+            &self.http_client,
+            &self.base_url,
+            &self.api_username,
+            &self.api_password,
+            endpoint,
+            params,
+        )
+        .await
     }
 
     pub async fn new(connection: EclairConnection) -> Result<Self, LightningError> {
+        let base_url = Url::parse(&connection.base_url)
+            .map_err(|err| LightningError::GetInfoError(err.to_string()))?;
         let client = Client::new();
-        let info: GetInfoResponse =
-            EclairNode::request_static(&connection, &client, "getinfo", None)
-                .await
-                .map_err(|err| LightningError::GetInfoError(err.to_string()))?;
+        let info: GetInfoResponse = EclairNode::request_static(
+            &client,
+            &base_url,
+            &connection.api_username,
+            &connection.api_password,
+            "getinfo",
+            None,
+        )
+        .await
+        .map_err(|err| LightningError::GetInfoError(err.to_string()))?;
         let pubkey = PublicKey::from_str(info.node_id.as_str())
             .map_err(|err| LightningError::GetInfoError(err.to_string()))?;
         let network = Network::from_str(match info.network.as_str() {
@@ -99,8 +113,10 @@ impl EclairNode {
         let features = parse_json_to_node_features(&info.features);
 
         Ok(Self {
+            base_url,
+            api_username: connection.api_username,
+            api_password: connection.api_password,
             http_client: client,
-            connection,
             info: NodeInfo {
                 pubkey,
                 alias: info.alias,
