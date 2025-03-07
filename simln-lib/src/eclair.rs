@@ -11,6 +11,7 @@ use reqwest::{Client, Method, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::error::Error;
 use std::str::FromStr;
 use std::time::Duration;
 use tokio::time;
@@ -27,7 +28,7 @@ pub struct EclairConnection {
 }
 
 impl EclairConnection {
-    fn construct_url(&self, endpoint: &str) -> anyhow::Result<Url> {
+    fn construct_url(&self, endpoint: &str) -> Result<Url, Box<dyn Error>> {
         Ok(Url::parse(&self.base_url)?.join(endpoint)?)
     }
 }
@@ -45,7 +46,7 @@ impl EclairNode {
         client: &Client,
         endpoint: &str,
         params: Option<HashMap<String, String>>,
-    ) -> anyhow::Result<T> {
+    ) -> Result<T, Box<dyn Error>> {
         let url = connection.construct_url(endpoint)?;
         let mut request = client
             .request(Method::POST, url)
@@ -73,7 +74,7 @@ impl EclairNode {
         &self,
         endpoint: &str,
         params: Option<HashMap<String, String>>,
-    ) -> anyhow::Result<T> {
+    ) -> Result<T, Box<dyn Error>> {
         EclairNode::request_static(&self.connection, &self.http_client, endpoint, params).await
     }
 
