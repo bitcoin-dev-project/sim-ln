@@ -233,16 +233,18 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn read_sim_path(data_dir: PathBuf, sim_file: PathBuf) -> anyhow::Result<PathBuf> {
-    let sim_path = if sim_file.is_relative() {
-        data_dir.join(sim_file)
+    if sim_file.exists() {
+        Ok(sim_file)
+    } else if sim_file.is_relative() {
+        let sim_path = data_dir.join(sim_file);
+        if sim_path.exists() {
+            Ok(sim_path)
+        } else {
+            log::info!("Simulation file '{}' does not exist.", sim_path.display());
+            select_sim_file(data_dir).await
+        }
     } else {
-        sim_file
-    };
-
-    if sim_path.exists() {
-        Ok(sim_path)
-    } else {
-        log::info!("Simulation file '{}' does not exist.", sim_path.display());
+        log::info!("Simulation file '{}' does not exist.", sim_file.display());
         select_sim_file(data_dir).await
     }
 }
