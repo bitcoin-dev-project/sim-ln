@@ -9,6 +9,7 @@ use lightning::ln::chan_utils::make_funding_redeemscript;
 use std::collections::{hash_map::Entry, HashMap};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio_util::task::TaskTracker;
 
 use lightning::ln::features::{ChannelFeatures, NodeFeatures};
 use lightning::ln::msgs::{
@@ -24,7 +25,6 @@ use thiserror::Error;
 use tokio::select;
 use tokio::sync::oneshot::{channel, Receiver, Sender};
 use tokio::sync::Mutex;
-use tokio::task::JoinSet;
 use triggered::{Listener, Trigger};
 
 use crate::ShortChannelID;
@@ -639,7 +639,7 @@ pub struct SimGraph {
     channels: Arc<Mutex<HashMap<ShortChannelID, SimulatedChannel>>>,
 
     /// track all tasks spawned to process payments in the graph.
-    tasks: JoinSet<()>,
+    tasks: TaskTracker,
 
     /// trigger shutdown if a critical error occurs.
     shutdown_trigger: Trigger,
@@ -682,23 +682,9 @@ impl SimGraph {
         Ok(SimGraph {
             nodes,
             channels: Arc::new(Mutex::new(channels)),
-            tasks: JoinSet::new(),
+            tasks: TaskTracker::new(),
             shutdown_trigger,
         })
-    }
-
-    /// Blocks until all tasks created by the simulator have shut down. This function does not trigger shutdown,
-    /// because it expects erroring-out tasks to handle their own shutdown triggering.
-    pub async fn wait_for_shutdown(&mut self) {
-        log::debug!("Waiting for simulated graph to shutdown.");
-
-        while let Some(res) = self.tasks.join_next().await {
-            if let Err(e) = res {
-                log::error!("Graph task exited with error: {e}");
-            }
-        }
-
-        log::debug!("Simulated graph shutdown.");
     }
 }
 
@@ -1712,7 +1698,6 @@ mod tests {
         assert_eq!(test_kit.channel_balances().await, expected_balances);
 
         test_kit.shutdown.trigger();
-        test_kit.graph.wait_for_shutdown().await;
     }
 
     /// Tests successful dispatch of a multi-hop payment.
@@ -1741,7 +1726,6 @@ mod tests {
         assert_eq!(test_kit.channel_balances().await, expected_balances);
 
         test_kit.shutdown.trigger();
-        test_kit.graph.wait_for_shutdown().await;
     }
 
     /// Tests success and failure for single hop payments, which are an edge case in our state machine.
@@ -1772,7 +1756,6 @@ mod tests {
         assert_eq!(test_kit.channel_balances().await, expected_balances);
 
         test_kit.shutdown.trigger();
-        test_kit.graph.wait_for_shutdown().await;
     }
 
     /// Tests failing back of multi-hop payments at various failure indexes.
@@ -1812,6 +1795,5 @@ mod tests {
         assert_eq!(test_kit.channel_balances().await, expected_balances);
 
         test_kit.shutdown.trigger();
-        test_kit.graph.wait_for_shutdown().await;
     }
 }
