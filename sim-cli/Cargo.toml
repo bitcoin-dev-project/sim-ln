@@ -25,6 +25,7 @@ rand = "0.8.5"
 hex = {version = "0.4.3"}
 futures = "0.3.30"
 console-subscriber = { version = "0.4.0", optional = true}
+tokio-util = { version = "0.7.13", features = ["rt"] }
 
 [features]
 dev = ["console-subscriber"]

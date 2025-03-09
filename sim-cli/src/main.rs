@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio_util::task::TaskTracker;
 
 /// The default directory where the simulation files are stored and where the results will be written to.
 pub const DEFAULT_DATA_DIR: &str = ".";
@@ -209,6 +210,7 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    let tasks = TaskTracker::new();
     let sim = Simulation::new(
         SimulationCfg::new(
             cli.total_time,
@@ -219,6 +221,7 @@ async fn main() -> anyhow::Result<()> {
         ),
         clients,
         validated_activities,
+        tasks,
     );
     let sim2 = sim.clone();
 
