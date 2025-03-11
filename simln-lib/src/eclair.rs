@@ -251,7 +251,7 @@ impl LightningNode for EclairNode {
                     .commitments
                     .active_channels
                     .iter()
-                    .map(|ac| ac.funding_tx.amount_satoshis * 1_000)
+                    .map(|ac| ac.local_commit.spec.to_local * 1_000)
                     .sum()
             })
             .collect();
@@ -325,14 +325,20 @@ struct Commitments {
 
 #[derive(Debug, Deserialize)]
 struct ActiveChannel {
-    #[serde(rename = "fundingTx")]
-    funding_tx: FundingTx,
+    #[serde(rename = "localCommit")]
+    local_commit: LocalCommit,
 }
 
 #[derive(Debug, Deserialize)]
-struct FundingTx {
-    #[serde(rename = "amountSatoshis")]
-    amount_satoshis: u64,
+struct LocalCommit {
+    #[serde(rename = "spec")]
+    spec: LocalCommitSpec,
+}
+
+#[derive(Debug, Deserialize)]
+struct LocalCommitSpec {
+    #[serde(rename = "toLocal")]
+    to_local: u64,
 }
 
 fn parse_json_to_node_features(json: &Value) -> NodeFeatures {
