@@ -521,6 +521,8 @@ pub struct Simulation {
     /// High level triggers used to manage simulation tasks and shutdown.
     shutdown_trigger: Trigger,
     shutdown_listener: Listener,
+    abort_trigger: Trigger,
+    abort_listener: Listener
 }
 
 #[derive(Clone)]
@@ -548,6 +550,7 @@ impl Simulation {
         activity: Vec<ActivityDefinition>,
     ) -> Self {
         let (shutdown_trigger, shutdown_listener) = triggered::trigger();
+        let (abort_trigger, abort_listener) = triggered::trigger();
         Self {
             cfg,
             nodes,
@@ -555,6 +558,8 @@ impl Simulation {
             results: Arc::new(Mutex::new(PaymentResultLogger::new())),
             shutdown_trigger,
             shutdown_listener,
+            abort_trigger,
+            abort_listener
         }
     }
 
@@ -656,6 +661,8 @@ impl Simulation {
         );
         let mut tasks = JoinSet::new();
 
+        { // A block to control the scope of consumer_channels and event_sender. These need to go out of scope so that receivers will close.
+
         // Before we start the simulation up, start tasks that will be responsible for gathering simulation data.
         // The event channels are shared across our functionality:
         // - Event Sender: used by the simulation to inform data reporting that it needs to start tracking the
@@ -672,7 +679,8 @@ impl Simulation {
                 // If we encounter an error while setting up the activity_executors,
                 // we need to shutdown and wait for tasks to finish. We have started background tasks in the
                 // run_data_collection function, so we should shut those down before returning.
-                self.shutdown();
+                // The tasks started in run_data_collection are listening for the abort trigger.
+                self.abort_trigger.trigger();
                 while let Some(res) = tasks.join_next().await {
                     if let Err(e) = res {
                         log::error!("Task exited with error: {e}.");
@@ -741,6 +749,8 @@ impl Simulation {
             });
         }
 
+        } // A block to control the scope of consumer_channels and event_sender. These need to go out of scope so that receivers will close.
+
         // We always want to wait for all threads to exit, so we wait for all of them to exit and track any errors
         // that surface. It's okay if there are multiple and one is overwritten, we just want to know whether we
         // exited with an error or not.
@@ -759,6 +769,11 @@ impl Simulation {
         self.shutdown_trigger.trigger()
     }
 
+    pub fn abort(&self) {
+        self.shutdown_trigger.trigger();
+        self.abort_trigger.trigger();
+    }
+
     pub async fn get_total_payments(&self) -> u64 {
         self.results.lock().await.total_attempts()
     }
@@ -774,8 +789,6 @@ impl Simulation {
         output_receiver: Receiver<SimulationOutput>,
         tasks: &mut JoinSet<()>,
     ) {
-        let listener = self.shutdown_listener.clone();
-        let shutdown = self.shutdown_trigger.clone();
         log::debug!("Setting up simulator data collection.");
 
         // Create a sender/receiver pair that will be used to report final results of simulation.
@@ -783,8 +796,10 @@ impl Simulation {
 
         let nodes = self.nodes.clone();
         // psr: produce simulation results
-        let psr_listener = listener.clone();
-        let psr_shutdown = shutdown.clone();
+        // psr should trigger a clean shutdown if there is an error
+        // psr should listen for an abort, not shutdown because it will cleanly shutdown when the receiver closes
+        let psr_listener = self.abort_listener.clone();
+        let psr_shutdown = self.shutdown_trigger.clone();
         tasks.spawn(async move {
             log::debug!("Starting simulation results producer.");
             if let Err(e) =
@@ -801,11 +816,15 @@ impl Simulation {
         let result_logger = self.results.clone();
 
         let result_logger_clone = result_logger.clone();
-        let result_logger_listener = listener.clone();
+        // rl: results logger
+        // rl should listen for both shutdowns and aborts because it does not have any channels that will cause a shutdown
+        let rl_shutdown_listener = self.shutdown_listener.clone();
+        let rl_abort_listener = self.abort_listener.clone();
         tasks.spawn(async move {
             log::debug!("Starting results logger.");
             run_results_logger(
-                result_logger_listener,
+                rl_shutdown_listener,
+                rl_abort_listener,
                 result_logger_clone,
                 Duration::from_secs(60),
             )
@@ -814,18 +833,22 @@ impl Simulation {
         });
 
         // csr: consume simulation results
+        // crs should trigger a clean shutdown if there is an error
+        // crs should listen for an abort, not shutdown because it will cleanly shutdown when the receiver closes
         let csr_write_results = self.cfg.write_results.clone();
+        let csr_shutdown = self.shutdown_trigger.clone();
+        let csr_abort = self.abort_listener.clone();
         tasks.spawn(async move {
             log::debug!("Starting simulation results consumer.");
             if let Err(e) = consume_simulation_results(
                 result_logger,
                 results_receiver,
-                listener,
+                csr_abort,
                 csr_write_results,
             )
             .await
             {
-                shutdown.trigger();
+                csr_shutdown.trigger();
                 log::error!("Consume simulation results exited with error: {e:?}.");
             } else {
                 log::debug!("Consume simulation result received shutdown signal.");
@@ -952,7 +975,7 @@ impl Simulation {
             // Generate a consumer for the receiving end of the channel. It takes the event receiver that it'll pull
             // events from and the results sender to report the events it has triggered for further monitoring.
             // ce: consume event
-            let ce_listener = self.shutdown_listener.clone();
+            let ce_listener = self.abort_listener.clone();
             let ce_shutdown = self.shutdown_trigger.clone();
             let ce_output_sender = output_sender.clone();
             let ce_node = node.clone();
@@ -1033,6 +1056,7 @@ async fn consume_events(
 ) -> Result<(), SimulationError> {
     loop {
         select! {
+            // Listen for abort or always clean shutdown??
             biased;
             _ = listener.clone() => {
                 return Ok(());
@@ -1083,6 +1107,7 @@ async fn consume_events(
                             };
 
                             select!{
+                                // Listen for abort or always clean shutdown??
                                 biased;
                                 _ = listener.clone() => {
                                     return Ok(())
@@ -1229,6 +1254,7 @@ async fn consume_simulation_results(
 
     loop {
         select! {
+            // Listen for abort or always clean shutdown??
             biased;
             _ = listener.clone() => {
                 writer.map_or(Ok(()), |(ref mut w, _)| w.flush().map_err(|_| {
@@ -1311,7 +1337,8 @@ impl Display for PaymentResultLogger {
 /// Note that `run_results_logger` does not error in any way, thus it has no
 /// trigger. It listens for triggers to ensure clean exit.
 async fn run_results_logger(
-    listener: Listener,
+    shutdown_listener: Listener,
+    abort_listener: Listener,
     logger: Arc<Mutex<PaymentResultLogger>>,
     interval: Duration,
 ) {
@@ -1320,7 +1347,11 @@ async fn run_results_logger(
     loop {
         select! {
             biased;
-            _ = listener.clone() => {
+            _ = shutdown_listener.clone() => {
+                break
+            }
+
+            _ = abort_listener.clone() => {
                 break
             }
 
@@ -1350,6 +1381,7 @@ async fn produce_simulation_results(
 
     let result = loop {
         tokio::select! {
+            // Listen for abort or always clean shutdown??
             biased;
             _ = listener.clone() => {
                 break Ok(())
@@ -1369,6 +1401,7 @@ async fn produce_simulation_results(
                             },
                             SimulationOutput::SendPaymentFailure(payment, result) => {
                                 select!{
+                                    // Listen for abort or always clean shutdown??
                                     _ = listener.clone() => {
                                         return Ok(());
                                     },
@@ -1440,6 +1473,7 @@ async fn track_payment_result(
     };
 
     select! {
+        // Listen for abort or always clean shutdown??
         biased;
         _ = listener.clone() => {
             log::debug!("Track payment result received a shutdown signal.");
