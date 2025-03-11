@@ -237,15 +237,9 @@ impl LightningNode for EclairNode {
     }
 
     async fn list_channels(&mut self) -> Result<Vec<u64>, LightningError> {
-        let mut params = HashMap::new();
-        params.insert(
-            "nodeId".to_string(),
-            hex::encode(self.info.pubkey.serialize()),
-        );
-
         let channels: ChannelsResponse = self
             .client
-            .request("channels", Some(params))
+            .request("channels", None)
             .await
             .map_err(|err| LightningError::ListChannelsError(err.to_string()))?;
 
