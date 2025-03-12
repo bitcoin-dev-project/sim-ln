@@ -224,6 +224,8 @@ async fn main() -> anyhow::Result<()> {
 
     ctrlc::set_handler(move || {
         log::info!("Shutting down simulation.");
+        // Abort or shutdown??
+        // sim2.abort()
         sim2.shutdown();
     })?;
 
