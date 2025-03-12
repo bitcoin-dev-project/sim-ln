@@ -12,6 +12,15 @@ lightning network development. It may be useful to you if you are:
 * A signet operator interested in a hands-off way to run an active node. 
 * A researcher generating synthetic data for a target topology.
 
+## LN Implementation Support
+* LND ✅
+* CLN ✅
+* Eclair ✅️
+* LDK-node 🏗️
+
+See our [tracking issue](https://github.com/bitcoin-dev-project/sim-ln/issues/26)
+for updates on implementation support (contributions welcome!).
+
 ## Pre-Requisites
 SimLN requires you to "bring your own network" to generate activity 
 on. You will need:
@@ -21,14 +30,12 @@ on. You will need:
 * Rust compiler [installed](https://www.rust-lang.org/tools/install).
 * Protoc [installed](https://grpc.io/docs/protoc-installation).
 
-## LN Implementation Support
-* LND ✅ 
-* CLN ✅ 
-* Eclair 🏗️
-* LDK-node 🏗️
-
-See our [tracking issue](https://github.com/bitcoin-dev-project/sim-ln/issues/26)
-for updates on implementation support (contributions welcome!).
+The simulator requires access details for a set of `nodes` that you
+have permission to execute commands on. Note that the current version
+of the simulator uses keysend to execute payments, which must be enabled as follows:
+* LND: `--accept-keysend`
+* CLN: enabled by default
+* Eclair: `--features.keysend=optional`
 
 ## Getting Started
 
@@ -54,13 +61,8 @@ Run `sim-cli -h` for details on `--data-dir` and `--sim-file` options that allow
 Interested in contributing to the project? See [CONTRIBUTING](CONTRIBUTING.md) for more details.
 
 ### Simulation File Setup
-The simulator requires access details for a set of `nodes` that you 
-have permission to execute commands on. Note that the current version 
-of the simulator uses keysend to execute payments, which must be 
-enabled in LND using `--accept-keysend` (for CLN node it is enabled by default).
-
-The required access details will depend on the node implementation. For LND, the following
-information is required:
+The required access details will depend on the node implementation.  
+* LND:
 
 ```
 {
@@ -70,9 +72,7 @@ information is required:
   "cert": <path_to_tls_cert>
 }
 ```
-
-Whereas for CLN nodes, the following information is required:
-
+* CLN:
 ```
 { 
   "id": <node_id>,
@@ -82,12 +82,20 @@ Whereas for CLN nodes, the following information is required:
   "client_key": <path_to_client_key>
 }
 ```
-
+* Eclair:
+```
+{ 
+  "id": <node_id>,
+  "base_url": <ip:port or domain:port>,
+  "api_username": <username_to_authorize>,
+  "api_password": <password_to_authorize>
+}
+```
 
 Payment activity can be simulated in two different ways:
-* Random activity: generate random activity on the `nodes` provided, 
+* [Random activity](#setup---random-activity): generate random activity on the `nodes` provided, 
   using the graph topology to determine payment frequency and size.
-* Defined activity: provide descriptions of specific payments that 
+* [Defined activity](#setup---defined-activity): provide descriptions of specific payments that 
   you would like the generator to execute.
 
 ### Setup - Random Activity
@@ -113,6 +121,12 @@ not "drain" from the simulation.
       "ca_cert": "/path/ca.pem",
       "client_cert": "/path/client.pem",
       "client_key": "/path/client-key.pem"
+    },
+    { 
+      "id": "carol",
+      "base_url": "127.0.0.1:8286",
+      "api_username": "",
+      "api_password": "eclairpw"
     }
   ]
 }
