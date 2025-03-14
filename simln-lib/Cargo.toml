@@ -32,6 +32,7 @@ serde_millis = "0.1.1"
 rand_distr = "0.4.3"
 mockall = "0.12.1"
 rand_chacha = "0.3.1"
+tokio-util = { version = "0.7.13", features = ["rt"] }
 
 [dev-dependencies]
 ntest = "0.9.0"
