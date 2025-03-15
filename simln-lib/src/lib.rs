@@ -30,7 +30,7 @@ pub mod cln;
 mod defined_activity;
 pub mod lnd;
 mod random_activity;
-mod serializers;
+pub mod serializers;
 pub mod sim_node;
 #[cfg(test)]
 mod test_utils;
@@ -126,13 +126,6 @@ impl std::fmt::Display for ShortChannelID {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct SimParams {
-    pub nodes: Vec<NodeConnection>,
-    #[serde(default)]
-    pub activity: Vec<ActivityParser>,
-}
-
 /// Either a value or a range parsed from the simulation file.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -170,9 +163,9 @@ where
 }
 
 /// The payment amount in msat. Either a value or a range.
-type Amount = ValueOrRange<u64>;
+pub type Amount = ValueOrRange<u64>;
 /// The interval of seconds between payments. Either a value or a range.
-type Interval = ValueOrRange<u16>;
+pub type Interval = ValueOrRange<u16>;
 
 /// Data structure used to parse information from the simulation file. It allows source and destination to be
 /// [NodeId], which enables the use of public keys and aliases in the simulation description.
