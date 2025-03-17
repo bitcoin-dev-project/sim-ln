@@ -2080,6 +2080,7 @@ dependencies = [
  "simln-lib",
  "simple_logger",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -2107,6 +2108,7 @@ dependencies = [
  "serde_millis",
  "thiserror",
  "tokio",
+ "tokio-util",
  "tonic 0.8.3",
  "triggered",
 ]
@@ -2374,6 +2376,8 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
+ "hashbrown 0.14.5",
  "pin-project-lite",
  "tokio",
 ]
