@@ -522,7 +522,7 @@ pub struct Simulation {
     shutdown_trigger: Trigger,
     shutdown_listener: Listener,
     abort_trigger: Trigger,
-    abort_listener: Listener
+    abort_listener: Listener,
 }
 
 #[derive(Clone)]
@@ -559,7 +559,7 @@ impl Simulation {
             shutdown_trigger,
             shutdown_listener,
             abort_trigger,
-            abort_listener
+            abort_listener,
         }
     }
 
@@ -661,94 +661,94 @@ impl Simulation {
         );
         let mut tasks = JoinSet::new();
 
-        { // A block to control the scope of consumer_channels and event_sender. These need to go out of scope so that receivers will close.
-
-        // Before we start the simulation up, start tasks that will be responsible for gathering simulation data.
-        // The event channels are shared across our functionality:
-        // - Event Sender: used by the simulation to inform data reporting that it needs to start tracking the
-        //   final result of the event that it has taken.
-        // - Event Receiver: used by data reporting to receive events that have been simulated that need to be
-        //   tracked and recorded.
-        let (event_sender, event_receiver) = channel(1);
-        self.run_data_collection(event_receiver, &mut tasks);
-
-        // Get an execution kit per activity that we need to generate and spin up consumers for each source node.
-        let activities = match self.activity_executors().await {
-            Ok(a) => a,
-            Err(e) => {
-                // If we encounter an error while setting up the activity_executors,
-                // we need to shutdown and wait for tasks to finish. We have started background tasks in the
-                // run_data_collection function, so we should shut those down before returning.
-                // The tasks started in run_data_collection are listening for the abort trigger.
-                self.abort_trigger.trigger();
-                while let Some(res) = tasks.join_next().await {
-                    if let Err(e) = res {
-                        log::error!("Task exited with error: {e}.");
-                    }
-                }
-                return Err(e);
-            },
-        };
-        let consumer_channels = self.dispatch_consumers(
-            activities
-                .iter()
-                .map(|generator| generator.source_info.pubkey)
-                .collect(),
-            event_sender.clone(),
-            &mut tasks,
-        );
-
-        // Next, we'll spin up our actual producers that will be responsible for triggering the configured activity.
-        // The producers will use their own JoinSet so that the simulation can be shutdown if they all finish.
-        let mut producer_tasks = JoinSet::new();
-        match self
-            .dispatch_producers(activities, consumer_channels, &mut producer_tasks)
-            .await
         {
-            Ok(_) => {},
-            Err(e) => {
-                // If we encounter an error in dispatch_producers, we need to shutdown and wait for tasks to finish.
-                // We have started background tasks in the run_data_collection function,
-                // so we should shut those down before returning.
-                self.shutdown();
-                while let Some(res) = tasks.join_next().await {
+            // A block to control the scope of consumer_channels and event_sender. These need to go out of scope so that receivers will close.
+
+            // Before we start the simulation up, start tasks that will be responsible for gathering simulation data.
+            // The event channels are shared across our functionality:
+            // - Event Sender: used by the simulation to inform data reporting that it needs to start tracking the
+            //   final result of the event that it has taken.
+            // - Event Receiver: used by data reporting to receive events that have been simulated that need to be
+            //   tracked and recorded.
+            let (event_sender, event_receiver) = channel(1);
+            self.run_data_collection(event_receiver, &mut tasks);
+
+            // Get an execution kit per activity that we need to generate and spin up consumers for each source node.
+            let activities = match self.activity_executors().await {
+                Ok(a) => a,
+                Err(e) => {
+                    // If we encounter an error while setting up the activity_executors,
+                    // we need to shutdown and wait for tasks to finish. We have started background tasks in the
+                    // run_data_collection function, so we should shut those down before returning.
+                    // The tasks started in run_data_collection are listening for the abort trigger.
+                    self.abort_trigger.trigger();
+                    while let Some(res) = tasks.join_next().await {
+                        if let Err(e) = res {
+                            log::error!("Task exited with error: {e}.");
+                        }
+                    }
+                    return Err(e);
+                },
+            };
+            let consumer_channels = self.dispatch_consumers(
+                activities
+                    .iter()
+                    .map(|generator| generator.source_info.pubkey)
+                    .collect(),
+                event_sender.clone(),
+                &mut tasks,
+            );
+
+            // Next, we'll spin up our actual producers that will be responsible for triggering the configured activity.
+            // The producers will use their own JoinSet so that the simulation can be shutdown if they all finish.
+            let mut producer_tasks = JoinSet::new();
+            match self
+                .dispatch_producers(activities, consumer_channels, &mut producer_tasks)
+                .await
+            {
+                Ok(_) => {},
+                Err(e) => {
+                    // If we encounter an error in dispatch_producers, we need to shutdown and wait for tasks to finish.
+                    // We have started background tasks in the run_data_collection function,
+                    // so we should shut those down before returning.
+                    self.shutdown();
+                    while let Some(res) = tasks.join_next().await {
+                        if let Err(e) = res {
+                            log::error!("Task exited with error: {e}.");
+                        }
+                    }
+                    return Err(e);
+                },
+            }
+
+            // Start a task that waits for the producers to finish.
+            // If all producers finish, then there is nothing left to do and the simulation can be shutdown.
+            let producer_trigger = self.shutdown_trigger.clone();
+            tasks.spawn(async move {
+                while let Some(res) = producer_tasks.join_next().await {
                     if let Err(e) = res {
-                        log::error!("Task exited with error: {e}.");
+                        log::error!("Producer exited with error: {e}.");
                     }
                 }
-                return Err(e);
-            },
-        }
-
-        // Start a task that waits for the producers to finish.
-        // If all producers finish, then there is nothing left to do and the simulation can be shutdown.
-        let producer_trigger = self.shutdown_trigger.clone();
-        tasks.spawn(async move {
-            while let Some(res) = producer_tasks.join_next().await {
-                if let Err(e) = res {
-                    log::error!("Producer exited with error: {e}.");
-                }
-            }
-            log::info!("All producers finished. Shutting down.");
-            producer_trigger.trigger()
-        });
-
-        // Start a task that will shutdown the simulation if the total_time is met.
-        if let Some(total_time) = self.cfg.total_time {
-            let t = self.shutdown_trigger.clone();
-            let l = self.shutdown_listener.clone();
-
-            tasks.spawn(async move {
-                if time::timeout(total_time, l).await.is_err() {
-                    log::info!(
-                        "Simulation run for {}s. Shutting down.",
-                        total_time.as_secs()
-                    );
-                    t.trigger()
-                }
+                log::info!("All producers finished. Shutting down.");
+                producer_trigger.trigger()
             });
-        }
 
+            // Start a task that will shutdown the simulation if the total_time is met.
+            if let Some(total_time) = self.cfg.total_time {
+                let t = self.shutdown_trigger.clone();
+                let l = self.shutdown_listener.clone();
+
+                tasks.spawn(async move {
+                    if time::timeout(total_time, l).await.is_err() {
+                        log::info!(
+                            "Simulation run for {}s. Shutting down.",
+                            total_time.as_secs()
+                        );
+                        t.trigger()
+                    }
+                });
+            }
         } // A block to control the scope of consumer_channels and event_sender. These need to go out of scope so that receivers will close.
 
         // We always want to wait for all threads to exit, so we wait for all of them to exit and track any errors
@@ -1056,7 +1056,6 @@ async fn consume_events(
 ) -> Result<(), SimulationError> {
     loop {
         select! {
-            // Listen for abort or always clean shutdown??
             biased;
             _ = listener.clone() => {
                 return Ok(());
@@ -1107,7 +1106,6 @@ async fn consume_events(
                             };
 
                             select!{
-                                // Listen for abort or always clean shutdown??
                                 biased;
                                 _ = listener.clone() => {
                                     return Ok(())
@@ -1254,7 +1252,6 @@ async fn consume_simulation_results(
 
     loop {
         select! {
-            // Listen for abort or always clean shutdown??
             biased;
             _ = listener.clone() => {
                 writer.map_or(Ok(()), |(ref mut w, _)| w.flush().map_err(|_| {
@@ -1381,7 +1378,6 @@ async fn produce_simulation_results(
 
     let result = loop {
         tokio::select! {
-            // Listen for abort or always clean shutdown??
             biased;
             _ = listener.clone() => {
                 break Ok(())
@@ -1401,7 +1397,6 @@ async fn produce_simulation_results(
                             },
                             SimulationOutput::SendPaymentFailure(payment, result) => {
                                 select!{
-                                    // Listen for abort or always clean shutdown??
                                     _ = listener.clone() => {
                                         return Ok(());
                                     },
@@ -1473,7 +1468,6 @@ async fn track_payment_result(
     };
 
     select! {
-        // Listen for abort or always clean shutdown??
         biased;
         _ = listener.clone() => {
             log::debug!("Track payment result received a shutdown signal.");
