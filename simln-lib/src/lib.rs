@@ -587,6 +587,11 @@ impl Simulation {
         }
 
         for payment_flow in self.activity.iter() {
+            if payment_flow.amount_msat.value() == 0 {
+                return Err(LightningError::ValidationError(
+                    "We do not allow defined activity amount_msat with zero values".to_string(),
+                ));
+            }
             // We need every source node that is configured to execute some activity to be included in our set of
             // nodes so that we can execute events on it.
             self.nodes
@@ -1487,10 +1492,18 @@ async fn track_payment_result(
 
 #[cfg(test)]
 mod tests {
-    use crate::{get_payment_delay, test_utils, MutRng, PaymentGenerationError, PaymentGenerator};
+    use crate::{
+        get_payment_delay, test_utils, LightningError, LightningNode, MutRng, NodeInfo,
+        PaymentGenerationError, PaymentGenerator, Simulation,
+    };
+    use async_trait::async_trait;
+    use bitcoin::secp256k1::PublicKey;
     use mockall::mock;
+    use std::collections::HashMap;
     use std::fmt;
+    use std::sync::Arc;
     use std::time::Duration;
+    use tokio::sync::Mutex;
 
     #[test]
     fn create_seeded_mut_rng() {
@@ -1530,6 +1543,27 @@ mod tests {
             fn payment_count(&self) -> Option<u64>;
             fn next_payment_wait(&self) -> Result<Duration, PaymentGenerationError>;
             fn payment_amount(&self, destination_capacity: Option<u64>) -> Result<u64, PaymentGenerationError>;
+        }
+    }
+
+    mock! {
+        pub LightningNode {}
+        #[async_trait]
+        impl crate::LightningNode for LightningNode {
+            fn get_info(&self) -> &NodeInfo;
+            async fn get_network(&mut self) -> Result<bitcoin::Network, LightningError>;
+            async fn send_payment(
+                    &mut self,
+                    dest: bitcoin::secp256k1::PublicKey,
+                    amount_msat: u64,
+                ) -> Result<lightning::ln::PaymentHash, LightningError>;
+            async fn track_payment(
+                    &mut self,
+                    hash: &lightning::ln::PaymentHash,
+                    shutdown: triggered::Listener,
+                ) -> Result<crate::PaymentResult, LightningError>;
+            async fn get_node_info(&mut self, node_id: &PublicKey) -> Result<NodeInfo, LightningError>;
+            async fn list_channels(&mut self) -> Result<Vec<u64>, LightningError>;
         }
     }
 
@@ -1586,5 +1620,34 @@ mod tests {
             get_payment_delay(1, &node, &mock_generator).unwrap(),
             payment_interval
         );
+    }
+
+    #[tokio::test]
+    async fn test_validate_zero_amount_no_valid() {
+        let nodes = test_utils::create_nodes(2, 100_000);
+        let mut node_1 = nodes.first().unwrap().0.clone();
+        let mut node_2 = nodes.get(1).unwrap().0.clone();
+        node_1.features.set_keysend_optional();
+        node_2.features.set_keysend_optional();
+
+        let mock_node_1 = MockLightningNode::new();
+        let mock_node_2 = MockLightningNode::new();
+        let mut clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
+        clients.insert(node_1.pubkey, Arc::new(Mutex::new(mock_node_1)));
+        clients.insert(node_2.pubkey, Arc::new(Mutex::new(mock_node_2)));
+        let activity_definition = crate::ActivityDefinition {
+            source: node_1,
+            destination: node_2,
+            start_secs: None,
+            count: None,
+            interval_secs: crate::ValueOrRange::Value(0),
+            amount_msat: crate::ValueOrRange::Value(0),
+        };
+        let simulation = Simulation::new(
+            crate::SimulationCfg::new(Some(0), 0, 0.0, None, None),
+            clients,
+            vec![activity_definition],
+        );
+        assert!(simulation.validate_activity().await.is_err());
     }
 }
