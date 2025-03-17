@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio_util::task::TaskTracker;
 
 /// The default directory where the simulation files are stored and where the results will be written to.
 pub const DEFAULT_DATA_DIR: &str = ".";
@@ -209,6 +210,7 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    let tasks = TaskTracker::new();
     let sim = Simulation::new(
         SimulationCfg::new(
             cli.total_time,
@@ -219,6 +221,7 @@ async fn main() -> anyhow::Result<()> {
         ),
         clients,
         validated_activities,
+        tasks,
     );
     let sim2 = sim.clone();
 
@@ -233,16 +236,18 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn read_sim_path(data_dir: PathBuf, sim_file: PathBuf) -> anyhow::Result<PathBuf> {
-    let sim_path = if sim_file.is_relative() {
-        data_dir.join(sim_file)
+    if sim_file.exists() {
+        Ok(sim_file)
+    } else if sim_file.is_relative() {
+        let sim_path = data_dir.join(sim_file);
+        if sim_path.exists() {
+            Ok(sim_path)
+        } else {
+            log::info!("Simulation file '{}' does not exist.", sim_path.display());
+            select_sim_file(data_dir).await
+        }
     } else {
-        sim_file
-    };
-
-    if sim_path.exists() {
-        Ok(sim_path)
-    } else {
-        log::info!("Simulation file '{}' does not exist.", sim_path.display());
+        log::info!("Simulation file '{}' does not exist.", sim_file.display());
         select_sim_file(data_dir).await
     }
 }

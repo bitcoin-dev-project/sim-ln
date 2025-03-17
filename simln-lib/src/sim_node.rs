@@ -9,6 +9,7 @@ use lightning::ln::chan_utils::make_funding_redeemscript;
 use std::collections::{hash_map::Entry, HashMap};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio_util::task::TaskTracker;
 
 use lightning::ln::features::{ChannelFeatures, NodeFeatures};
 use lightning::ln::msgs::{
@@ -24,7 +25,6 @@ use thiserror::Error;
 use tokio::select;
 use tokio::sync::oneshot::{channel, Receiver, Sender};
 use tokio::sync::Mutex;
-use tokio::task::JoinSet;
 use triggered::{Listener, Trigger};
 
 use crate::ShortChannelID;
@@ -638,8 +638,9 @@ pub struct SimGraph {
     /// channels maps the scid of a channel to its current simulation state.
     channels: Arc<Mutex<HashMap<ShortChannelID, SimulatedChannel>>>,
 
-    /// track all tasks spawned to process payments in the graph.
-    tasks: JoinSet<()>,
+    /// track all tasks spawned to process payments in the graph. Note that handling the shutdown of tasks
+    /// in this tracker must be done externally.
+    tasks: TaskTracker,
 
     /// trigger shutdown if a critical error occurs.
     shutdown_trigger: Trigger,
@@ -649,6 +650,7 @@ impl SimGraph {
     /// Creates a graph on which to simulate payments.
     pub fn new(
         graph_channels: Vec<SimulatedChannel>,
+        tasks: TaskTracker,
         shutdown_trigger: Trigger,
     ) -> Result<Self, SimulationError> {
         let mut nodes: HashMap<PublicKey, Vec<u64>> = HashMap::new();
@@ -682,23 +684,9 @@ impl SimGraph {
         Ok(SimGraph {
             nodes,
             channels: Arc::new(Mutex::new(channels)),
-            tasks: JoinSet::new(),
+            tasks,
             shutdown_trigger,
         })
-    }
-
-    /// Blocks until all tasks created by the simulator have shut down. This function does not trigger shutdown,
-    /// because it expects erroring-out tasks to handle their own shutdown triggering.
-    pub async fn wait_for_shutdown(&mut self) {
-        log::debug!("Waiting for simulated graph to shutdown.");
-
-        while let Some(res) = self.tasks.join_next().await {
-            if let Err(e) = res {
-                log::error!("Graph task exited with error: {e}");
-            }
-        }
-
-        log::debug!("Simulated graph shutdown.");
     }
 }
 
@@ -1579,7 +1567,7 @@ mod tests {
             nodes.push(channels.last().unwrap().node_2.policy.pubkey);
 
             let kit = DispatchPaymentTestKit {
-                graph: SimGraph::new(channels.clone(), shutdown.clone())
+                graph: SimGraph::new(channels.clone(), TaskTracker::new(), shutdown.clone())
                     .expect("could not create test graph"),
                 nodes,
                 routing_graph: populate_network_graph(channels).unwrap(),
@@ -1712,7 +1700,8 @@ mod tests {
         assert_eq!(test_kit.channel_balances().await, expected_balances);
 
         test_kit.shutdown.trigger();
-        test_kit.graph.wait_for_shutdown().await;
+        test_kit.graph.tasks.close();
+        test_kit.graph.tasks.wait().await;
     }
 
     /// Tests successful dispatch of a multi-hop payment.
@@ -1741,7 +1730,8 @@ mod tests {
         assert_eq!(test_kit.channel_balances().await, expected_balances);
 
         test_kit.shutdown.trigger();
-        test_kit.graph.wait_for_shutdown().await;
+        test_kit.graph.tasks.close();
+        test_kit.graph.tasks.wait().await;
     }
 
     /// Tests success and failure for single hop payments, which are an edge case in our state machine.
@@ -1772,7 +1762,8 @@ mod tests {
         assert_eq!(test_kit.channel_balances().await, expected_balances);
 
         test_kit.shutdown.trigger();
-        test_kit.graph.wait_for_shutdown().await;
+        test_kit.graph.tasks.close();
+        test_kit.graph.tasks.wait().await;
     }
 
     /// Tests failing back of multi-hop payments at various failure indexes.
@@ -1812,6 +1803,7 @@ mod tests {
         assert_eq!(test_kit.channel_balances().await, expected_balances);
 
         test_kit.shutdown.trigger();
-        test_kit.graph.wait_for_shutdown().await;
+        test_kit.graph.tasks.close();
+        test_kit.graph.tasks.wait().await;
     }
 }
