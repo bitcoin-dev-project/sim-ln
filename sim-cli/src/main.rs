@@ -4,8 +4,8 @@ use clap::builder::TypedValueParser;
 use clap::Parser;
 use log::LevelFilter;
 use simln_lib::{
-    cln::ClnNode, lnd::LndNode, ActivityDefinition, LightningError, LightningNode, NodeConnection,
-    NodeId, SimParams, Simulation, SimulationCfg, WriteResults,
+    cln::ClnNode, eclair::EclairNode, lnd::LndNode, ActivityDefinition, LightningError,
+    LightningNode, NodeConnection, NodeId, SimParams, Simulation, SimulationCfg, WriteResults,
 };
 use simple_logger::SimpleLogger;
 use std::collections::HashMap;
@@ -112,6 +112,7 @@ async fn main() -> anyhow::Result<()> {
         let node: Arc<Mutex<dyn LightningNode>> = match connection {
             NodeConnection::LND(c) => Arc::new(Mutex::new(LndNode::new(c).await?)),
             NodeConnection::CLN(c) => Arc::new(Mutex::new(ClnNode::new(c).await?)),
+            NodeConnection::ECLAIR(c) => Arc::new(Mutex::new(EclairNode::new(c).await?)),
         };
 
         let node_info = node.lock().await.get_info().clone();
