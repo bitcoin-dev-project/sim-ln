@@ -474,7 +474,7 @@ impl<'a, T: SimNetwork> SimNode<'a, T> {
         let scorer = ProbabilisticScorer::new(
             ProbabilisticScoringDecayParameters::default(),
             pathfinding_graph.clone(),
-            &WrappedLog {}
+            &WrappedLog {},
         );
 
         SimNode {
@@ -1573,11 +1573,11 @@ mod tests {
             let (shutdown, _listener) = triggered::trigger();
             let channels = create_simulated_channels(3, capacity);
             let routing_graph = Arc::new(populate_network_graph(channels.clone()).unwrap());
-    
+
             let scorer = ProbabilisticScorer::new(
                 ProbabilisticScoringDecayParameters::default(),
                 routing_graph.clone(),
-                &WrappedLog {}
+                &WrappedLog {},
             );
 
             // Collect pubkeys in-order, pushing the last node on separately because they don't have an outgoing
@@ -1637,13 +1637,8 @@ mod tests {
             dest: PublicKey,
             amt: u64,
         ) -> Route {
-            let route = find_payment_route(
-                &source, 
-                dest, 
-                amt, 
-                &self.routing_graph,
-                &self.scorer,
-            ).unwrap();
+            let route =
+                find_payment_route(&source, dest, amt, &self.routing_graph, &self.scorer).unwrap();
 
             let (sender, receiver) = oneshot::channel();
             self.graph
