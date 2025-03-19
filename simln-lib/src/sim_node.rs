@@ -28,6 +28,7 @@ use tokio::sync::Mutex;
 use triggered::{Listener, Trigger};
 
 use crate::ShortChannelID;
+use serde::{Deserialize, Serialize};
 
 /// ForwardingError represents the various errors that we can run into when forwarding payments in a simulated network.
 /// Since we're not using real lightning nodes, these errors are not obfuscated and can be propagated to the sending
@@ -109,7 +110,7 @@ struct Htlc {
 /// Represents one node in the channel's forwarding policy and restrictions. Note that this doesn't directly map to
 /// a single concept in the protocol, a few things have been combined for the sake of simplicity. Used to manage the
 /// lightning "state machine" and check that HTLCs are added in accordance of the advertised policy.
-#[derive(Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelPolicy {
     pub pubkey: PublicKey,
     pub max_htlc_count: u64,
@@ -475,7 +476,7 @@ impl<'a, T: SimNetwork> SimNode<'a, T> {
 }
 
 /// Produces the node info for a mocked node, filling in the features that the simulator requires.
-fn node_info(pubkey: PublicKey) -> NodeInfo {
+pub fn node_info(pubkey: PublicKey) -> NodeInfo {
     // Set any features that the simulator requires here.
     let mut features = NodeFeatures::empty();
     features.set_keysend_optional();
