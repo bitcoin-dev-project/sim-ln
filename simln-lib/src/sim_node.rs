@@ -18,7 +18,7 @@ use lightning::ln::msgs::{
 use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::routing::gossip::{NetworkGraph, NodeId};
 use lightning::routing::router::{find_route, Path, PaymentParameters, Route, RouteParameters};
-use lightning::routing::scoring::ProbabilisticScorer;
+use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringDecayParameters};
 use lightning::routing::utxo::{UtxoLookup, UtxoResult};
 use lightning::util::logger::{Level, Logger, Record};
 use thiserror::Error;
@@ -455,6 +455,9 @@ struct SimNode<'a, T: SimNetwork> {
     in_flight: HashMap<PaymentHash, Receiver<Result<PaymentResult, LightningError>>>,
     /// A read-only graph used for pathfinding.
     pathfinding_graph: Arc<NetworkGraph<&'a WrappedLog>>,
+    /// Probabilistic scorer used to rank paths through the network for routing. This is reused across
+    /// multiple payments to maintain scoring state.
+    scorer: ProbabilisticScorer<Arc<NetworkGraph<&'a WrappedLog>>, &'a WrappedLog>,
 }
 
 impl<'a, T: SimNetwork> SimNode<'a, T> {
@@ -465,11 +468,21 @@ impl<'a, T: SimNetwork> SimNode<'a, T> {
         payment_network: Arc<Mutex<T>>,
         pathfinding_graph: Arc<NetworkGraph<&'a WrappedLog>>,
     ) -> Self {
+        // Initialize the probabilistic scorer with default parameters for learning from payment
+        // history. These parameters control how much successful/failed payments affect routing
+        // scores and how quickly these scores decay over time.
+        let scorer = ProbabilisticScorer::new(
+            ProbabilisticScoringDecayParameters::default(),
+            pathfinding_graph.clone(),
+            &WrappedLog {},
+        );
+
         SimNode {
             info: node_info(pubkey),
             network: payment_network,
             in_flight: HashMap::new(),
             pathfinding_graph,
+            scorer,
         }
     }
 }
@@ -489,14 +502,13 @@ fn node_info(pubkey: PublicKey) -> NodeInfo {
 
 /// Uses LDK's pathfinding algorithm with default parameters to find a path from source to destination, with no
 /// restrictions on fee budget.
-fn find_payment_route(
+fn find_payment_route<'a>(
     source: &PublicKey,
     dest: PublicKey,
     amount_msat: u64,
-    pathfinding_graph: &NetworkGraph<&WrappedLog>,
+    pathfinding_graph: &NetworkGraph<&'a WrappedLog>,
+    scorer: &ProbabilisticScorer<Arc<NetworkGraph<&'a WrappedLog>>, &'a WrappedLog>,
 ) -> Result<Route, SimulationError> {
-    let scorer = ProbabilisticScorer::new(Default::default(), pathfinding_graph, &WrappedLog {});
-
     find_route(
         source,
         &RouteParameters {
@@ -512,7 +524,7 @@ fn find_payment_route(
         pathfinding_graph,
         None,
         &WrappedLog {},
-        &scorer,
+        scorer,
         &Default::default(),
         &[0; 32],
     )
@@ -554,11 +566,13 @@ impl<T: SimNetwork> LightningNode for SimNode<'_, T> {
             },
         }
 
+        // Use the stored scorer when finding a route
         let route = match find_payment_route(
             &self.info.pubkey,
             dest,
             amount_msat,
             &self.pathfinding_graph,
+            &self.scorer,
         ) {
             Ok(path) => path,
             // In the case that we can't find a route for the payment, we still report a successful payment *api call*
@@ -1543,7 +1557,8 @@ mod tests {
     struct DispatchPaymentTestKit<'a> {
         graph: SimGraph,
         nodes: Vec<PublicKey>,
-        routing_graph: NetworkGraph<&'a WrappedLog>,
+        routing_graph: Arc<NetworkGraph<&'a WrappedLog>>,
+        scorer: ProbabilisticScorer<Arc<NetworkGraph<&'a WrappedLog>>, &'a WrappedLog>,
         shutdown: triggered::Trigger,
     }
 
@@ -1557,6 +1572,13 @@ mod tests {
         async fn new(capacity: u64) -> Self {
             let (shutdown, _listener) = triggered::trigger();
             let channels = create_simulated_channels(3, capacity);
+            let routing_graph = Arc::new(populate_network_graph(channels.clone()).unwrap());
+
+            let scorer = ProbabilisticScorer::new(
+                ProbabilisticScoringDecayParameters::default(),
+                routing_graph.clone(),
+                &WrappedLog {},
+            );
 
             // Collect pubkeys in-order, pushing the last node on separately because they don't have an outgoing
             // channel (they are not node_1 in any channel, only node_2).
@@ -1570,7 +1592,8 @@ mod tests {
                 graph: SimGraph::new(channels.clone(), TaskTracker::new(), shutdown.clone())
                     .expect("could not create test graph"),
                 nodes,
-                routing_graph: populate_network_graph(channels).unwrap(),
+                routing_graph,
+                scorer,
                 shutdown,
             };
 
@@ -1614,7 +1637,8 @@ mod tests {
             dest: PublicKey,
             amt: u64,
         ) -> Route {
-            let route = find_payment_route(&source, dest, amt, &self.routing_graph).unwrap();
+            let route =
+                find_payment_route(&source, dest, amt, &self.routing_graph, &self.scorer).unwrap();
 
             let (sender, receiver) = oneshot::channel();
             self.graph
