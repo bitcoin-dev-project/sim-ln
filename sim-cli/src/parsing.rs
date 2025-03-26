@@ -119,6 +119,12 @@ struct ActivityParser {
     pub amount_msat: Amount,
 }
 
+struct ActivityValidationParams {
+    activity: Vec<ActivityParser>,
+    pk_node_map: HashMap<PublicKey, NodeInfo>,
+    alias_node_map: HashMap<String, NodeInfo>,
+}
+
 impl TryFrom<&Cli> for SimulationCfg {
     type Error = anyhow::Error;
 
@@ -169,7 +175,15 @@ pub async fn create_simulation(cli: &Cli) -> Result<Simulation, anyhow::Error> {
         ))
     };
 
-    let validated_activities = validate_activities(activity, &clients_info, get_node).await?;
+    let (pk_node_map, alias_node_map) = add_node_to_maps(&clients_info).await?;
+
+    let activity_validation_params = ActivityValidationParams {
+        activity,
+        pk_node_map,
+        alias_node_map,
+    };
+
+    let validated_activities = validate_activities(activity_validation_params, get_node).await?;
     let tasks = TaskTracker::new();
 
     Ok(Simulation::new(cfg, clients, validated_activities, tasks))
@@ -250,12 +264,16 @@ async fn add_node_to_maps(
 /// Validates a set of defined activities, cross-checking aliases and public keys against the set of clients that
 /// have been configured.
 async fn validate_activities(
-    activity: Vec<ActivityParser>,
-    nodes: &HashMap<PublicKey, NodeInfo>,
+    activity_validation_params: ActivityValidationParams,
     get_node_info: impl AsyncFn(&PublicKey) -> Result<NodeInfo, LightningError>,
 ) -> Result<Vec<ActivityDefinition>, LightningError> {
     let mut validated_activities = vec![];
-    let (pk_node_map, alias_node_map) = add_node_to_maps(nodes).await?;
+
+    let ActivityValidationParams {
+        activity,
+        pk_node_map,
+        alias_node_map,
+    } = activity_validation_params;
 
     // Make all the activities identifiable by PK internally
     for act in activity.into_iter() {
