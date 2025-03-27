@@ -1460,8 +1460,8 @@ mod tests {
         PaymentGenerationError, PaymentGenerator, Simulation,
     };
     use async_trait::async_trait;
-    use bitcoin::Network;
     use bitcoin::secp256k1::PublicKey;
+    use bitcoin::Network;
     use mockall::mock;
     use std::collections::HashMap;
     use std::fmt;
@@ -1587,39 +1587,41 @@ mod tests {
         );
     }
 
-    /// Creates a set of nodes with mock implementations
-    fn setup_test_nodes(node_count: usize, keysend_indices: &[usize]) -> (
+    type TestNodesResult = (
         Vec<NodeInfo>,
-        HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>
-    ) {
+        HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
+    );
+
+    /// Creates a set of nodes with mock implementations
+    fn setup_test_nodes(node_count: usize, keysend_indices: &[usize]) -> TestNodesResult {
         let nodes = test_utils::create_nodes(node_count, 100_000);
         let mut node_infos = Vec::new();
         let mut clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
-        
+
         for (idx, (node_info, _)) in nodes.into_iter().enumerate() {
             let mut node = node_info.clone();
-            
+
             // Enable keysend on specified nodes
             if keysend_indices.contains(&idx) {
                 node.features.set_keysend_optional();
             }
-            
+
             // Create and configure mock
             let mut mock_node = MockLightningNode::new();
             mock_node.expect_get_info().return_const(node.clone());
-            
+
             // Store in map
             clients.insert(node.pubkey, Arc::new(Mutex::new(mock_node)));
             node_infos.push(node);
         }
-        
+
         (node_infos, clients)
     }
 
     /// Creates a simulation with the given nodes and activity
     fn create_simulation(
         clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
-        activity: Vec<crate::ActivityDefinition>
+        activity: Vec<crate::ActivityDefinition>,
     ) -> Simulation {
         Simulation::new(
             crate::SimulationCfg::new(Some(0), 0, 0.0, None, None),
@@ -1633,7 +1635,7 @@ mod tests {
     fn create_activity(
         source: NodeInfo,
         destination: NodeInfo,
-        amount_msat: u64
+        amount_msat: u64,
     ) -> crate::ActivityDefinition {
         crate::ActivityDefinition {
             source,
@@ -1645,15 +1647,15 @@ mod tests {
         }
     }
 
-    /// Tests for validate_activity() 
+    /// Tests for validate_activity()
     #[tokio::test]
     async fn test_validate_activity_empty_with_sufficient_nodes() {
         // Create two nodes, both with keysend support
         let (_, clients) = setup_test_nodes(2, &[0, 1]);
-        
+
         // Create simulation with empty activity (for random generation)
         let simulation = create_simulation(clients, vec![]);
-        
+
         let result = simulation.validate_activity().await;
         assert!(result.is_ok());
     }
@@ -1662,10 +1664,10 @@ mod tests {
     async fn test_validate_activity_empty_with_insufficient_nodes() {
         // Create just one node with keysend support
         let (_, clients) = setup_test_nodes(1, &[0]);
-        
+
         // Create simulation with empty activity (for random generation)
         let simulation = create_simulation(clients, vec![]);
-        
+
         let result = simulation.validate_activity().await;
         assert!(result.is_err());
         assert!(matches!(result, 
@@ -1676,10 +1678,10 @@ mod tests {
     async fn test_validate_activity_empty_with_non_keysend_node() {
         // Create two nodes, but only one with keysend
         let (_, clients) = setup_test_nodes(2, &[0]);
-        
+
         // Create simulation with empty activity (for random generation)
         let simulation = create_simulation(clients, vec![]);
-        
+
         let result = simulation.validate_activity().await;
         assert!(result.is_err());
         assert!(matches!(result, 
@@ -1690,19 +1692,19 @@ mod tests {
     async fn test_validate_activity_with_missing_source_node() {
         // Create one node with keysend
         let (nodes, clients) = setup_test_nodes(1, &[0]);
-        
+
         // Create an additional node that isn't in our clients map
         let missing_nodes = test_utils::create_nodes(1, 100_000);
         let missing_node = missing_nodes.first().unwrap().0.clone();
-        
+
         // Get a valid destination node
         let dest_node = nodes[0].clone();
-        
+
         // Create activity with missing source node
         let activity = create_activity(missing_node, dest_node, 1000);
-        
+
         let simulation = create_simulation(clients, vec![activity]);
-        
+
         let result = simulation.validate_activity().await;
         assert!(result.is_err());
         assert!(matches!(result, 
@@ -1713,17 +1715,17 @@ mod tests {
     async fn test_validate_activity_with_non_keysend_destination() {
         // Create one node with keysend
         let (nodes, clients) = setup_test_nodes(1, &[0]);
-        
+
         // Create a destination node without keysend
         let dest_nodes = test_utils::create_nodes(1, 100_000);
         let dest_node = dest_nodes.first().unwrap().0.clone();
         // Intentionally not setting keysend for destination
-        
+
         // Create activity with non-keysend destination
         let activity = create_activity(nodes[0].clone(), dest_node, 1000);
-        
+
         let simulation = create_simulation(clients, vec![activity]);
-        
+
         let result = simulation.validate_activity().await;
         assert!(result.is_err());
         assert!(matches!(result, 
@@ -1734,17 +1736,17 @@ mod tests {
     async fn test_validate_activity_valid_payment_flow() {
         // Create one node with keysend
         let (nodes, clients) = setup_test_nodes(1, &[0]);
-        
+
         // Create a destination node with keysend
         let dest_nodes = test_utils::create_nodes(1, 100_000);
         let mut dest_node = dest_nodes.first().unwrap().0.clone();
         dest_node.features.set_keysend_optional();
-        
+
         // Create valid activity
         let activity = create_activity(nodes[0].clone(), dest_node, 1000);
-        
+
         let simulation = create_simulation(clients, vec![activity]);
-        
+
         let result = simulation.validate_activity().await;
         assert!(result.is_ok());
     }
@@ -1753,12 +1755,12 @@ mod tests {
     async fn test_validate_zero_amount_no_valid() {
         // Create two nodes with keysend
         let (nodes, clients) = setup_test_nodes(2, &[0, 1]);
-        
+
         // Create activity with zero amount
         let activity = create_activity(nodes[0].clone(), nodes[1].clone(), 0);
-        
+
         let simulation = create_simulation(clients, vec![activity]);
-        
+
         let result = simulation.validate_activity().await;
         assert!(result.is_err());
         assert!(matches!(result, 
@@ -1767,28 +1769,34 @@ mod tests {
 
     /// tests for validate_node_network()
     fn setup_network_test_nodes(
-        node_count: usize, 
-        networks: Vec<Network>
+        node_count: usize,
+        networks: Vec<Network>,
     ) -> HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> {
-        assert_eq!(node_count, networks.len(), "Must specify a network for each node");
-        
+        assert_eq!(
+            node_count,
+            networks.len(),
+            "Must specify a network for each node"
+        );
+
         let nodes = test_utils::create_nodes(node_count, 100_000);
         let mut clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
-        
+
         for (idx, (node_info, _)) in nodes.into_iter().enumerate() {
             let mut mock_node = MockLightningNode::new();
-            
+
             // Configure get_info to return the node info
             mock_node.expect_get_info().return_const(node_info.clone());
-            
+
             // Configure get_network to return the specified network
             let network = networks[idx];
-            mock_node.expect_get_network().returning(move || Ok(network));
-            
+            mock_node
+                .expect_get_network()
+                .returning(move || Ok(network));
+
             // Store in map
             clients.insert(node_info.pubkey, Arc::new(Mutex::new(mock_node)));
         }
-        
+
         clients
     }
 
@@ -1797,7 +1805,7 @@ mod tests {
         // Create simulation with empty nodes map
         let empty_nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
         let simulation = create_simulation(empty_nodes, vec![]);
-        
+
         let result = simulation.validate_node_network().await;
         assert!(result.is_err());
         assert!(matches!(result, 
@@ -1809,7 +1817,7 @@ mod tests {
         // Create a node on mainnet (Bitcoin network)
         let clients = setup_network_test_nodes(1, vec![Network::Bitcoin]);
         let simulation = create_simulation(clients, vec![]);
-        
+
         let result = simulation.validate_node_network().await;
         assert!(result.is_err());
         assert!(matches!(result, 
@@ -1821,7 +1829,7 @@ mod tests {
         // Create nodes on different networks (testnet and regtest)
         let clients = setup_network_test_nodes(2, vec![Network::Testnet, Network::Regtest]);
         let simulation = create_simulation(clients, vec![]);
-        
+
         let result = simulation.validate_node_network().await;
         assert!(result.is_err());
         assert!(matches!(result, 
@@ -1831,9 +1839,12 @@ mod tests {
     #[tokio::test]
     async fn test_validate_node_network_multiple_nodes_same_network() {
         // Create multiple nodes on the same network (testnet)
-        let clients = setup_network_test_nodes(3, vec![Network::Testnet, Network::Testnet, Network::Testnet]);
+        let clients = setup_network_test_nodes(
+            3,
+            vec![Network::Testnet, Network::Testnet, Network::Testnet],
+        );
         let simulation = create_simulation(clients, vec![]);
-        
+
         let result = simulation.validate_node_network().await;
         assert!(result.is_ok());
     }
@@ -1843,7 +1854,7 @@ mod tests {
         // Create a single node on a valid network (testnet)
         let clients = setup_network_test_nodes(1, vec![Network::Testnet]);
         let simulation = create_simulation(clients, vec![]);
-        
+
         let result = simulation.validate_node_network().await;
         assert!(result.is_ok());
     }
