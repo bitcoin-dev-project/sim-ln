@@ -1,6 +1,7 @@
 use anyhow::anyhow;
 use bitcoin::secp256k1::PublicKey;
 use clap::{builder::TypedValueParser, Parser};
+use futures::future::BoxFuture;
 use log::LevelFilter;
 use serde::{Deserialize, Serialize};
 use simln_lib::{
@@ -10,7 +11,6 @@ use simln_lib::{
 };
 use std::collections::HashMap;
 use std::fs;
-use std::ops::AsyncFn;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -159,14 +159,17 @@ pub async fn create_simulation(cli: &Cli) -> Result<Simulation, anyhow::Error> {
     let (clients, clients_info) = get_clients(nodes).await?;
     // We need to be able to look up destination nodes in the graph, because we allow defined activities to send to
     // nodes that we do not control. To do this, we can just grab the first node in our map and perform the lookup.
-    let get_node = async |pk: &PublicKey| -> Result<NodeInfo, LightningError> {
-        if let Some(c) = clients.values().next() {
-            return c.lock().await.get_node_info(pk).await;
-        }
-
-        Err(LightningError::GetNodeInfoError(
-            "no nodes for query".to_string(),
-        ))
+    let get_node = |pk: &PublicKey| -> BoxFuture<'static, Result<NodeInfo, LightningError>> {
+        let clients_clone = clients.clone(); // Clone to avoid moving
+        let pk_owned = *pk;
+        Box::pin(async move {
+            if let Some(c) = clients_clone.values().next() {
+                return c.lock().await.get_node_info(&pk_owned).await;
+            }
+            Err(LightningError::GetNodeInfoError(
+                "no nodes for query".to_string(),
+            ))
+        })
     };
 
     let validated_activities = validate_activities(activity, &clients_info, get_node).await?;
@@ -252,7 +255,7 @@ async fn add_node_to_maps(
 async fn validate_activities(
     activity: Vec<ActivityParser>,
     nodes: &HashMap<PublicKey, NodeInfo>,
-    get_node_info: impl AsyncFn(&PublicKey) -> Result<NodeInfo, LightningError>,
+    get_node_info: impl Fn(&PublicKey) -> BoxFuture<'static, Result<NodeInfo, LightningError>>,
 ) -> Result<Vec<ActivityDefinition>, LightningError> {
     let mut validated_activities = vec![];
     let (pk_node_map, alias_node_map) = add_node_to_maps(nodes).await?;
