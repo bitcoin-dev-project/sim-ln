@@ -129,7 +129,9 @@ impl std::fmt::Display for ShortChannelID {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ValueOrRange<T> {
+    /// A single fixed value
     Value(T),
+    /// A range [min, max) from which values are randomly sampled
     Range(T, T),
 }
 
