@@ -36,13 +36,17 @@ pub mod sim_node;
 #[cfg(test)]
 mod test_utils;
 
+/// Represents a node id, either by its public key or alias.
 #[derive(Serialize, Debug, Clone)]
 pub enum NodeId {
+    /// The node's public key
     PublicKey(PublicKey),
+    /// The node's alias (human-readable name)
     Alias(String),
 }
 
 impl NodeId {
+    /// Validates that the provided node id matches the one returned by the backend.
     pub fn validate(&self, node_id: &PublicKey, alias: &mut String) -> Result<(), LightningError> {
         match self {
             crate::NodeId::PublicKey(pk) => {
@@ -67,6 +71,7 @@ impl NodeId {
         Ok(())
     }
 
+    /// Returns the public key of the node if it is a public key node id.
     pub fn get_pk(&self) -> Result<&PublicKey, String> {
         if let NodeId::PublicKey(pk) = self {
             Ok(pk)
@@ -124,7 +129,9 @@ impl std::fmt::Display for ShortChannelID {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ValueOrRange<T> {
+    /// A single fixed value
     Value(T),
+    /// A range [min, max) from which values are randomly sampled
     Range(T, T),
 }
 
@@ -227,10 +234,18 @@ pub enum LightningError {
     ListChannelsError(String),
 }
 
+/// Information about a Lightning Network node.
+/// - Public key: The node's cryptographic identity
+/// - Alias: A human-readable name for the node
+/// - Features: The node's advertised protocol features
+
 #[derive(Debug, Clone)]
 pub struct NodeInfo {
+    /// The node's public key, which serves as its unique identifier in the network
     pub pubkey: PublicKey,
+    /// A human-readable name for the node (may be empty)
     pub alias: String,
+    /// The node's advertised protocol features (e.g., keysend support)
     pub features: NodeFeatures,
 }
 
