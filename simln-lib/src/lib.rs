@@ -234,10 +234,18 @@ pub enum LightningError {
     ListChannelsError(String),
 }
 
+/// Information about a Lightning Network node.
+/// - Public key: The node's cryptographic identity
+/// - Alias: A human-readable name for the node
+/// - Features: The node's advertised protocol features
+
 #[derive(Debug, Clone)]
 pub struct NodeInfo {
+    /// The node's public key, which serves as its unique identifier in the network
     pub pubkey: PublicKey,
+    /// A human-readable name for the node (may be empty)
     pub alias: String,
+    /// The node's advertised protocol features (e.g., keysend support)
     pub features: NodeFeatures,
 }
 
