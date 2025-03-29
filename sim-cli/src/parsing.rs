@@ -171,7 +171,8 @@ pub async fn create_simulation(cli: &Cli) -> Result<Simulation, anyhow::Error> {
 
     let (pk_node_map, alias_node_map) = add_node_to_maps(&clients_info).await?;
 
-    let validated_activities = validate_activities(activity, pk_node_map, alias_node_map, get_node).await?;
+    let validated_activities =
+        validate_activities(activity, pk_node_map, alias_node_map, get_node).await?;
     let tasks = TaskTracker::new();
 
     Ok(Simulation::new(cfg, clients, validated_activities, tasks))
