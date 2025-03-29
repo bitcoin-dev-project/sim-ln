@@ -36,13 +36,17 @@ pub mod sim_node;
 #[cfg(test)]
 mod test_utils;
 
+/// Represents a node id, either by its public key or alias.
 #[derive(Serialize, Debug, Clone)]
 pub enum NodeId {
+    /// The node's public key
     PublicKey(PublicKey),
+    /// The node's alias (human-readable name)
     Alias(String),
 }
 
 impl NodeId {
+    /// Validates that the provided node id matches the one returned by the backend.
     pub fn validate(&self, node_id: &PublicKey, alias: &mut String) -> Result<(), LightningError> {
         match self {
             crate::NodeId::PublicKey(pk) => {
@@ -67,6 +71,7 @@ impl NodeId {
         Ok(())
     }
 
+    /// Returns the public key of the node if it is a public key node id.
     pub fn get_pk(&self) -> Result<&PublicKey, String> {
         if let NodeId::PublicKey(pk) = self {
             Ok(pk)
