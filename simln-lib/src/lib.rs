@@ -89,7 +89,7 @@ impl std::fmt::Display for NodeId {
 }
 
 /// Represents a short channel ID, expressed as a struct so that we can implement display for the trait.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Copy, Serialize, Deserialize)]
 pub struct ShortChannelID(u64);
 
 /// Utility function to easily convert from u64 to `ShortChannelID`
@@ -476,7 +476,7 @@ pub struct Simulation {
     /// Config for the simulation itself.
     cfg: SimulationCfg,
     /// The lightning node that is being simulated.
-    pub nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
+    nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
     /// Results logger that holds the simulation statistics.
     results: Arc<Mutex<PaymentResultLogger>>,
     /// Track all tasks spawned for use in the simulation. When used in the `run` method, it will wait for
@@ -510,8 +510,9 @@ impl Simulation {
         cfg: SimulationCfg,
         nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
         tasks: TaskTracker,
+        shutdown_trigger: Trigger,
+        shutdown_listener: Listener,
     ) -> Self {
-        let (shutdown_trigger, shutdown_listener) = triggered::trigger();
         Self {
             cfg,
             nodes,

@@ -2576,6 +2576,7 @@ dependencies = [
  "simple_logger",
  "tokio",
  "tokio-util",
+ "triggered",
 ]
 
 [[package]]
