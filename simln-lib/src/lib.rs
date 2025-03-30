@@ -375,19 +375,32 @@ impl Display for PaymentResult {
     }
 }
 
+/// Represents all possible outcomes of a Lightning Network payment attempt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PaymentOutcome {
+    /// Payment completed successfully, reaching its intended recipient
     Success,
+    /// The recipient rejected the payment
     RecipientRejected,
+    /// The payment was cancelled by the sending user before completion
     UserAbandoned,
+    /// The payment failed after exhausting all retry attempts
     RetriesExhausted,
+    /// The payment expired before it could complete (e.g., HTLC timeout)
     PaymentExpired,
+    /// No viable route could be found to the destination node
     RouteNotFound,
+    /// An unexpected error occurred during payment processing
     UnexpectedError,
+    /// The payment failed due to incorrect payment details (e.g., wrong invoice amount)
     IncorrectPaymentDetails,
+    /// The sending node has insufficient balance to complete the payment
     InsufficientBalance,
+    /// The payment failed for an unknown reason
     Unknown,
+    /// The payment was never dispatched due to an error during initial sending
     NotDispatched,
+    /// The payment was dispatched but its final status could not be determined
     TrackPaymentFailed,
 }
 
