@@ -112,7 +112,7 @@ impl From<ShortChannelID> for u64 {
     }
 }
 
-/// See https://github.com/lightning/bolts/blob/60de4a09727c20dea330f9ee8313034de6e50594/07-routing-gossip.md#definition-of-short_channel_id.
+/// See <https://github.com/lightning/bolts/blob/60de4a09727c20dea330f9ee8313034de6e50594/07-routing-gossip.md#definition-of-short_channel_id>.
 impl std::fmt::Display for ShortChannelID {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -522,6 +522,10 @@ impl SimulationCfg {
     }
 }
 
+/// A Lightning Network payment simulator that manages payment flows between nodes.
+/// The simulator can execute both predefined payment patterns and generate random payment activity
+/// based on configuration parameters.
+///
 #[derive(Clone)]
 pub struct Simulation {
     /// Config for the simulation itself.
