@@ -238,7 +238,6 @@ pub enum LightningError {
 /// - Public key: The node's cryptographic identity
 /// - Alias: A human-readable name for the node
 /// - Features: The node's advertised protocol features
-
 #[derive(Debug, Clone)]
 pub struct NodeInfo {
     /// The node's public key, which serves as its unique identifier in the network
@@ -300,6 +299,7 @@ pub trait DestinationGenerator: Send {
     ) -> Result<(NodeInfo, Option<u64>), DestinationGenerationError>;
 }
 
+/// Represents an error that occurs when generating payments.
 #[derive(Debug, Error)]
 #[error("Payment generation error: {0}")]
 pub struct PaymentGenerationError(String);
@@ -321,13 +321,27 @@ pub trait PaymentGenerator: Display + Send {
     ) -> Result<u64, PaymentGenerationError>;
 }
 
+/// Represents the result of a payment attempt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentResult {
+    /// The number of HTLCs (Hash Time Locked Contracts) used in the payment attempt.
+    /// Multiple HTLCs may be used for a single payment when using techniques like
+    /// multi-part payments or when retrying failed payment paths.
     pub htlc_count: usize,
+    /// The final outcome of the payment attempt, indicating whether it succeeded
+    /// or failed (and if failed, the reason for failure).
     pub payment_outcome: PaymentOutcome,
 }
 
 impl PaymentResult {
+    /// Creates a new PaymentResult indicating that the payment was never dispatched.
+    /// This is used when there was an error during the initial payment dispatch attempt.
+    ///(e.g., insufficient balance, invalid destination)
+    ///
+    /// # Returns
+    /// A PaymentResult with:
+    /// - htlc_count: 0 (no HTLCs used since payment wasn't dispatched)
+    /// - payment_outcome: NotDispatched
     pub fn not_dispatched() -> Self {
         PaymentResult {
             htlc_count: 0,
@@ -335,6 +349,14 @@ impl PaymentResult {
         }
     }
 
+    /// Creates a new PaymentResult indicating that tracking the payment failed.
+    /// This is used when the payment was dispatched but the system was unable to
+    /// determine its final outcome (e.g., due to connection issues or timeouts).
+    ///
+    /// # Returns
+    /// A PaymentResult with:
+    /// - htlc_count: 0 (unknown since tracking failed)
+    /// - payment_outcome: TrackPaymentFailed
     pub fn track_payment_failed() -> Self {
         PaymentResult {
             htlc_count: 0,
