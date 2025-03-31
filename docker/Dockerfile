@@ -5,10 +5,10 @@ FROM rust:latest AS base
 # buildkit will provide this automatically, no need to pass it in
 ARG TARGETARCH
 
-FROM base as builder-amd64
+FROM base AS builder-amd64
 ENV TARGET_RUST_ARCH="x86_64-unknown-linux-musl"
 
-FROM base as builder-arm64
+FROM base AS builder-arm64
 ENV TARGET_RUST_ARCH="aarch64-unknown-linux-musl"
 RUN apt-get update \
     && apt-get install clang llvm -y --no-install-recommends \
@@ -18,14 +18,22 @@ ENV CC_aarch64_unknown_linux_musl=clang
 ENV AR_aarch64_unknown_linux_musl=llvm-ar
 ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-Clink-self-contained=yes -Clinker=rust-lld"
 
-FROM builder-${TARGETARCH} as builder
-RUN echo "Building for architecture:  $TARGET_RUST_ARCH"
+FROM builder-${TARGETARCH} AS builder
+RUN echo "Building for architecture: ${TARGET_RUST_ARCH}"
 # Copy the source code
 COPY . /sim-ln
 
 # Install the dependencies required for building sim-ln
 RUN apt-get update \
-    && apt-get -y --no-install-recommends install protobuf-compiler musl-tools
+    && apt-get install -y --no-install-recommends \
+       protobuf-compiler musl-tools build-essential perl \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set to 1 to instruct openssl-sys to link OpenSSL statically, ensuring a fully static binary
+ENV OPENSSL_STATIC=1
+# Set to 1 to enable vendoring, making openssl-sys build OpenSSL from source instead of using system libraries
+ENV OPENSSL_VENDORED=1
 
 RUN rustup target add ${TARGET_RUST_ARCH}
 RUN rustup component add rustfmt
