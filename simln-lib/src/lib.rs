@@ -1417,19 +1417,19 @@ async fn track_payment_result(
 
 #[cfg(test)]
 mod tests {
+    // use crate::test_utils::TestNetworkBuilder;
     use crate::{
-        get_payment_delay, test_utils, LightningError, LightningNode, MutRng, NodeInfo,
-        PaymentGenerationError, PaymentGenerator, Simulation,
+        get_payment_delay, test_utils, test_utils::LightningTestNodeBuilder, LightningError,
+        LightningNode, MutRng, PaymentGenerationError, PaymentGenerator,
     };
-    use async_trait::async_trait;
     use bitcoin::secp256k1::PublicKey;
+    use bitcoin::Network;
     use mockall::mock;
     use std::collections::HashMap;
     use std::fmt;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::Mutex;
-    use tokio_util::task::TaskTracker;
 
     #[test]
     fn create_seeded_mut_rng() {
@@ -1469,27 +1469,6 @@ mod tests {
             fn payment_count(&self) -> Option<u64>;
             fn next_payment_wait(&self) -> Result<Duration, PaymentGenerationError>;
             fn payment_amount(&self, destination_capacity: Option<u64>) -> Result<u64, PaymentGenerationError>;
-        }
-    }
-
-    mock! {
-        pub LightningNode {}
-        #[async_trait]
-        impl crate::LightningNode for LightningNode {
-            fn get_info(&self) -> &NodeInfo;
-            async fn get_network(&mut self) -> Result<bitcoin::Network, LightningError>;
-            async fn send_payment(
-                    &mut self,
-                    dest: bitcoin::secp256k1::PublicKey,
-                    amount_msat: u64,
-                ) -> Result<lightning::ln::PaymentHash, LightningError>;
-            async fn track_payment(
-                    &mut self,
-                    hash: &lightning::ln::PaymentHash,
-                    shutdown: triggered::Listener,
-                ) -> Result<crate::PaymentResult, LightningError>;
-            async fn get_node_info(&mut self, node_id: &PublicKey) -> Result<NodeInfo, LightningError>;
-            async fn list_channels(&mut self) -> Result<Vec<u64>, LightningError>;
         }
     }
 
@@ -1548,33 +1527,178 @@ mod tests {
         );
     }
 
+    // Tests for validate_activity()
+
+    /// Verifies that an empty activity (for random generation) is valid when two nodes with keysend
+    /// support are present, expecting an `Ok` result.
+    #[tokio::test]
+    async fn test_validate_activity_empty_with_sufficient_nodes() {
+        let (_, clients) = LightningTestNodeBuilder::setup_test_nodes(2, &[0, 1, 2]);
+        let simulation = test_utils::create_simulation(clients, vec![]);
+        let result = simulation.validate_activity().await;
+        assert!(result.is_ok());
+    }
+
+    /// Verifies that an empty activity fails validation with only one keysend-enabled node,
+    /// expecting a `ValidationError` with "At least two nodes required".
+    #[tokio::test]
+    async fn test_validate_activity_empty_with_insufficient_nodes() {
+        let (_, clients) = LightningTestNodeBuilder::setup_test_nodes(1, &[0]);
+        let simulation = test_utils::create_simulation(clients, vec![]);
+        let result = simulation.validate_activity().await;
+
+        assert!(result.is_err());
+        assert!(matches!(result, 
+            Err(LightningError::ValidationError(msg)) if msg.contains("At least two nodes required")));
+    }
+
+    /// Verifies that an empty activity fails when one of two nodes doesn’t support keysend,
+    /// expecting a `ValidationError` with "must support keysend".
+    #[tokio::test]
+    async fn test_validate_activity_empty_with_non_keysend_node() {
+        let (_, clients) = LightningTestNodeBuilder::setup_test_nodes(2, &[0]);
+        let simulation = test_utils::create_simulation(clients, vec![]);
+        let result = simulation.validate_activity().await;
+
+        assert!(result.is_err());
+        assert!(matches!(result, 
+            Err(LightningError::ValidationError(msg)) if msg.contains("must support keysend")));
+    }
+
+    /// Verifies that an activity fails when the source node isn’t in the clients map,
+    /// expecting a `ValidationError` with "Source node not found".
+    #[tokio::test]
+    async fn test_validate_activity_with_missing_source_node() {
+        let (nodes, clients) = LightningTestNodeBuilder::setup_test_nodes(1, &[0]);
+        let missing_nodes = test_utils::create_nodes(1, 100_000);
+        let missing_node = missing_nodes.first().unwrap().0.clone();
+        let dest_node = nodes[0].clone();
+
+        let activity = test_utils::create_activity(missing_node, dest_node, 1000);
+        let simulation = test_utils::create_simulation(clients, vec![activity]);
+        let result = simulation.validate_activity().await;
+
+        assert!(result.is_err());
+        assert!(matches!(result, 
+            Err(LightningError::ValidationError(msg)) if msg.contains("Source node not found")));
+    }
+
+    /// Verifies that an activity fails when the destination lacks keysend support,
+    /// expecting a `ValidationError` with "does not support keysend".
+    #[tokio::test]
+    async fn test_validate_activity_with_non_keysend_destination() {
+        let (nodes, clients) = LightningTestNodeBuilder::setup_test_nodes(1, &[0]);
+        let dest_nodes = test_utils::create_nodes(1, 100_000);
+        let dest_node = dest_nodes.first().unwrap().0.clone();
+
+        let activity = test_utils::create_activity(nodes[0].clone(), dest_node, 1000);
+        let simulation = test_utils::create_simulation(clients, vec![activity]);
+        let result = simulation.validate_activity().await;
+
+        assert!(result.is_err());
+        assert!(matches!(result, 
+            Err(LightningError::ValidationError(msg)) if msg.contains("does not support keysend")));
+    }
+
+    /// Verifies that an activity with a non-zero amount between two keysend-enabled nodes
+    /// passes validation, expecting an `Ok` result.
+    #[tokio::test]
+    async fn test_validate_activity_valid_payment_flow() {
+        let (nodes, clients) = LightningTestNodeBuilder::setup_test_nodes(1, &[0]);
+        let dest_nodes = test_utils::create_nodes(1, 100_000);
+        let mut dest_node = dest_nodes.first().unwrap().0.clone();
+        dest_node.features.set_keysend_optional();
+
+        let activity = test_utils::create_activity(nodes[0].clone(), dest_node, 1000);
+        let simulation = test_utils::create_simulation(clients, vec![activity]);
+        let result = simulation.validate_activity().await;
+
+        assert!(result.is_ok());
+    }
+
+    /// Verifies that an activity with a zero amount between two keysend-enabled nodes fails,
+    /// expecting a `ValidationError` with "zero values".
     #[tokio::test]
     async fn test_validate_zero_amount_no_valid() {
-        let nodes = test_utils::create_nodes(2, 100_000);
-        let mut node_1 = nodes.first().unwrap().0.clone();
-        let mut node_2 = nodes.get(1).unwrap().0.clone();
-        node_1.features.set_keysend_optional();
-        node_2.features.set_keysend_optional();
+        let (nodes, clients) = LightningTestNodeBuilder::setup_test_nodes(2, &[0, 1]);
 
-        let mock_node_1 = MockLightningNode::new();
-        let mock_node_2 = MockLightningNode::new();
-        let mut clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
-        clients.insert(node_1.pubkey, Arc::new(Mutex::new(mock_node_1)));
-        clients.insert(node_2.pubkey, Arc::new(Mutex::new(mock_node_2)));
-        let activity_definition = crate::ActivityDefinition {
-            source: node_1,
-            destination: node_2,
-            start_secs: None,
-            count: None,
-            interval_secs: crate::ValueOrRange::Value(0),
-            amount_msat: crate::ValueOrRange::Value(0),
-        };
-        let simulation = Simulation::new(
-            crate::SimulationCfg::new(Some(0), 0, 0.0, None, None),
-            clients,
-            vec![activity_definition],
-            TaskTracker::new(),
+        let activity = test_utils::create_activity(nodes[0].clone(), nodes[1].clone(), 0);
+        let simulation = test_utils::create_simulation(clients, vec![activity]);
+        let result = simulation.validate_activity().await;
+
+        assert!(result.is_err());
+        assert!(matches!(result, 
+            Err(LightningError::ValidationError(msg)) if msg.contains("zero values")));
+    }
+
+    // tests for validate_node_network()
+
+    /// Verifies that validation fails with no nodes, expecting a `ValidationError` with
+    /// "we don't control any nodes".
+    #[tokio::test]
+    async fn test_validate_node_network_empty_nodes() {
+        let empty_nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
+
+        let simulation = test_utils::create_simulation(empty_nodes, vec![]);
+        let result = simulation.validate_node_network().await;
+
+        assert!(result.is_err());
+        assert!(matches!(result, 
+            Err(LightningError::ValidationError(msg)) if msg.contains("we don't control any nodes")));
+    }
+
+    /// Verifies that a node on Bitcoin mainnet fails validation, expecting a `ValidationError`
+    /// with "mainnet is not supported".
+    #[tokio::test]
+    async fn test_validate_node_network_mainnet_not_supported() {
+        let clients = LightningTestNodeBuilder::setup_network_test_nodes(1, vec![Network::Bitcoin]);
+
+        let simulation = test_utils::create_simulation(clients, vec![]);
+        let result = simulation.validate_node_network().await;
+
+        assert!(result.is_err());
+        assert!(matches!(result, 
+            Err(LightningError::ValidationError(msg)) if msg.contains("mainnet is not supported")));
+    }
+
+    /// Verifies that nodes on Testnet and Regtest fail validation, expecting a
+    /// `ValidationError` with "nodes are not on the same network".
+    #[tokio::test]
+    async fn test_validate_node_network_mixed_networks() {
+        let clients = LightningTestNodeBuilder::setup_network_test_nodes(
+            2,
+            vec![Network::Testnet, Network::Regtest],
         );
-        assert!(simulation.validate_activity().await.is_err());
+
+        let simulation = test_utils::create_simulation(clients, vec![]);
+        let result = simulation.validate_node_network().await;
+
+        assert!(result.is_err());
+        assert!(matches!(result, 
+            Err(LightningError::ValidationError(msg)) if msg.contains("nodes are not on the same network")));
+    }
+
+    /// Verifies that three Testnet nodes pass validation, expecting an `Ok` result.
+    #[tokio::test]
+    async fn test_validate_node_network_multiple_nodes_same_network() {
+        let clients = LightningTestNodeBuilder::setup_network_test_nodes(
+            3,
+            vec![Network::Testnet, Network::Testnet, Network::Testnet],
+        );
+
+        let simulation = test_utils::create_simulation(clients, vec![]);
+        let result = simulation.validate_node_network().await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_validate_node_network_single_node_valid_network() {
+        let clients = LightningTestNodeBuilder::setup_network_test_nodes(1, vec![Network::Testnet]);
+
+        let simulation = test_utils::create_simulation(clients, vec![]);
+        let result = simulation.validate_node_network().await;
+
+        assert!(result.is_ok());
     }
 }
