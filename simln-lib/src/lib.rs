@@ -31,18 +31,10 @@ mod defined_activity;
 pub mod eclair;
 pub mod lnd;
 mod random_activity;
-mod serializers;
+pub mod serializers;
 pub mod sim_node;
 #[cfg(test)]
 mod test_utils;
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(untagged)]
-pub enum NodeConnection {
-    LND(lnd::LndConnection),
-    CLN(cln::ClnConnection),
-    ECLAIR(eclair::EclairConnection),
-}
 
 #[derive(Serialize, Debug, Clone)]
 pub enum NodeId {
@@ -128,13 +120,6 @@ impl std::fmt::Display for ShortChannelID {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct SimParams {
-    pub nodes: Vec<NodeConnection>,
-    #[serde(default)]
-    pub activity: Vec<ActivityParser>,
-}
-
 /// Either a value or a range parsed from the simulation file.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -172,32 +157,9 @@ where
 }
 
 /// The payment amount in msat. Either a value or a range.
-type Amount = ValueOrRange<u64>;
+pub type Amount = ValueOrRange<u64>;
 /// The interval of seconds between payments. Either a value or a range.
-type Interval = ValueOrRange<u16>;
-
-/// Data structure used to parse information from the simulation file. It allows source and destination to be
-/// [NodeId], which enables the use of public keys and aliases in the simulation description.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ActivityParser {
-    /// The source of the payment.
-    #[serde(with = "serializers::serde_node_id")]
-    pub source: NodeId,
-    /// The destination of the payment.
-    #[serde(with = "serializers::serde_node_id")]
-    pub destination: NodeId,
-    /// The time in the simulation to start the payment.
-    pub start_secs: Option<u16>,
-    /// The number of payments to send over the course of the simulation.
-    #[serde(default)]
-    pub count: Option<u64>,
-    /// The interval of the event, as in every how many seconds the payment is performed.
-    #[serde(with = "serializers::serde_value_or_range")]
-    pub interval_secs: Interval,
-    /// The amount of m_sat to used in this payment.
-    #[serde(with = "serializers::serde_value_or_range")]
-    pub amount_msat: Amount,
-}
+pub type Interval = ValueOrRange<u16>;
 
 /// Data structure used internally by the simulator. Both source and destination are represented as [PublicKey] here.
 /// This is constructed during activity validation and passed along to the [Simulation].
