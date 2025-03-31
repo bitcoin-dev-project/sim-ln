@@ -159,9 +159,8 @@ pub async fn create_simulation(cli: &Cli) -> Result<Simulation, anyhow::Error> {
     let (clients, clients_info) = get_clients(nodes).await?;
     // We need to be able to look up destination nodes in the graph, because we allow defined activities to send to
     // nodes that we do not control. To do this, we can just grab the first node in our map and perform the lookup.
-    let clients_clone = clients.clone();
-    let get_node = move |pk: &PublicKey| async move {
-        if let Some(c) = clients_clone.values().next() {
+    let get_node = async |pk: &PublicKey| -> Result<NodeInfo, LightningError> {
+        if let Some(c) = clients.values().next() {
             return c.lock().await.get_node_info(pk).await;
         }
 
