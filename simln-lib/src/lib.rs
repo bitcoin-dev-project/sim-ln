@@ -713,75 +713,73 @@ impl Simulation {
             self.nodes.len()
         );
 
+        // Before we start the simulation up, start tasks that will be responsible for gathering simulation data.
+        // The event channels are shared across our functionality:
+        // - Event Sender: used by the simulation to inform data reporting that it needs to start tracking the
+        //   final result of the event that it has taken.
+        // - Event Receiver: used by data reporting to receive events that have been simulated that need to be
+        //   tracked and recorded.
+        let (event_sender, event_receiver) = channel(1);
+        self.run_data_collection(event_receiver, &self.tasks);
+
+        // Get an execution kit per activity that we need to generate and spin up consumers for each source node.
+        let activities = match self.activity_executors().await {
+            Ok(a) => a,
+            Err(e) => {
+                // If we encounter an error while setting up the activity_executors,
+                // we need to shutdown and return.
+                self.shutdown();
+                return Err(e);
+            },
+        };
+        let consumer_channels = self.dispatch_consumers(
+            activities
+                .iter()
+                .map(|generator| generator.source_info.pubkey)
+                .collect(),
+            event_sender,
+            &self.tasks,
+        );
+
+        // Next, we'll spin up our actual producers that will be responsible for triggering the configured activity.
+        // The producers will use their own TaskTracker so that the simulation can be shutdown if they all finish.
+        let producer_tasks = TaskTracker::new();
+        match self
+            .dispatch_producers(activities, consumer_channels, &producer_tasks)
+            .await
         {
-            // Before we start the simulation up, start tasks that will be responsible for gathering simulation data.
-            // The event channels are shared across our functionality:
-            // - Event Sender: used by the simulation to inform data reporting that it needs to start tracking the
-            //   final result of the event that it has taken.
-            // - Event Receiver: used by data reporting to receive events that have been simulated that need to be
-            //   tracked and recorded.
-            let (event_sender, event_receiver) = channel(1);
-            self.run_data_collection(event_receiver, &self.tasks);
+            Ok(_) => {},
+            Err(e) => {
+                // If we encounter an error in dispatch_producers, we need to shutdown and return.
+                self.shutdown();
+                return Err(e);
+            },
+        }
 
-            // Get an execution kit per activity that we need to generate and spin up consumers for each source node.
-            let activities = match self.activity_executors().await {
-                Ok(a) => a,
-                Err(e) => {
-                    // If we encounter an error while setting up the activity_executors,
-                    // we need to shutdown and return.
-                    self.shutdown();
-                    return Err(e);
-                },
-            };
-            let consumer_channels = self.dispatch_consumers(
-                activities
-                    .iter()
-                    .map(|generator| generator.source_info.pubkey)
-                    .collect(),
-                event_sender.clone(),
-                &self.tasks,
-            );
+        // Start a task that waits for the producers to finish.
+        // If all producers finish, then there is nothing left to do and the simulation can be shutdown.
+        let producer_trigger = self.shutdown_trigger.clone();
+        self.tasks.spawn(async move {
+            producer_tasks.close();
+            producer_tasks.wait().await;
+            log::info!("All producers finished. Shutting down.");
+            producer_trigger.trigger()
+        });
 
-            // Next, we'll spin up our actual producers that will be responsible for triggering the configured activity.
-            // The producers will use their own TaskTracker so that the simulation can be shutdown if they all finish.
-            let producer_tasks = TaskTracker::new();
-            match self
-                .dispatch_producers(activities, consumer_channels, &producer_tasks)
-                .await
-            {
-                Ok(_) => {},
-                Err(e) => {
-                    // If we encounter an error in dispatch_producers, we need to shutdown and return.
-                    self.shutdown();
-                    return Err(e);
-                },
-            }
+        // Start a task that will shutdown the simulation if the total_time is met.
+        if let Some(total_time) = self.cfg.total_time {
+            let t = self.shutdown_trigger.clone();
+            let l = self.shutdown_listener.clone();
 
-            // Start a task that waits for the producers to finish.
-            // If all producers finish, then there is nothing left to do and the simulation can be shutdown.
-            let producer_trigger = self.shutdown_trigger.clone();
             self.tasks.spawn(async move {
-                producer_tasks.close();
-                producer_tasks.wait().await;
-                log::info!("All producers finished. Shutting down.");
-                producer_trigger.trigger()
+                if time::timeout(total_time, l).await.is_err() {
+                    log::info!(
+                        "Simulation run for {}s. Shutting down.",
+                        total_time.as_secs()
+                    );
+                    t.trigger()
+                }
             });
-
-            // Start a task that will shutdown the simulation if the total_time is met.
-            if let Some(total_time) = self.cfg.total_time {
-                let t = self.shutdown_trigger.clone();
-                let l = self.shutdown_listener.clone();
-
-                self.tasks.spawn(async move {
-                    if time::timeout(total_time, l).await.is_err() {
-                        log::info!(
-                            "Simulation run for {}s. Shutting down.",
-                            total_time.as_secs()
-                        );
-                        t.trigger()
-                    }
-                });
-            }
         }
 
         Ok(())
