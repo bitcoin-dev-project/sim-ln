@@ -58,7 +58,7 @@ sim-cli
 
 Run `sim-cli -h` for details on `--data-dir` and `--sim-file` options that allow specifying custom simulation file locations.
 
-Interested in contributing to the project? See [CONTRIBUTING](CONTRIBUTING.md) for more details.
+Interested in contributing to the project? See [CONTRIBUTING](docs/CONTRIBUTING.md) for more details.
 
 ### Simulation File Setup
 The required access details will depend on the node implementation.  
