@@ -20,7 +20,7 @@ async fn main() -> anyhow::Result<()> {
         .init()
         .unwrap();
 
-    let sim = create_simulation(&cli).await?;
+    let (sim, sim_network) = create_simulation(&cli).await?;
     let sim2 = sim.clone();
 
     ctrlc::set_handler(move || {
@@ -29,6 +29,10 @@ async fn main() -> anyhow::Result<()> {
     })?;
 
     sim.run().await?;
+
+    if let Some(network) = sim_network {
+        network.lock().await.tasks.wait().await;
+    }
 
     Ok(())
 }

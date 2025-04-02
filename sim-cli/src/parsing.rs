@@ -3,6 +3,8 @@ use bitcoin::secp256k1::PublicKey;
 use clap::{builder::TypedValueParser, Parser};
 use log::LevelFilter;
 use serde::{Deserialize, Serialize};
+use simln_lib::sim_node::{node_info, ChannelPolicy, SimGraph, SimulatedChannel};
+use simln_lib::ShortChannelID;
 use simln_lib::{
     cln, cln::ClnNode, eclair, eclair::EclairNode, lnd, lnd::LndNode, serializers,
     ActivityDefinition, Amount, Interval, LightningError, LightningNode, NodeId, NodeInfo,
@@ -83,7 +85,10 @@ pub struct Cli {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct SimParams {
+    #[serde(default)]
     pub nodes: Vec<NodeConnection>,
+    #[serde(default)]
+    pub sim_network: Vec<NetworkParser>,
     #[serde(default)]
     pub activity: Vec<ActivityParser>,
 }
@@ -94,6 +99,27 @@ enum NodeConnection {
     Lnd(lnd::LndConnection),
     Cln(cln::ClnConnection),
     Eclair(eclair::EclairConnection),
+}
+
+/// Data structure that is used to parse information from the simulation file, used to pair two node policies together
+/// without the other internal state that is used in our simulated network.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkParser {
+    pub scid: ShortChannelID,
+    pub capacity_msat: u64,
+    pub node_1: ChannelPolicy,
+    pub node_2: ChannelPolicy,
+}
+
+impl From<NetworkParser> for SimulatedChannel {
+    fn from(network_parser: NetworkParser) -> Self {
+        SimulatedChannel::new(
+            network_parser.capacity_msat,
+            network_parser.scid,
+            network_parser.node_1,
+            network_parser.node_2,
+        )
+    }
 }
 
 /// Data structure used to parse information from the simulation file. It allows source and destination to be
@@ -142,11 +168,13 @@ impl TryFrom<&Cli> for SimulationCfg {
 
 /// Parses the cli options provided and creates a simulation to be run, connecting to lightning nodes and validating
 /// any activity described in the simulation file.
-pub async fn create_simulation(cli: &Cli) -> Result<Simulation, anyhow::Error> {
+pub async fn create_simulation(
+    cli: &Cli,
+) -> Result<(Simulation, Option<Arc<Mutex<SimGraph>>>), anyhow::Error> {
     let cfg: SimulationCfg = SimulationCfg::try_from(cli)?;
 
     let sim_path = read_sim_path(cli.data_dir.clone(), cli.sim_file.clone()).await?;
-    let SimParams { nodes, activity } = serde_json::from_str(&std::fs::read_to_string(sim_path)?)
+    let SimParams { nodes, sim_network, activity} = serde_json::from_str(&std::fs::read_to_string(sim_path)?)
         .map_err(|e| {
         anyhow!(
             "Could not deserialize node connection data or activity description from simulation file (line {}, col {}, err: {}).",
@@ -156,26 +184,76 @@ pub async fn create_simulation(cli: &Cli) -> Result<Simulation, anyhow::Error> {
         )
     })?;
 
-    let (clients, clients_info) = get_clients(nodes).await?;
-    // We need to be able to look up destination nodes in the graph, because we allow defined activities to send to
-    // nodes that we do not control. To do this, we can just grab the first node in our map and perform the lookup.
-    let get_node = async |pk: &PublicKey| -> Result<NodeInfo, LightningError> {
-        if let Some(c) = clients.values().next() {
-            return c.lock().await.get_node_info(pk).await;
-        }
-
-        Err(LightningError::GetNodeInfoError(
-            "no nodes for query".to_string(),
+    // Validate that nodes and sim_graph are exclusively set, and setup node clients from the populated field.
+    if !nodes.is_empty() && !sim_network.is_empty() {
+        Err(anyhow!(
+                "Simulation file cannot contain {} nodes and {} sim_graph entries, simulation can only be run with real 
+            or simulated nodes not both.", nodes.len(), sim_network.len(),
         ))
-    };
+    } else if nodes.is_empty() && sim_network.is_empty() {
+        Err(anyhow!(
+                "Simulation file must contain nodes to run with real lightning nodes or sim_graph to run with 
+                simulated nodes",
+        ))
+    } else if !nodes.is_empty() {
+        let (clients, clients_info) = get_clients(nodes).await?;
+        // We need to be able to look up destination nodes in the graph, because we allow defined activities to send to
+        // nodes that we do not control. To do this, we can just grab the first node in our map and perform the lookup.
+        let get_node = async |pk: &PublicKey| -> Result<NodeInfo, LightningError> {
+            if let Some(c) = clients.values().next() {
+                return c.lock().await.get_node_info(pk).await;
+            }
+            Err(LightningError::GetNodeInfoError(
+                "no nodes for query".to_string(),
+            ))
+        };
 
-    let (pk_node_map, alias_node_map) = add_node_to_maps(&clients_info).await?;
+        let (pk_node_map, alias_node_map) = add_node_to_maps(&clients_info).await?;
+        let validated_activities =
+            validate_activities(activity, pk_node_map, alias_node_map, get_node).await?;
+        let tasks = TaskTracker::new();
 
-    let validated_activities =
-        validate_activities(activity, pk_node_map, alias_node_map, get_node).await?;
-    let tasks = TaskTracker::new();
+        Ok((
+            Simulation::new(cfg, clients, validated_activities, tasks),
+            None,
+        ))
+    } else {
+        // Convert nodes representation for parsing to SimulatedChannel
+        let channels = sim_network
+            .clone()
+            .into_iter()
+            .map(SimulatedChannel::from)
+            .collect::<Vec<SimulatedChannel>>();
 
-    Ok(Simulation::new(cfg, clients, validated_activities, tasks))
+        let mut nodes_info = HashMap::new();
+        for sim_channel in sim_network {
+            nodes_info.insert(
+                sim_channel.node_1.pubkey,
+                node_info(sim_channel.node_1.pubkey),
+            );
+            nodes_info.insert(
+                sim_channel.node_2.pubkey,
+                node_info(sim_channel.node_2.pubkey),
+            );
+        }
+        let get_node_info = async |pk: &PublicKey| -> Result<NodeInfo, LightningError> {
+            if let Some(node) = nodes_info.get(pk) {
+                Ok(node_info(node.pubkey))
+            } else {
+                Err(LightningError::GetNodeInfoError(format!(
+                    "node not found in simulated network: {}",
+                    pk
+                )))
+            }
+        };
+        let (pk_node_map, alias_node_map) = add_node_to_maps(&nodes_info).await?;
+        let validated_activities =
+            validate_activities(activity, pk_node_map, alias_node_map, get_node_info).await?;
+        let tasks = TaskTracker::new();
+        let (simulation, graph) =
+            Simulation::new_with_sim_network(cfg, channels, validated_activities, tasks).await?;
+        Ok((simulation, Some(graph)))
+    }
 }
 
 /// Connects to the set of nodes providing, returning a map of node public keys to LightningNode implementations and
