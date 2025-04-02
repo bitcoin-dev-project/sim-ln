@@ -1,3 +1,4 @@
+use crate::clock::Clock;
 use crate::{
     LightningError, LightningNode, NodeInfo, PaymentOutcome, PaymentResult, SimulationError,
 };
@@ -9,7 +10,7 @@ use lightning::ln::chan_utils::make_funding_redeemscript;
 use serde::{Deserialize, Serialize};
 use std::collections::{hash_map::Entry, HashMap};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 use tokio_util::task::TaskTracker;
 
 use lightning::ln::features::{ChannelFeatures, NodeFeatures};
@@ -737,8 +738,9 @@ pub async fn ln_node_from_graph(
 /// announcements, which has the effect of adding the nodes in each channel to the graph, because LDK does not export
 /// all of the fields required to apply node announcements. This means that we will not have node-level information
 /// (such as features) available in the routing graph.
-pub fn populate_network_graph<'a>(
+pub fn populate_network_graph<'a, C: Clock>(
     channels: Vec<SimulatedChannel>,
+    clock: Arc<C>,
 ) -> Result<NetworkGraph<&'a WrappedLog>, LdkError> {
     let graph = NetworkGraph::new(Network::Regtest, &WrappedLog {});
 
@@ -771,16 +773,16 @@ pub fn populate_network_graph<'a>(
 
         graph.update_channel_from_unsigned_announcement(&announcement, &Some(&utxo_validator))?;
 
-        // The least significant bit of the channel flag field represents the direction that the channel update
-        // applies to. This value is interpreted as node_1 if it is zero, and node_2 otherwise.
+        // LDK only allows channel announcements up to 24h in the future. Use a fixed timestamp so that even if we've
+        // sped up our clock dramatically, we won't hit that limit.
+        let now = clock.now().duration_since(UNIX_EPOCH).unwrap().as_secs() as u32;
         for (i, node) in [channel.node_1, channel.node_2].iter().enumerate() {
             let update = UnsignedChannelUpdate {
                 chain_hash,
                 short_channel_id: channel.short_channel_id.into(),
-                timestamp: SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as u32,
+                timestamp: now,
+                // The least significant bit of the channel flag field represents the direction that the channel update
+                // applies to. This value is interpreted as node_1 if it is zero, and node_2 otherwise.
                 flags: i as u8,
                 cltv_expiry_delta: node.policy.cltv_expiry_delta as u16,
                 htlc_minimum_msat: node.policy.min_htlc_size_msat,
@@ -1097,6 +1099,7 @@ impl UtxoLookup for UtxoValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::SystemClock;
     use crate::test_utils::get_random_keypair;
     use bitcoin::secp256k1::PublicKey;
     use lightning::routing::router::Route;
@@ -1488,7 +1491,7 @@ mod tests {
         let mock = MockNetwork::new();
         let sim_network = Arc::new(Mutex::new(mock));
         let channels = create_simulated_channels(5, 300000000);
-        let graph = populate_network_graph(channels.clone()).unwrap();
+        let graph = populate_network_graph(channels.clone(), Arc::new(SystemClock {})).unwrap();
 
         // Create a simulated node for the first channel in our network.
         let pk = channels[0].node_1.policy.pubkey;
@@ -1580,7 +1583,9 @@ mod tests {
         async fn new(capacity: u64) -> Self {
             let (shutdown, _listener) = triggered::trigger();
             let channels = create_simulated_channels(3, capacity);
-            let routing_graph = Arc::new(populate_network_graph(channels.clone()).unwrap());
+            let routing_graph = Arc::new(
+                populate_network_graph(channels.clone(), Arc::new(SystemClock {})).unwrap(),
+            );
 
             let scorer = ProbabilisticScorer::new(
                 ProbabilisticScoringDecayParameters::default(),
