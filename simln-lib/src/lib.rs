@@ -36,13 +36,17 @@ pub mod sim_node;
 #[cfg(test)]
 mod test_utils;
 
+/// Represents a node id, either by its public key or alias.
 #[derive(Serialize, Debug, Clone)]
 pub enum NodeId {
+    /// The node's public key
     PublicKey(PublicKey),
+    /// The node's alias (human-readable name)
     Alias(String),
 }
 
 impl NodeId {
+    /// Validates that the provided node id matches the one returned by the backend.
     pub fn validate(&self, node_id: &PublicKey, alias: &mut String) -> Result<(), LightningError> {
         match self {
             crate::NodeId::PublicKey(pk) => {
@@ -67,6 +71,7 @@ impl NodeId {
         Ok(())
     }
 
+    /// Returns the public key of the node if it is a public key node id.
     pub fn get_pk(&self) -> Result<&PublicKey, String> {
         if let NodeId::PublicKey(pk) = self {
             Ok(pk)
@@ -107,7 +112,7 @@ impl From<ShortChannelID> for u64 {
     }
 }
 
-/// See https://github.com/lightning/bolts/blob/60de4a09727c20dea330f9ee8313034de6e50594/07-routing-gossip.md#definition-of-short_channel_id.
+/// See <https://github.com/lightning/bolts/blob/60de4a09727c20dea330f9ee8313034de6e50594/07-routing-gossip.md#definition-of-short_channel_id>.
 impl std::fmt::Display for ShortChannelID {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -124,7 +129,9 @@ impl std::fmt::Display for ShortChannelID {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ValueOrRange<T> {
+    /// A single fixed value
     Value(T),
+    /// A range [min, max) from which values are randomly sampled
     Range(T, T),
 }
 
@@ -227,10 +234,17 @@ pub enum LightningError {
     ListChannelsError(String),
 }
 
+/// Information about a Lightning Network node.
+/// - Public key: The node's cryptographic identity
+/// - Alias: A human-readable name for the node
+/// - Features: The node's advertised protocol features
 #[derive(Debug, Clone)]
 pub struct NodeInfo {
+    /// The node's public key, which serves as its unique identifier in the network
     pub pubkey: PublicKey,
+    /// A human-readable name for the node (may be empty)
     pub alias: String,
+    /// The node's advertised protocol features (e.g., keysend support)
     pub features: NodeFeatures,
 }
 
@@ -285,6 +299,7 @@ pub trait DestinationGenerator: Send {
     ) -> Result<(NodeInfo, Option<u64>), DestinationGenerationError>;
 }
 
+/// Represents an error that occurs when generating payments.
 #[derive(Debug, Error)]
 #[error("Payment generation error: {0}")]
 pub struct PaymentGenerationError(String);
@@ -306,13 +321,27 @@ pub trait PaymentGenerator: Display + Send {
     ) -> Result<u64, PaymentGenerationError>;
 }
 
+/// Represents the result of a payment attempt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentResult {
+    /// The number of HTLCs (Hash Time Locked Contracts) used in the payment attempt.
+    /// Multiple HTLCs may be used for a single payment when using techniques like
+    /// multi-part payments or when retrying failed payment paths.
     pub htlc_count: usize,
+    /// The final outcome of the payment attempt, indicating whether it succeeded
+    /// or failed (and if failed, the reason for failure).
     pub payment_outcome: PaymentOutcome,
 }
 
 impl PaymentResult {
+    /// Creates a new PaymentResult indicating that the payment was never dispatched.
+    /// This is used when there was an error during the initial payment dispatch attempt.
+    ///(e.g., insufficient balance, invalid destination)
+    ///
+    /// # Returns
+    /// A PaymentResult with:
+    /// - htlc_count: 0 (no HTLCs used since payment wasn't dispatched)
+    /// - payment_outcome: NotDispatched
     pub fn not_dispatched() -> Self {
         PaymentResult {
             htlc_count: 0,
@@ -320,6 +349,14 @@ impl PaymentResult {
         }
     }
 
+    /// Creates a new PaymentResult indicating that tracking the payment failed.
+    /// This is used when the payment was dispatched but the system was unable to
+    /// determine its final outcome (e.g., due to connection issues or timeouts).
+    ///
+    /// # Returns
+    /// A PaymentResult with:
+    /// - htlc_count: 0 (unknown since tracking failed)
+    /// - payment_outcome: TrackPaymentFailed
     pub fn track_payment_failed() -> Self {
         PaymentResult {
             htlc_count: 0,
@@ -338,19 +375,32 @@ impl Display for PaymentResult {
     }
 }
 
+/// Represents all possible outcomes of a Lightning Network payment attempt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PaymentOutcome {
+    /// Payment completed successfully, reaching its intended recipient
     Success,
+    /// The recipient rejected the payment
     RecipientRejected,
+    /// The payment was cancelled by the sending user before completion
     UserAbandoned,
+    /// The payment failed after exhausting all retry attempts
     RetriesExhausted,
+    /// The payment expired before it could complete (e.g., HTLC timeout)
     PaymentExpired,
+    /// No viable route could be found to the destination node
     RouteNotFound,
+    /// An unexpected error occurred during payment processing
     UnexpectedError,
+    /// The payment failed due to incorrect payment details (e.g., wrong invoice amount)
     IncorrectPaymentDetails,
+    /// The sending node has insufficient balance to complete the payment
     InsufficientBalance,
+    /// The payment failed for an unknown reason
     Unknown,
+    /// The payment was never dispatched due to an error during initial sending
     NotDispatched,
+    /// The payment was dispatched but its final status could not be determined
     TrackPaymentFailed,
 }
 
@@ -472,6 +522,10 @@ impl SimulationCfg {
     }
 }
 
+/// A Lightning Network payment simulator that manages payment flows between nodes.
+/// The simulator can execute both predefined payment patterns and generate random payment activity
+/// based on configuration parameters.
+///
 #[derive(Clone)]
 pub struct Simulation {
     /// Config for the simulation itself.
