@@ -1,6 +1,8 @@
 LOG_LEVEL ?= info
 DEFAULT_DATA_DIR ?= /data_dir
 DEFAULT_SIMFILE_PATH ?= /data_dir/sim.json
+FMT_CMD = cargo fmt --verbose --all -- --color always --config-path=./rustfmt.toml
+CLIPPY_CMD = cargo clippy --all-features --all-targets --color always
 
 build-docker:
 	docker build -f docker/Dockerfile -t sim-ln .
@@ -10,11 +12,17 @@ mount-volume:
 
 help:
 	@echo "Makefile commands:"
-	@echo "build-docker      Builds the Docker image."
-	@echo "mount-volume      Mounts the specified volume."
-	@echo "run               Runs the Docker container."
-	@echo "run-interactive   Runs the Docker container in interactive mode."
-	@echo "stop              Stops the Docker container."
+	@echo "build-docker       Builds the Docker image."
+	@echo "mount-volume       Mounts the specified volume."
+	@echo "run-docker         Runs the Docker container in detached mode."
+	@echo "run-interactive    Runs the Docker container in interactive mode."
+	@echo "stop-docker        Stops the Docker container."
+	@echo "check              Runs code formatting and linting checks."
+	@echo "check-code         Runs code formatting and linting without stability check."
+	@echo "format             Fixes both formatting and linting issues in one go."
+	@echo "stable-output      Checks for unstaged/uncommitted changes after checks."
+	@echo "install            Installs the simulation CLI."
+	@echo "dev-install        Installs the simulation CLI with development features."
 	@echo ""
 	@echo "Variables:"
 	@echo "SIMFILE_PATH      Path to the sim.json file."
@@ -34,8 +42,8 @@ stop-docker:
 	docker stop sim-ln
 
 check-code:
-	cargo fmt --verbose --check --all -- --color always
-	cargo clippy --all-features --all-targets --color always -- -D warnings
+	$(FMT_CMD) --check
+	$(CLIPPY_CMD) -- -D warnings
 
 stable-output:
 	@if [ -n "$$(git status --porcelain)" ]; then \
@@ -52,3 +60,7 @@ install:
 
 dev-install:
 	RUSTFLAGS="--cfg tokio_unstable" cargo install --locked --path sim-cli --features dev
+
+format:
+	$(FMT_CMD)
+	$(CLIPPY_CMD) --fix --allow-dirty --allow-staged -- -D warnings
