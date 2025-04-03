@@ -30,7 +30,6 @@ hex = "0.4.3"
 csv = "1.2.2"
 serde_millis = "0.1.1"
 rand_distr = "0.4.3"
-mockall = "0.13.1"
 rand_chacha = "0.3.1"
 reqwest = { version = "0.12", features = ["json", "multipart"] }
 tokio-util = { version = "0.7.13", features = ["rt"] }
