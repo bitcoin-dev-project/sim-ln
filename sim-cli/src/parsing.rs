@@ -3,6 +3,7 @@ use bitcoin::secp256k1::PublicKey;
 use clap::{builder::TypedValueParser, Parser};
 use log::LevelFilter;
 use serde::{Deserialize, Serialize};
+use simln_lib::clock::SystemClock;
 use simln_lib::{
     cln, cln::ClnNode, eclair, eclair::EclairNode, lnd, lnd::LndNode, serializers,
     ActivityDefinition, Amount, Interval, LightningError, LightningNode, NodeId, NodeInfo,
@@ -142,7 +143,7 @@ impl TryFrom<&Cli> for SimulationCfg {
 
 /// Parses the cli options provided and creates a simulation to be run, connecting to lightning nodes and validating
 /// any activity described in the simulation file.
-pub async fn create_simulation(cli: &Cli) -> Result<Simulation, anyhow::Error> {
+pub async fn create_simulation(cli: &Cli) -> Result<Simulation<SystemClock>, anyhow::Error> {
     let cfg: SimulationCfg = SimulationCfg::try_from(cli)?;
 
     let sim_path = read_sim_path(cli.data_dir.clone(), cli.sim_file.clone()).await?;
@@ -175,7 +176,13 @@ pub async fn create_simulation(cli: &Cli) -> Result<Simulation, anyhow::Error> {
         validate_activities(activity, pk_node_map, alias_node_map, get_node).await?;
     let tasks = TaskTracker::new();
 
-    Ok(Simulation::new(cfg, clients, validated_activities, tasks))
+    Ok(Simulation::new(
+        cfg,
+        clients,
+        validated_activities,
+        tasks,
+        Arc::new(SystemClock {}),
+    ))
 }
 
 /// Connects to the set of nodes providing, returning a map of node public keys to LightningNode implementations and
