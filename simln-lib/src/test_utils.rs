@@ -1,4 +1,4 @@
-#[cfg(test)]
+#![cfg(test)]
 use async_trait::async_trait;
 use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 use bitcoin::Network;
@@ -91,7 +91,7 @@ mock! {
     }
 }
 
-/// Type alias for the result of setup_test_nodes
+/// Type alias for the result of setup_test_nodes.
 type TestNodesResult = (
     Vec<NodeInfo>,
     HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
@@ -104,71 +104,52 @@ type TestNodesResult = (
 /// node info and clients) and client-only setups for network testing.
 ///
 /// # Examples
-/// Basic setup with keysend on specific nodes:
-/// let (nodes, clients) = TestNetworkBuilder::setup_test_nodes(5, &[0, 2]);
 ///
 /// Using the builder for more control:
-/// let (nodes, clients) = TestNetworkBuilder::new(5)
+/// let (nodes, clients) = LightningTestNodeBuilder::new(5)
 ///     .with_keysend_nodes(vec![0, 2, 4])
 ///     .build_full();
 ///
 /// Building clients with specific networks:
-/// let clients = TestNetworkBuilder::new(3)
+/// let clients = LightningTestNodeBuilder::new(3)
 ///     .with_networks(vec![Network::Bitcoin, Network::Testnet, Network::Regtest])
 ///     .build_clients_only();
 pub struct LightningTestNodeBuilder {
-    node_count: usize,              // Required - must be provided at creation
-    initial_balance: u64,           // Always has a value (default: 100,000)
-    keysend_indices: Vec<usize>,    // Always a vector (default: empty)
-    networks: Option<Vec<Network>>, // Can be None (default) or Some(networks)
+    node_count: usize,              // Required - must be provided at creation.
+    initial_balance: u64,           // Always has a value (default: 100,000).
+    keysend_indices: Vec<usize>,    // Always a vector (default: Vec filled with 0..node_count).
+    networks: Option<Vec<Network>>, // Can be None (default) or Some(networks).
 }
 
 impl LightningTestNodeBuilder {
-    /// Creates test nodes with optional keysend support on specified nodes.
-    /// A convenience method equivalent to `new(node_count).with_keysend_nodes(indices).build_full()`.
-    pub fn setup_test_nodes(node_count: usize, keysend_indices: &[usize]) -> TestNodesResult {
-        Self::new(node_count)
-            .with_keysend_nodes(keysend_indices.to_vec())
-            .build_full()
-    }
-
-    /// Creates test nodes with specified networks.
-    /// A convenience method equivalent to `new(node_count).with_networks(networks).build_clients_only()`.
-    pub fn setup_network_test_nodes(
-        node_count: usize,
-        networks: Vec<Network>,
-    ) -> HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> {
-        Self::new(node_count)
-            .with_networks(networks)
-            .build_clients_only()
-    }
-
     /// Creates a new builder instance with the specified number of nodes.
     /// The default configuration includes a balance of 100,000 units per node,
-    /// no keysend support, and no specific networks.
+    /// keysend support ON, and Regtest network.
     pub fn new(node_count: usize) -> Self {
         Self {
             node_count,
-            initial_balance: 100_000,    // Default 100k sats
-            keysend_indices: Vec::new(), // No keysend by default
-            networks: None,              // No specific networks by default
+            initial_balance: 100_000,                   // Default 100k sats.
+            keysend_indices: (0..node_count).collect(), // Keysend for all nodes ON by default.
+            networks: Some(vec![Network::Regtest; node_count]), // Regtest network for all nodes by default.
         }
     }
 
-    /// Specifies which nodes should have the keysend feature enabled
+    /// Specifies which nodes should have the keysend feature enabled.
     pub fn with_keysend_nodes(mut self, indices: Vec<usize>) -> Self {
         self.keysend_indices = indices;
         self
     }
 
-    /// Sets specific networks for each node
-    /// Will panic if the number of networks doesn't match node_count
-    /// Returns self for method chaining
+    /// Sets specific networks for each node.
+    /// Checks whether the number of networks matches node_count.
+    /// Returns self for method chaining.
     pub fn with_networks(mut self, networks: Vec<Network>) -> Self {
         // Validate that we have the correct number of networks
-        if networks.len() != self.node_count {
-            panic!("Must specify a network for each node");
-        }
+        assert_eq!(
+            networks.len(),
+            self.node_count,
+            "Must specify a network for each node"
+        );
         self.networks = Some(networks);
         self
     }
@@ -212,6 +193,8 @@ impl LightningTestNodeBuilder {
     }
 }
 
+/// Creates a new simulation with the given clients and activity definitions.
+/// Note: This sets a runtime for the simulation of 0, so run() will exit immediately.
 pub fn create_simulation(
     clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
     activity: Vec<ActivityDefinition>,
@@ -223,7 +206,6 @@ pub fn create_simulation(
         TaskTracker::new(),
     )
 }
-
 pub fn create_activity(
     source: NodeInfo,
     destination: NodeInfo,

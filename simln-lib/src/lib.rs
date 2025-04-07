@@ -33,7 +33,6 @@ pub mod lnd;
 mod random_activity;
 pub mod serializers;
 pub mod sim_node;
-#[cfg(test)]
 mod test_utils;
 
 #[derive(Serialize, Debug, Clone)]
@@ -1417,7 +1416,6 @@ async fn track_payment_result(
 
 #[cfg(test)]
 mod tests {
-    // use crate::test_utils::TestNetworkBuilder;
     use crate::{
         get_payment_delay, test_utils, test_utils::LightningTestNodeBuilder, LightningError,
         LightningNode, MutRng, PaymentGenerationError, PaymentGenerator,
@@ -1527,13 +1525,11 @@ mod tests {
         );
     }
 
-    // Tests for validate_activity()
-
     /// Verifies that an empty activity (for random generation) is valid when two nodes with keysend
     /// support are present, expecting an `Ok` result.
     #[tokio::test]
     async fn test_validate_activity_empty_with_sufficient_nodes() {
-        let (_, clients) = LightningTestNodeBuilder::setup_test_nodes(2, &[0, 1, 2]);
+        let (_, clients) = LightningTestNodeBuilder::new(3).build_full();
         let simulation = test_utils::create_simulation(clients, vec![]);
         let result = simulation.validate_activity().await;
         assert!(result.is_ok());
@@ -1543,7 +1539,7 @@ mod tests {
     /// expecting a `ValidationError` with "At least two nodes required".
     #[tokio::test]
     async fn test_validate_activity_empty_with_insufficient_nodes() {
-        let (_, clients) = LightningTestNodeBuilder::setup_test_nodes(1, &[0]);
+        let (_, clients) = LightningTestNodeBuilder::new(1).build_full();
         let simulation = test_utils::create_simulation(clients, vec![]);
         let result = simulation.validate_activity().await;
 
@@ -1556,7 +1552,9 @@ mod tests {
     /// expecting a `ValidationError` with "must support keysend".
     #[tokio::test]
     async fn test_validate_activity_empty_with_non_keysend_node() {
-        let (_, clients) = LightningTestNodeBuilder::setup_test_nodes(2, &[0]);
+        let (_, clients) = LightningTestNodeBuilder::new(2)
+            .with_keysend_nodes(vec![0])
+            .build_full();
         let simulation = test_utils::create_simulation(clients, vec![]);
         let result = simulation.validate_activity().await;
 
@@ -1569,7 +1567,7 @@ mod tests {
     /// expecting a `ValidationError` with "Source node not found".
     #[tokio::test]
     async fn test_validate_activity_with_missing_source_node() {
-        let (nodes, clients) = LightningTestNodeBuilder::setup_test_nodes(1, &[0]);
+        let (nodes, clients) = LightningTestNodeBuilder::new(1).build_full();
         let missing_nodes = test_utils::create_nodes(1, 100_000);
         let missing_node = missing_nodes.first().unwrap().0.clone();
         let dest_node = nodes[0].clone();
@@ -1587,7 +1585,7 @@ mod tests {
     /// expecting a `ValidationError` with "does not support keysend".
     #[tokio::test]
     async fn test_validate_activity_with_non_keysend_destination() {
-        let (nodes, clients) = LightningTestNodeBuilder::setup_test_nodes(1, &[0]);
+        let (nodes, clients) = LightningTestNodeBuilder::new(1).build_full();
         let dest_nodes = test_utils::create_nodes(1, 100_000);
         let dest_node = dest_nodes.first().unwrap().0.clone();
 
@@ -1604,7 +1602,7 @@ mod tests {
     /// passes validation, expecting an `Ok` result.
     #[tokio::test]
     async fn test_validate_activity_valid_payment_flow() {
-        let (nodes, clients) = LightningTestNodeBuilder::setup_test_nodes(1, &[0]);
+        let (nodes, clients) = LightningTestNodeBuilder::new(1).build_full();
         let dest_nodes = test_utils::create_nodes(1, 100_000);
         let mut dest_node = dest_nodes.first().unwrap().0.clone();
         dest_node.features.set_keysend_optional();
@@ -1620,7 +1618,7 @@ mod tests {
     /// expecting a `ValidationError` with "zero values".
     #[tokio::test]
     async fn test_validate_zero_amount_no_valid() {
-        let (nodes, clients) = LightningTestNodeBuilder::setup_test_nodes(2, &[0, 1]);
+        let (nodes, clients) = LightningTestNodeBuilder::new(2).build_full();
 
         let activity = test_utils::create_activity(nodes[0].clone(), nodes[1].clone(), 0);
         let simulation = test_utils::create_simulation(clients, vec![activity]);
@@ -1630,8 +1628,6 @@ mod tests {
         assert!(matches!(result, 
             Err(LightningError::ValidationError(msg)) if msg.contains("zero values")));
     }
-
-    // tests for validate_node_network()
 
     /// Verifies that validation fails with no nodes, expecting a `ValidationError` with
     /// "we don't control any nodes".
@@ -1651,7 +1647,9 @@ mod tests {
     /// with "mainnet is not supported".
     #[tokio::test]
     async fn test_validate_node_network_mainnet_not_supported() {
-        let clients = LightningTestNodeBuilder::setup_network_test_nodes(1, vec![Network::Bitcoin]);
+        let clients = LightningTestNodeBuilder::new(1)
+            .with_networks(vec![Network::Bitcoin])
+            .build_clients_only();
 
         let simulation = test_utils::create_simulation(clients, vec![]);
         let result = simulation.validate_node_network().await;
@@ -1665,10 +1663,9 @@ mod tests {
     /// `ValidationError` with "nodes are not on the same network".
     #[tokio::test]
     async fn test_validate_node_network_mixed_networks() {
-        let clients = LightningTestNodeBuilder::setup_network_test_nodes(
-            2,
-            vec![Network::Testnet, Network::Regtest],
-        );
+        let clients = LightningTestNodeBuilder::new(2)
+            .with_networks(vec![Network::Testnet, Network::Regtest])
+            .build_clients_only();
 
         let simulation = test_utils::create_simulation(clients, vec![]);
         let result = simulation.validate_node_network().await;
@@ -1681,10 +1678,9 @@ mod tests {
     /// Verifies that three Testnet nodes pass validation, expecting an `Ok` result.
     #[tokio::test]
     async fn test_validate_node_network_multiple_nodes_same_network() {
-        let clients = LightningTestNodeBuilder::setup_network_test_nodes(
-            3,
-            vec![Network::Testnet, Network::Testnet, Network::Testnet],
-        );
+        let clients = LightningTestNodeBuilder::new(3)
+            .with_networks(vec![Network::Testnet, Network::Testnet, Network::Testnet])
+            .build_clients_only();
 
         let simulation = test_utils::create_simulation(clients, vec![]);
         let result = simulation.validate_node_network().await;
@@ -1694,7 +1690,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_node_network_single_node_valid_network() {
-        let clients = LightningTestNodeBuilder::setup_network_test_nodes(1, vec![Network::Testnet]);
+        let clients = LightningTestNodeBuilder::new(1)
+            .with_networks(vec![Network::Testnet])
+            .build_clients_only();
 
         let simulation = test_utils::create_simulation(clients, vec![]);
         let result = simulation.validate_node_network().await;
