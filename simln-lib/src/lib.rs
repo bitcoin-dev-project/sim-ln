@@ -9,7 +9,6 @@ use rand::{Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use random_activity::RandomActivityError;
 use serde::{Deserialize, Serialize};
-use sim_node::{ln_node_from_graph, populate_network_graph, SimGraph, SimulatedChannel};
 use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
 use std::marker::Send;
@@ -515,8 +514,9 @@ impl Simulation {
         nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
         activity: Vec<ActivityDefinition>,
         tasks: TaskTracker,
+        shutdown_trigger: Trigger,
+        shutdown_listener: Listener,
     ) -> Self {
-        let (shutdown_trigger, shutdown_listener) = triggered::trigger();
         Self {
             cfg,
             nodes,
@@ -526,42 +526,6 @@ impl Simulation {
             shutdown_trigger,
             shutdown_listener,
         }
-    }
-
-    pub async fn new_with_sim_network(
-        cfg: SimulationCfg,
-        channels: Vec<SimulatedChannel>,
-        activity: Vec<ActivityDefinition>,
-        tasks: TaskTracker,
-    ) -> Result<(Simulation, Arc<Mutex<SimGraph>>), SimulationError> {
-        let (shutdown_trigger, shutdown_listener) = triggered::trigger();
-
-        // Setup a simulation graph that will handle propagation of payments through the network
-        let simulation_graph = Arc::new(Mutex::new(
-            SimGraph::new(channels.clone(), tasks.clone(), shutdown_trigger.clone())
-                .map_err(|e| SimulationError::SimulatedNetworkError(format!("{:?}", e)))?,
-        ));
-
-        // Copy all simulated channels into a read-only routing graph, allowing to pathfind for
-        // individual payments without locking th simulation graph (this is a duplication of the channels, but the performance tradeoff is worthwhile for concurrent pathfinding).
-        let routing_graph = Arc::new(
-            populate_network_graph(channels)
-                .map_err(|e| SimulationError::SimulatedNetworkError(format!("{:?}", e)))?,
-        );
-
-        let nodes = ln_node_from_graph(simulation_graph.clone(), routing_graph).await;
-        Ok((
-            Self {
-                nodes,
-                activity,
-                results: Arc::new(Mutex::new(PaymentResultLogger::new())),
-                tasks,
-                shutdown_trigger,
-                shutdown_listener,
-                cfg,
-            },
-            simulation_graph,
-        ))
     }
 
     /// validate_activity validates that the user-provided activity description is achievable for the network that
@@ -1606,11 +1570,14 @@ mod tests {
             interval_secs: crate::ValueOrRange::Value(0),
             amount_msat: crate::ValueOrRange::Value(0),
         };
+        let (shutdown_trigger, shutdown_listener) = triggered::trigger();
         let simulation = Simulation::new(
             crate::SimulationCfg::new(Some(0), 0, 0.0, None, None),
             clients,
             vec![activity_definition],
             TaskTracker::new(),
+            shutdown_trigger,
+            shutdown_listener,
         );
         assert!(simulation.validate_activity().await.is_err());
     }

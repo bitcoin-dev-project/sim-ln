@@ -655,7 +655,7 @@ pub struct SimGraph {
 
     /// track all tasks spawned to process payments in the graph. Note that handling the shutdown of tasks
     /// in this tracker must be done externally.
-    pub tasks: TaskTracker,
+    tasks: TaskTracker,
 
     /// trigger shutdown if a critical error occurs.
     shutdown_trigger: Trigger,

@@ -3,13 +3,16 @@ use bitcoin::secp256k1::PublicKey;
 use clap::{builder::TypedValueParser, Parser};
 use log::LevelFilter;
 use serde::{Deserialize, Serialize};
-use simln_lib::sim_node::{node_info, ChannelPolicy, SimGraph, SimulatedChannel};
-use simln_lib::ShortChannelID;
+use simln_lib::sim_node::{
+    ln_node_from_graph, node_info, populate_network_graph, ChannelPolicy, SimGraph,
+    SimulatedChannel,
+};
 use simln_lib::{
     cln, cln::ClnNode, eclair, eclair::EclairNode, lnd, lnd::LndNode, serializers,
     ActivityDefinition, Amount, Interval, LightningError, LightningNode, NodeId, NodeInfo,
     Simulation, SimulationCfg, WriteResults,
 };
+use simln_lib::{ShortChannelID, SimulationError};
 use std::collections::HashMap;
 use std::fs;
 use std::ops::AsyncFn;
@@ -24,7 +27,7 @@ pub const DEFAULT_DATA_DIR: &str = ".";
 /// The default simulation file to be used by the simulator.
 pub const DEFAULT_SIM_FILE: &str = "sim.json";
 
-/// The default expected payment amount for the simulation, around ~$10 at the time of writing.
+/// The default expected payment amount for the simulation, around ~$10 at the time of w.
 pub const DEFAULT_EXPECTED_PAYMENT_AMOUNT: u64 = 3_800_000;
 
 /// The number of times over each node in the network sends its total deployed capacity in a calendar month.
@@ -83,10 +86,29 @@ pub struct Cli {
     pub fix_seed: Option<u64>,
 }
 
+impl Cli {
+    pub fn validate(&self, sim_params: &SimParams) -> Result<(), anyhow::Error> {
+        // Validate that nodes and sim_graph are exclusively set, and setup node clients from the populated field.
+        if !sim_params.nodes.is_empty() && !sim_params.sim_network.is_empty() {
+            return Err(anyhow!(
+                "Simulation file cannot contain {} nodes and {} sim_graph entries, simulation can only be run with real 
+            or simulated nodes not both.", sim_params.nodes.len(), sim_params.sim_network.len(),
+        ));
+        }
+        if sim_params.nodes.is_empty() && sim_params.sim_network.is_empty() {
+            return Err(anyhow!(
+                "Simulation file must contain nodes to run with real lightning nodes or sim_graph to run with 
+                simulated nodes",
+        ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
-struct SimParams {
+pub struct SimParams {
     #[serde(default)]
-    pub nodes: Vec<NodeConnection>,
+    nodes: Vec<NodeConnection>,
     #[serde(default)]
     pub sim_network: Vec<NetworkParser>,
     #[serde(default)]
@@ -101,8 +123,8 @@ enum NodeConnection {
     Eclair(eclair::EclairConnection),
 }
 
-/// Data structure that is used to parse information from the simulation file, used to pair two node policies together
-/// without the other internal state that is used in our simulated network.
+/// Data structure that is used to parse information from the simulation file. It is used to
+/// create a mocked network
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkParser {
     pub scid: ShortChannelID,
@@ -125,7 +147,7 @@ impl From<NetworkParser> for SimulatedChannel {
 /// Data structure used to parse information from the simulation file. It allows source and destination to be
 /// [NodeId], which enables the use of public keys and aliases in the simulation description.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ActivityParser {
+pub struct ActivityParser {
     /// The source of the payment.
     #[serde(with = "serializers::serde_node_id")]
     pub source: NodeId,
@@ -166,94 +188,121 @@ impl TryFrom<&Cli> for SimulationCfg {
     }
 }
 
+pub async fn create_simulation_with_network(
+    cli: &Cli,
+    sim_params: &SimParams,
+    tasks: TaskTracker,
+) -> Result<Simulation, anyhow::Error> {
+    let cfg: SimulationCfg = SimulationCfg::try_from(cli)?;
+    let SimParams {
+        nodes: _,
+        sim_network,
+        activity,
+    } = sim_params;
+
+    // Convert nodes representation for parsing to SimulatedChannel
+    let channels = sim_network
+        .clone()
+        .into_iter()
+        .map(SimulatedChannel::from)
+        .collect::<Vec<SimulatedChannel>>();
+
+    let mut nodes_info = HashMap::new();
+    for sim_channel in sim_network {
+        nodes_info.insert(
+            sim_channel.node_1.pubkey,
+            node_info(sim_channel.node_1.pubkey),
+        );
+        nodes_info.insert(
+            sim_channel.node_2.pubkey,
+            node_info(sim_channel.node_2.pubkey),
+        );
+    }
+    let get_node_info = async |pk: &PublicKey| -> Result<NodeInfo, LightningError> {
+        if let Some(node) = nodes_info.get(pk) {
+            Ok(node_info(node.pubkey))
+        } else {
+            Err(LightningError::GetNodeInfoError(format!(
+                "node not found in simulated network: {}",
+                pk
+            )))
+        }
+    };
+    let (pk_node_map, alias_node_map) = add_node_to_maps(&nodes_info)?;
+    let validated_activities = validate_activities(
+        activity.to_vec(),
+        pk_node_map,
+        alias_node_map,
+        get_node_info,
+    )
+    .await?;
+
+    let (shutdown_trigger, shutdown_listener) = triggered::trigger();
+
+    // Setup a simulation graph that will handle propagation of payments through the network
+    let simulation_graph = Arc::new(Mutex::new(
+        SimGraph::new(channels.clone(), tasks.clone(), shutdown_trigger.clone())
+            .map_err(|e| SimulationError::SimulatedNetworkError(format!("{:?}", e)))?,
+    ));
+
+    // Copy all simulated channels into a read-only routing graph, allowing to pathfind for
+    // individual payments without locking th simulation graph (this is a duplication of the channels, but the performance tradeoff is worthwhile for concurrent pathfinding).
+    let routing_graph = Arc::new(
+        populate_network_graph(channels)
+            .map_err(|e| SimulationError::SimulatedNetworkError(format!("{:?}", e)))?,
+    );
+
+    let nodes = ln_node_from_graph(simulation_graph.clone(), routing_graph).await;
+
+    Ok(Simulation::new(
+        cfg,
+        nodes,
+        validated_activities,
+        tasks,
+        shutdown_trigger,
+        shutdown_listener,
+    ))
+}
+
 /// Parses the cli options provided and creates a simulation to be run, connecting to lightning nodes and validating
 /// any activity described in the simulation file.
 pub async fn create_simulation(
     cli: &Cli,
-) -> Result<(Simulation, Option<Arc<Mutex<SimGraph>>>), anyhow::Error> {
+    sim_params: &SimParams,
+    tasks: TaskTracker,
+) -> Result<Simulation, anyhow::Error> {
     let cfg: SimulationCfg = SimulationCfg::try_from(cli)?;
+    let SimParams {
+        nodes,
+        sim_network: _,
+        activity,
+    } = sim_params;
 
-    let sim_path = read_sim_path(cli.data_dir.clone(), cli.sim_file.clone()).await?;
-    let SimParams { nodes, sim_network, activity} = serde_json::from_str(&std::fs::read_to_string(sim_path)?)
-        .map_err(|e| {
-        anyhow!(
-            "Could not deserialize node connection data or activity description from simulation file (line {}, col {}, err: {}).",
-            e.line(),
-            e.column(),
-            e.to_string()
-        )
-    })?;
-
-    // Validate that nodes and sim_graph are exclusively set, and setup node clients from the populated field.
-    if !nodes.is_empty() && !sim_network.is_empty() {
-        Err(anyhow!(
-                "Simulation file cannot contain {} nodes and {} sim_graph entries, simulation can only be run with real 
-            or simulated nodes not both.", nodes.len(), sim_network.len(),
-        ))
-    } else if nodes.is_empty() && sim_network.is_empty() {
-        Err(anyhow!(
-                "Simulation file must contain nodes to run with real lightning nodes or sim_graph to run with 
-                simulated nodes",
-        ))
-    } else if !nodes.is_empty() {
-        let (clients, clients_info) = get_clients(nodes).await?;
-        // We need to be able to look up destination nodes in the graph, because we allow defined activities to send to
-        // nodes that we do not control. To do this, we can just grab the first node in our map and perform the lookup.
-        let get_node = async |pk: &PublicKey| -> Result<NodeInfo, LightningError> {
-            if let Some(c) = clients.values().next() {
-                return c.lock().await.get_node_info(pk).await;
-            }
-            Err(LightningError::GetNodeInfoError(
-                "no nodes for query".to_string(),
-            ))
-        };
-
-        let (pk_node_map, alias_node_map) = add_node_to_maps(&clients_info).await?;
-        let validated_activities =
-            validate_activities(activity, pk_node_map, alias_node_map, get_node).await?;
-        let tasks = TaskTracker::new();
-
-        Ok((
-            Simulation::new(cfg, clients, validated_activities, tasks),
-            None,
-        ))
-    } else {
-        // Convert nodes representation for parsing to SimulatedChannel
-        let channels = sim_network
-            .clone()
-            .into_iter()
-            .map(SimulatedChannel::from)
-            .collect::<Vec<SimulatedChannel>>();
-
-        let mut nodes_info = HashMap::new();
-        for sim_channel in sim_network {
-            nodes_info.insert(
-                sim_channel.node_1.pubkey,
-                node_info(sim_channel.node_1.pubkey),
-            );
-            nodes_info.insert(
-                sim_channel.node_2.pubkey,
-                node_info(sim_channel.node_2.pubkey),
-            );
+    let (clients, clients_info) = get_clients(nodes.to_vec()).await?;
+    // We need to be able to look up destination nodes in the graph, because we allow defined activities to send to
+    // nodes that we do not control. To do this, we can just grab the first node in our map and perform the lookup.
+    let get_node = async |pk: &PublicKey| -> Result<NodeInfo, LightningError> {
+        if let Some(c) = clients.values().next() {
+            return c.lock().await.get_node_info(pk).await;
         }
-        let get_node_info = async |pk: &PublicKey| -> Result<NodeInfo, LightningError> {
-            if let Some(node) = nodes_info.get(pk) {
-                Ok(node_info(node.pubkey))
-            } else {
-                Err(LightningError::GetNodeInfoError(format!(
-                    "node not found in simulated network: {}",
-                    pk
-                )))
-            }
-        };
-        let (pk_node_map, alias_node_map) = add_node_to_maps(&nodes_info).await?;
-        let validated_activities =
-            validate_activities(activity, pk_node_map, alias_node_map, get_node_info).await?;
-        let tasks = TaskTracker::new();
-        let (simulation, graph) =
-            Simulation::new_with_sim_network(cfg, channels, validated_activities, tasks).await?;
-        Ok((simulation, Some(graph)))
-    }
+        Err(LightningError::GetNodeInfoError(
+            "no nodes for query".to_string(),
+        ))
+    };
+
+    let (pk_node_map, alias_node_map) = add_node_to_maps(&clients_info)?;
+    let validated_activities =
+        validate_activities(activity.to_vec(), pk_node_map, alias_node_map, get_node).await?;
+    let (shutdown_trigger, shutdown_listener) = triggered::trigger();
+
+    Ok(Simulation::new(
+        cfg,
+        clients,
+        validated_activities,
+        tasks,
+        shutdown_trigger,
+        shutdown_listener,
+    ))
 }
 
 /// Connects to the set of nodes providing, returning a map of node public keys to LightningNode implementations and
@@ -289,11 +338,12 @@ async fn get_clients(
     Ok((clients, clients_info))
 }
 
+type NodeMapping =
+    Result<(HashMap<PublicKey, NodeInfo>, HashMap<String, NodeInfo>), LightningError>;
+
 /// Adds a lightning node to a client map and tracking maps used to lookup node pubkeys and aliases for activity
 /// validation.
-async fn add_node_to_maps(
-    nodes: &HashMap<PublicKey, NodeInfo>,
-) -> Result<(HashMap<PublicKey, NodeInfo>, HashMap<String, NodeInfo>), LightningError> {
+fn add_node_to_maps(nodes: &HashMap<PublicKey, NodeInfo>) -> NodeMapping {
     let mut pk_node_map = HashMap::new();
     let mut alias_node_map = HashMap::new();
 
@@ -387,7 +437,7 @@ async fn validate_activities(
     Ok(validated_activities)
 }
 
-async fn read_sim_path(data_dir: PathBuf, sim_file: PathBuf) -> anyhow::Result<PathBuf> {
+pub async fn read_sim_path(data_dir: PathBuf, sim_file: PathBuf) -> anyhow::Result<PathBuf> {
     if sim_file.exists() {
         Ok(sim_file)
     } else if sim_file.is_relative() {
