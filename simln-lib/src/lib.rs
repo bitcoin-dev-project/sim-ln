@@ -90,7 +90,7 @@ impl std::fmt::Display for NodeId {
 }
 
 /// Represents a short channel ID, expressed as a struct so that we can implement display for the trait.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Copy, Serialize, Deserialize)]
 pub struct ShortChannelID(u64);
 
 /// Utility function to easily convert from u64 to `ShortChannelID`
@@ -514,8 +514,9 @@ impl Simulation {
         nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
         activity: Vec<ActivityDefinition>,
         tasks: TaskTracker,
+        shutdown_trigger: Trigger,
+        shutdown_listener: Listener,
     ) -> Self {
-        let (shutdown_trigger, shutdown_listener) = triggered::trigger();
         Self {
             cfg,
             nodes,
@@ -1569,11 +1570,14 @@ mod tests {
             interval_secs: crate::ValueOrRange::Value(0),
             amount_msat: crate::ValueOrRange::Value(0),
         };
+        let (shutdown_trigger, shutdown_listener) = triggered::trigger();
         let simulation = Simulation::new(
             crate::SimulationCfg::new(Some(0), 0, 0.0, None, None),
             clients,
             vec![activity_definition],
             TaskTracker::new(),
+            shutdown_trigger,
+            shutdown_listener,
         );
         assert!(simulation.validate_activity().await.is_err());
     }
