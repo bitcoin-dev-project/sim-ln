@@ -19,7 +19,7 @@ use std::{collections::HashMap, sync::Arc, time::SystemTime};
 use thiserror::Error;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::Mutex;
-use tokio::{select, time, time::Duration};
+use tokio::{select, time, time::Duration, time::Instant};
 use tokio_util::task::TaskTracker;
 use triggered::{Listener, Trigger};
 
@@ -664,7 +664,7 @@ impl Simulation {
                 .iter()
                 .map(|generator| generator.source_info.pubkey)
                 .collect(),
-            event_sender.clone(),
+            event_sender,
             &self.tasks,
         );
 
@@ -780,13 +780,8 @@ impl Simulation {
         let csr_write_results = self.cfg.write_results.clone();
         tasks.spawn(async move {
             log::debug!("Starting simulation results consumer.");
-            if let Err(e) = consume_simulation_results(
-                result_logger,
-                results_receiver,
-                listener,
-                csr_write_results,
-            )
-            .await
+            if let Err(e) =
+                consume_simulation_results(result_logger, results_receiver, csr_write_results).await
             {
                 shutdown.trigger();
                 log::error!("Consume simulation results exited with error: {e:?}.");
@@ -915,16 +910,13 @@ impl Simulation {
             // Generate a consumer for the receiving end of the channel. It takes the event receiver that it'll pull
             // events from and the results sender to report the events it has triggered for further monitoring.
             // ce: consume event
-            let ce_listener = self.shutdown_listener.clone();
             let ce_shutdown = self.shutdown_trigger.clone();
             let ce_output_sender = output_sender.clone();
             let ce_node = node.clone();
             tasks.spawn(async move {
                 let node_info = ce_node.lock().await.get_info().clone();
                 log::debug!("Starting events consumer for {}.", node_info);
-                if let Err(e) =
-                    consume_events(ce_node, receiver, ce_output_sender, ce_listener).await
-                {
+                if let Err(e) = consume_events(ce_node, receiver, ce_output_sender).await {
                     ce_shutdown.trigger();
                     log::error!("Event consumer for node {node_info} exited with error: {e:?}.");
                 } else {
@@ -992,77 +984,65 @@ async fn consume_events(
     node: Arc<Mutex<dyn LightningNode>>,
     mut receiver: Receiver<SimulationEvent>,
     sender: Sender<SimulationOutput>,
-    listener: Listener,
 ) -> Result<(), SimulationError> {
     loop {
-        select! {
-            biased;
-            _ = listener.clone() => {
-                return Ok(());
-            },
-            simulation_event = receiver.recv() => {
-                if let Some(event) = simulation_event {
-                    match event {
-                        SimulationEvent::SendPayment(dest, amt_msat) => {
-                            let mut node = node.lock().await;
+        let simulation_event = receiver.recv().await;
+        if let Some(event) = simulation_event {
+            match event {
+                SimulationEvent::SendPayment(dest, amt_msat) => {
+                    let mut node = node.lock().await;
 
-                            let mut payment = Payment {
-                                source: node.get_info().pubkey,
-                                hash: None,
-                                amount_msat: amt_msat,
-                                destination: dest.pubkey,
-                                dispatch_time: SystemTime::now(),
-                            };
+                    let mut payment = Payment {
+                        source: node.get_info().pubkey,
+                        hash: None,
+                        amount_msat: amt_msat,
+                        destination: dest.pubkey,
+                        dispatch_time: SystemTime::now(),
+                    };
 
-                            let outcome = match node.send_payment(dest.pubkey, amt_msat).await {
-                                Ok(payment_hash) => {
-                                    log::debug!(
-                                        "Send payment: {} -> {}: ({}).",
-                                        node.get_info(),
-                                        dest,
-                                        hex::encode(payment_hash.0)
-                                    );
-                                    // We need to track the payment outcome using the payment hash that we have received.
-                                    payment.hash = Some(payment_hash);
-                                    SimulationOutput::SendPaymentSuccess(payment)
-                                }
-                                Err(e) => {
-                                    log::error!(
-                                        "Error while sending payment {} -> {}.",
-                                        node.get_info(),
-                                        dest
-                                    );
+                    let outcome = match node.send_payment(dest.pubkey, amt_msat).await {
+                        Ok(payment_hash) => {
+                            log::debug!(
+                                "Send payment: {} -> {}: ({}).",
+                                node.get_info(),
+                                dest,
+                                hex::encode(payment_hash.0)
+                            );
+                            // We need to track the payment outcome using the payment hash that we have received.
+                            payment.hash = Some(payment_hash);
+                            SimulationOutput::SendPaymentSuccess(payment)
+                        },
+                        Err(e) => {
+                            log::error!(
+                                "Error while sending payment {} -> {}.",
+                                node.get_info(),
+                                dest
+                            );
 
-                                    match e {
-                                        LightningError::PermanentError(s) => {
-                                            return Err(SimulationError::LightningError(LightningError::PermanentError(s)));
-                                        }
-                                        _ => SimulationOutput::SendPaymentFailure(
-                                            payment,
-                                            PaymentResult::not_dispatched(),
-                                        ),
-                                    }
-                                }
-                            };
-
-                            select!{
-                                biased;
-                                _ = listener.clone() => {
-                                    return Ok(())
-                                }
-                                send_result = sender.send(outcome.clone()) => {
-                                    if send_result.is_err() {
-                                        return Err(SimulationError::MpscChannelError(
-                                                format!("Error sending simulation output {outcome:?}.")));
-                                    }
-                                }
+                            match e {
+                                LightningError::PermanentError(s) => {
+                                    return Err(SimulationError::LightningError(
+                                        LightningError::PermanentError(s),
+                                    ));
+                                },
+                                _ => SimulationOutput::SendPaymentFailure(
+                                    payment,
+                                    PaymentResult::not_dispatched(),
+                                ),
                             }
-                        }
+                        },
+                    };
+
+                    let send_result = sender.send(outcome.clone()).await;
+                    if send_result.is_err() {
+                        return Err(SimulationError::MpscChannelError(format!(
+                            "Error sending simulation output {outcome:?}."
+                        )));
                     }
-                } else {
-                    return Ok(())
-                }
+                },
             }
+        } else {
+            return Ok(());
         }
     }
 }
@@ -1173,7 +1153,6 @@ fn get_payment_delay<A: PaymentGenerator + ?Sized>(
 async fn consume_simulation_results(
     logger: Arc<Mutex<PaymentResultLogger>>,
     mut receiver: Receiver<(Payment, PaymentResult)>,
-    listener: Listener,
     write_results: Option<WriteResults>,
 ) -> Result<(), SimulationError> {
     let mut writer = match write_results {
@@ -1191,36 +1170,28 @@ async fn consume_simulation_results(
     let mut counter = 1;
 
     loop {
-        select! {
-            biased;
-            _ = listener.clone() => {
-                writer.map_or(Ok(()), |(ref mut w, _)| w.flush().map_err(|_| {
-                    SimulationError::FileError
-                }))?;
-                return Ok(());
-            },
-            payment_result = receiver.recv() => {
-                match payment_result {
-                    Some((details, result)) => {
-                        logger.lock().await.report_result(&details, &result);
-                        log::trace!("Resolved dispatched payment: {} with: {}.", details, result);
+        let payment_result = receiver.recv().await;
+        match payment_result {
+            Some((details, result)) => {
+                logger.lock().await.report_result(&details, &result);
+                log::trace!("Resolved dispatched payment: {} with: {}.", details, result);
 
-                        if let Some((ref mut w, batch_size)) = writer {
-                            w.serialize((details, result)).map_err(|e| {
-                                let _ = w.flush();
-                                SimulationError::CsvError(e)
-                            })?;
-                            counter = counter % batch_size + 1;
-                            if batch_size == counter {
-                                w.flush().map_err(|_| {
-                                    SimulationError::FileError
-                                })?;
-                            }
-                        }
-                    },
-                    None => return writer.map_or(Ok(()), |(ref mut w, _)| w.flush().map_err(|_| SimulationError::FileError)),
+                if let Some((ref mut w, batch_size)) = writer {
+                    w.serialize((details, result)).map_err(|e| {
+                        let _ = w.flush();
+                        SimulationError::CsvError(e)
+                    })?;
+                    counter = counter % batch_size + 1;
+                    if batch_size == counter {
+                        w.flush().map_err(|_| SimulationError::FileError)?;
+                    }
                 }
-            }
+            },
+            None => {
+                return writer.map_or(Ok(()), |(ref mut w, _)| {
+                    w.flush().map_err(|_| SimulationError::FileError)
+                })
+            },
         }
     }
 }
@@ -1311,44 +1282,37 @@ async fn produce_simulation_results(
     tasks: &TaskTracker,
 ) -> Result<(), SimulationError> {
     let result = loop {
-        tokio::select! {
-            biased;
-            _ = listener.clone() => {
-                break Ok(())
-            },
-            output = output_receiver.recv() => {
-                match output {
-                    Some(simulation_output) => {
-                        match simulation_output{
-                            SimulationOutput::SendPaymentSuccess(payment) => {
-                                if let Some(source_node) = nodes.get(&payment.source) {
-                                    tasks.spawn(track_payment_result(
-                                        source_node.clone(), results.clone(), payment, listener.clone()
-                                    ));
-                                } else {
-                                    break Err(SimulationError::MissingNodeError(format!("Source node with public key: {} unavailable.", payment.source)));
-                                }
-                            },
-                            SimulationOutput::SendPaymentFailure(payment, result) => {
-                                select!{
-                                    _ = listener.clone() => {
-                                        return Ok(());
-                                    },
-                                    send_result = results.send((payment, result.clone())) => {
-                                        if send_result.is_err(){
-                                            break Err(SimulationError::MpscChannelError(
-                                                format!("Failed to send payment result: {result} for payment {:?} dispatched at {:?}.",
-                                                        payment.hash, payment.dispatch_time),
-                                            ));
-                                        }
-                                    },
-                                }
-                            }
-                        };
+        let output = output_receiver.recv().await;
+        match output {
+            Some(simulation_output) => {
+                match simulation_output {
+                    SimulationOutput::SendPaymentSuccess(payment) => {
+                        if let Some(source_node) = nodes.get(&payment.source) {
+                            tasks.spawn(track_payment_result(
+                                source_node.clone(),
+                                results.clone(),
+                                payment,
+                                listener.clone(),
+                            ));
+                        } else {
+                            break Err(SimulationError::MissingNodeError(format!(
+                                "Source node with public key: {} unavailable.",
+                                payment.source
+                            )));
+                        }
                     },
-                    None => break Ok(())
-                }
-            }
+                    SimulationOutput::SendPaymentFailure(payment, result) => {
+                        let send_result = results.send((payment, result.clone())).await;
+                        if send_result.is_err() {
+                            break Err(SimulationError::MpscChannelError(
+                                format!("Failed to send payment result: {result} for payment {:?} dispatched at {:?}.",
+                                    payment.hash, payment.dispatch_time),
+                            ));
+                        }
+                    },
+                };
+            },
+            None => break Ok(()),
         }
     };
 
@@ -1370,21 +1334,45 @@ async fn track_payment_result(
     let res = match payment.hash {
         Some(hash) => {
             log::debug!("Tracking payment outcome for: {}.", hex::encode(hash.0));
-            let track_payment = node.track_payment(&hash, listener.clone());
 
-            match track_payment.await {
-                Ok(res) => {
-                    log::debug!(
-                        "Track payment {} result: {:?}.",
-                        hex::encode(hash.0),
-                        res.payment_outcome
-                    );
-                    res
-                },
-                Err(e) => {
-                    log::error!("Track payment failed for {}: {e}.", hex::encode(hash.0));
-                    PaymentResult::track_payment_failed()
-                },
+            // Trigger and listener to stop the implementation specific track payment functions (node.track_payment())
+            let (stop, listen) = triggered::trigger();
+
+            // Timer for waiting after getting the shutdown signal in order for current tracking to complete
+            let mut timer: Option<tokio::time::Sleep> = None;
+
+            loop {
+                tokio::select! {
+                    biased;
+                    // The shutdown listener is triggered and we have not started a timer yet
+                    _ = async {}, if listener.clone().is_triggered() && timer.is_none() => {
+                        log::debug!("Shutdown received by track_payment_result, starting timer...");
+                        timer = Some(time::sleep_until(Instant::now() + Duration::from_secs(3)));
+                    },
+                    // The timer has been started and it expires
+                    Some(_) = conditional_sleeper(timer) => {
+                        log::error!("Track payment failed for {}. The shutdown timer expired.", hex::encode(hash.0));
+                        stop.trigger();
+                        timer = None;
+                    }
+                    // The payment tracking completes
+                    res = node.track_payment(&hash, listen.clone()) => {
+                        match res {
+                            Ok(res) => {
+                                log::info!(
+                                    "Track payment {} result: {:?}.",
+                                    hex::encode(hash.0),
+                                    res.payment_outcome
+                                );
+                                break res;
+                            },
+                            Err(e) => {
+                                log::error!("Track payment failed for {}: {e}.", hex::encode(hash.0));
+                                break PaymentResult::track_payment_failed();
+                            },
+                        }
+                    }
+                }
             }
         },
         // None means that the payment was not dispatched, so we cannot track it.
@@ -1396,17 +1384,11 @@ async fn track_payment_result(
         },
     };
 
-    select! {
-        biased;
-        _ = listener.clone() => {
-            log::debug!("Track payment result received a shutdown signal.");
-        },
-        send_payment_result = results.send((payment, res.clone())) => {
-            if send_payment_result.is_err() {
-                return Err(SimulationError::MpscChannelError(
-                        format!("Failed to send payment result {res} for payment {payment}.")))
-            }
-        }
+    let send_payment_result = results.send((payment, res.clone())).await;
+    if send_payment_result.is_err() {
+        return Err(SimulationError::MpscChannelError(format!(
+            "Failed to send payment result {res} for payment {payment}."
+        )));
     }
 
     log::trace!("Result tracking complete. Payment result tracker exiting.");
@@ -1414,11 +1396,23 @@ async fn track_payment_result(
     Ok(())
 }
 
+async fn conditional_sleeper(t: Option<tokio::time::Sleep>) -> Option<()> {
+    match t {
+        Some(timer) => {
+            timer.await;
+            Some(())
+        },
+        None => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use crate::test_utils::MockLightningNode;
+    use crate::TaskTracker;
     use crate::{
         get_payment_delay, test_utils, test_utils::LightningTestNodeBuilder, LightningError,
-        LightningNode, MutRng, PaymentGenerationError, PaymentGenerator,
+        LightningNode, MutRng, PaymentGenerationError, PaymentGenerator, Simulation, SimulationCfg,
     };
     use bitcoin::secp256k1::PublicKey;
     use bitcoin::Network;
@@ -1698,5 +1692,176 @@ mod tests {
         let result = simulation.validate_node_network().await;
 
         assert!(result.is_ok());
+    }
+
+    #[allow(clippy::type_complexity)]
+    /// Helper to create and configure mock nodes for testing
+    fn setup_test_nodes() -> (
+        (crate::NodeInfo, crate::NodeInfo),
+        HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
+    ) {
+        // Create test nodes
+        let nodes = test_utils::create_nodes(2, 100_000);
+        let mut node_1 = nodes.first().unwrap().0.clone();
+        let mut node_2 = nodes.get(1).unwrap().0.clone();
+        node_1.features.set_keysend_optional();
+        node_2.features.set_keysend_optional();
+        let node_1_for_get_info = node_1.clone();
+        let node_2_for_get_info = node_2.clone();
+
+        // Create mock nodes with all necessary expectations
+        let mut mock_node_1 = MockLightningNode::new();
+        let mut mock_node_2 = MockLightningNode::new();
+
+        // Set up node 1 expectations
+        mock_node_1.expect_get_info().return_const(node_1.clone());
+        mock_node_1
+            .expect_get_network()
+            .returning(|| Ok(Network::Regtest));
+        mock_node_1
+            .expect_list_channels()
+            .returning(|| Ok(vec![100_000]));
+        mock_node_1
+            .expect_get_node_info()
+            .returning(move |_| Ok(node_1_for_get_info.clone()));
+        mock_node_1
+            .expect_send_payment()
+            .returning(|_, _| Ok(lightning::ln::PaymentHash([0; 32])));
+        mock_node_1.expect_track_payment().returning(|_, _| {
+            Ok(crate::PaymentResult {
+                htlc_count: 1,
+                payment_outcome: crate::PaymentOutcome::Success,
+            })
+        });
+
+        // Set up node 2 expectations
+        mock_node_2.expect_get_info().return_const(node_2.clone());
+        mock_node_2
+            .expect_get_network()
+            .returning(|| Ok(Network::Regtest));
+        mock_node_2
+            .expect_list_channels()
+            .returning(|| Ok(vec![100_000]));
+        mock_node_2
+            .expect_get_node_info()
+            .returning(move |_| Ok(node_2_for_get_info.clone()));
+        mock_node_2
+            .expect_send_payment()
+            .returning(|_, _| Ok(lightning::ln::PaymentHash([0; 32])));
+        mock_node_2.expect_track_payment().returning(|_, _| {
+            Ok(crate::PaymentResult {
+                htlc_count: 1,
+                payment_outcome: crate::PaymentOutcome::Success,
+            })
+        });
+
+        // Create a hashmap of nodes
+        let mut clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
+        clients.insert(node_1.pubkey, Arc::new(Mutex::new(mock_node_1)));
+        clients.insert(node_2.pubkey, Arc::new(Mutex::new(mock_node_2)));
+
+        ((node_1, node_2), clients)
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_timeout() {
+        // Set up test nodes
+        let ((node_1, node_2), clients) = setup_test_nodes();
+
+        // Define payment activity: 2000 msats every 1 second
+        let activity_definition = crate::ActivityDefinition {
+            source: node_1,
+            destination: node_2,
+            start_secs: None,                              // Start immediately
+            count: None,                                   // No limit
+            interval_secs: crate::ValueOrRange::Value(1),  // 1 second interval
+            amount_msat: crate::ValueOrRange::Value(2000), // 2000 msats
+        };
+
+        // Create simulation with a 3 second timeout
+        let timeout_secs = 3;
+        let simulation = Simulation::new(
+            SimulationCfg::new(
+                Some(timeout_secs), // Set 3 second timeout
+                1000,               // Expected payment size
+                0.1,                // Activity multiplier
+                None,               // No result writing
+                Some(42),           // Seed for determinism
+            ),
+            clients,
+            vec![activity_definition], // Use defined activity with 2000 msats every second
+            TaskTracker::new(),
+        );
+
+        // Run the simulation and measure how long it takes
+        let start = std::time::Instant::now();
+        let result = simulation.run().await;
+        let elapsed = start.elapsed();
+
+        // Verify the simulation shut down correctly
+        assert!(result.is_ok(), "Simulation should end without error");
+
+        // Check that simulation ran for approximately the timeout duration (with some margin)
+        // We allow some extra time for shutdown procedures to complete
+        let margin = Duration::from_secs(1);
+        assert!(
+            elapsed >= Duration::from_secs(timeout_secs.into())
+                && elapsed <= Duration::from_secs(timeout_secs.into()) + margin,
+            "Simulation should have run for approximately {timeout_secs} seconds, but took {:?}",
+            elapsed
+        );
+
+        // We expect at least 2 payments to be attempted (about one per second)
+        // The exact number may vary due to timing, but should be at least 2
+        let total_payments = simulation.get_total_payments().await;
+        assert!(
+            total_payments >= 2,
+            "Expected at least 2 payments to be attempted, got {}",
+            total_payments
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_completion() {
+        // Set up test nodes
+        let ((node_1, node_2), clients) = setup_test_nodes();
+
+        // Define an activity that will make 3 payments of 2000 msats each
+        let activity_definition = crate::ActivityDefinition {
+            source: node_1,
+            destination: node_2,
+            start_secs: None,                              // Start immediately
+            count: Some(3),                                // 3 payments
+            interval_secs: crate::ValueOrRange::Value(1),  // 1 second interval
+            amount_msat: crate::ValueOrRange::Value(2000), // 2000 msats
+        };
+
+        // Create simulation that will run until activities complete
+        let simulation = Simulation::new(
+            SimulationCfg::new(
+                None,     // No timeout
+                1000,     // Expected payment size
+                0.1,      // Activity multiplier
+                None,     // No result writing
+                Some(42), // Seed for determinism
+            ),
+            clients,
+            vec![activity_definition], // Use defined activity with 3 payments
+            TaskTracker::new(),
+        );
+
+        // Run the simulation
+        let result = simulation.run().await;
+
+        // Verify the simulation shut down correctly
+        assert!(result.is_ok(), "Simulation should end without error");
+
+        // We expect exactly 3 payments to be attempted
+        let total_payments = simulation.get_total_payments().await;
+        assert_eq!(
+            total_payments, 3,
+            "Expected exactly 3 payments to be attempted, got {}",
+            total_payments
+        );
     }
 }
