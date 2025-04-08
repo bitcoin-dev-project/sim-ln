@@ -1767,8 +1767,12 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    #[tokio::test]
-    async fn test_shutdown_timeout() {
+    #[allow(clippy::type_complexity)]
+    /// Helper to create and configure mock nodes for testing
+    fn setup_test_nodes() -> (
+        (crate::NodeInfo, crate::NodeInfo),
+        HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
+    ) {
         // Create test nodes
         let nodes = test_utils::create_nodes(2, 100_000);
         let mut node_1 = nodes.first().unwrap().0.clone();
@@ -1828,6 +1832,14 @@ mod tests {
         let mut clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
         clients.insert(node_1.pubkey, Arc::new(Mutex::new(mock_node_1)));
         clients.insert(node_2.pubkey, Arc::new(Mutex::new(mock_node_2)));
+
+        ((node_1, node_2), clients)
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_timeout() {
+        // Set up test nodes
+        let ((node_1, node_2), clients) = setup_test_nodes();
 
         // Define payment activity: 2000 msats every 1 second
         let activity_definition = crate::ActivityDefinition {
@@ -1872,11 +1884,9 @@ mod tests {
             elapsed
         );
 
-        // Check the payment stats
-        let total_payments = simulation.get_total_payments().await;
-
         // We expect at least 2 payments to be attempted (about one per second)
         // The exact number may vary due to timing, but should be at least 2
+        let total_payments = simulation.get_total_payments().await;
         assert!(
             total_payments >= 2,
             "Expected at least 2 payments to be attempted, got {}",
@@ -1886,65 +1896,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_shutdown_completion() {
-        // Create test nodes
-        let nodes = test_utils::create_nodes(2, 100_000);
-        let mut node_1 = nodes.first().unwrap().0.clone();
-        let mut node_2 = nodes.get(1).unwrap().0.clone();
-        node_1.features.set_keysend_optional();
-        node_2.features.set_keysend_optional();
-        let node_1_for_get_info = node_1.clone();
-        let node_2_for_get_info = node_2.clone();
-
-        // Create mock nodes with all necessary expectations
-        let mut mock_node_1 = MockLightningNode::new();
-        let mut mock_node_2 = MockLightningNode::new();
-
-        // Set up node 1 expectations
-        mock_node_1.expect_get_info().return_const(node_1.clone());
-        mock_node_1
-            .expect_get_network()
-            .returning(|| Ok(Network::Regtest));
-        mock_node_1
-            .expect_list_channels()
-            .returning(|| Ok(vec![100_000]));
-        mock_node_1
-            .expect_get_node_info()
-            .returning(move |_| Ok(node_1_for_get_info.clone()));
-        mock_node_1
-            .expect_send_payment()
-            .returning(|_, _| Ok(lightning::ln::PaymentHash([0; 32])));
-        mock_node_1.expect_track_payment().returning(|_, _| {
-            Ok(crate::PaymentResult {
-                htlc_count: 1,
-                payment_outcome: crate::PaymentOutcome::Success,
-            })
-        });
-
-        // Set up node 2 expectations
-        mock_node_2.expect_get_info().return_const(node_2.clone());
-        mock_node_2
-            .expect_get_network()
-            .returning(|| Ok(Network::Regtest));
-        mock_node_2
-            .expect_list_channels()
-            .returning(|| Ok(vec![100_000]));
-        mock_node_2
-            .expect_get_node_info()
-            .returning(move |_| Ok(node_2_for_get_info.clone()));
-        mock_node_2
-            .expect_send_payment()
-            .returning(|_, _| Ok(lightning::ln::PaymentHash([0; 32])));
-        mock_node_2.expect_track_payment().returning(|_, _| {
-            Ok(crate::PaymentResult {
-                htlc_count: 1,
-                payment_outcome: crate::PaymentOutcome::Success,
-            })
-        });
-
-        // Create a hashmap of nodes
-        let mut clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
-        clients.insert(node_1.pubkey, Arc::new(Mutex::new(mock_node_1)));
-        clients.insert(node_2.pubkey, Arc::new(Mutex::new(mock_node_2)));
+        // Set up test nodes
+        let ((node_1, node_2), clients) = setup_test_nodes();
 
         // Define an activity that will make 3 payments of 2000 msats each
         let activity_definition = crate::ActivityDefinition {
@@ -1976,10 +1929,8 @@ mod tests {
         // Verify the simulation shut down correctly
         assert!(result.is_ok(), "Simulation should end without error");
 
-        // Check the payment stats
-        let total_payments = simulation.get_total_payments().await;
-
         // We expect exactly 3 payments to be attempted
+        let total_payments = simulation.get_total_payments().await;
         assert_eq!(
             total_payments, 3,
             "Expected exactly 3 payments to be attempted, got {}",
