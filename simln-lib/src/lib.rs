@@ -186,50 +186,72 @@ pub struct ActivityDefinition {
     pub amount_msat: Amount,
 }
 
+/// Represents errors that can occur during simulation execution.
 #[derive(Debug, Error)]
 pub enum SimulationError {
+    /// Error that occurred during Lightning Network operations
     #[error("Lightning Error: {0:?}")]
     LightningError(#[from] LightningError),
+    /// Error that occurred during task execution
     #[error("TaskError")]
     TaskError,
+    /// Error that occurred while writing CSV data
     #[error("CSV Error: {0:?}")]
     CsvError(#[from] csv::Error),
+    /// Error that occurred during file operations
     #[error("File Error")]
     FileError,
+    /// Error that occurred during random activity generation
     #[error("{0}")]
     RandomActivityError(RandomActivityError),
+    /// Error that occurred in the simulated network
     #[error("Simulated Network Error: {0}")]
     SimulatedNetworkError(String),
+    /// Error that occurred while accessing system time
     #[error("System Time Error: {0}")]
     SystemTimeError(#[from] SystemTimeError),
+    /// Error that occurred when a required node was not found
     #[error("Missing Node Error: {0}")]
     MissingNodeError(String),
+    /// Error that occurred in message passing channels
     #[error("Mpsc Channel Error: {0}")]
     MpscChannelError(String),
+    /// Error that occurred while generating payment parameters
     #[error("Payment Generation Error: {0}")]
     PaymentGenerationError(PaymentGenerationError),
+    /// Error that occurred while generating destination nodes
     #[error("Destination Generation Error: {0}")]
     DestinationGenerationError(DestinationGenerationError),
 }
 
+/// Represents errors that can occur during Lightning Network operations.
 #[derive(Debug, Error)]
 pub enum LightningError {
+    /// Error that occurred while connecting to a Lightning node
     #[error("Node connection error: {0}")]
     ConnectionError(String),
+    /// Error that occurred while retrieving node information
     #[error("Get info error: {0}")]
     GetInfoError(String),
+    /// Error that occurred while sending a payment
     #[error("Send payment error: {0}")]
     SendPaymentError(String),
+    /// Error that occurred while tracking a payment
     #[error("Track payment error: {0}")]
     TrackPaymentError(String),
+    /// Error that occurred when a payment hash is invalid
     #[error("Invalid payment hash")]
     InvalidPaymentHash,
+    /// Error that occurred while retrieving information about a specific node
     #[error("Get node info error: {0}")]
     GetNodeInfoError(String),
+    /// Error that occurred during configuration validation
     #[error("Config validation failed: {0}")]
     ValidationError(String),
+    /// Error that represents a permanent failure condition
     #[error("Permanent error: {0:?}")]
     PermanentError(String),
+    /// Error that occurred while listing channels
     #[error("List channels error: {0}")]
     ListChannelsError(String),
 }
@@ -286,6 +308,7 @@ pub trait LightningNode: Send {
     async fn list_channels(&mut self) -> Result<Vec<u64>, LightningError>;
 }
 
+/// Represents an error that occurs when generating a destination for a payment.
 #[derive(Debug, Error)]
 #[error("Destination generation error: {0}")]
 pub struct DestinationGenerationError(String);
