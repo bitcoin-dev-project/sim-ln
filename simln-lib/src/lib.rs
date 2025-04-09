@@ -314,14 +314,14 @@ pub trait LightningNode: Send {
 pub struct DestinationGenerationError(String);
 
 /// A trait for selecting destination nodes for payments in the Lightning Network.
-/// 
+///
 /// This trait is responsible for choosing appropriate destination nodes from the existing network
 /// for payments to be sent to. The selection can be based on different strategies:
 /// - Predefined destinations (for deterministic payment patterns)
-/// - Random selection weighted by node capacity (for simulating network activity)
+/// - Random selection weighted by node capacity
 ///
-/// The trait is used in conjunction with `PaymentGenerator` to determine both where and how
-/// payments should be made in the network.
+/// The trait works with existing nodes in the network and is used in conjunction with
+/// the `PaymentGenerator` trait to create complete payment flows.
 pub trait DestinationGenerator: Send {
     /// choose_destination picks a destination node within the network, returning the node's information and its
     /// capacity (if available).
@@ -337,11 +337,11 @@ pub trait DestinationGenerator: Send {
 pub struct PaymentGenerationError(String);
 
 /// A trait for generating payment parameters in the Lightning Network.
-/// 
+///
 /// This trait is responsible for determining when and how payments should be made,
 /// including timing, amounts, and frequency. It can be used to implement various
 /// payment strategies, from simple periodic payments to more complex patterns
-/// based on network conditions or business logic.
+/// with random timing and amounts.
 ///
 pub trait PaymentGenerator: Display + Send {
     /// Returns the time that the payments should start
