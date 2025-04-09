@@ -257,16 +257,17 @@ pub enum LightningError {
 }
 
 /// Information about a Lightning Network node.
-/// - Public key: The node's cryptographic identity
 /// - Alias: A human-readable name for the node
-/// - Features: The node's advertised protocol features
+/// - Features: The node's supported protocol features and capabilities, used to determine compatibility
+///   and available functionality. In CLN, features are stored as big-endian bytes, while in LND they are
+///   stored as a set of feature flags converted to little-endian bytes.
 #[derive(Debug, Clone)]
 pub struct NodeInfo {
-    /// The node's public key, which serves as its unique identifier in the network
+    /// The node's public key
     pub pubkey: PublicKey,
     /// A human-readable name for the node (may be empty)
     pub alias: String,
-    /// The node's advertised protocol features (e.g., keysend support)
+    /// The node's supported protocol features and capabilities
     pub features: NodeFeatures,
 }
 
