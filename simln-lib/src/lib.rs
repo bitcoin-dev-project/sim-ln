@@ -321,6 +321,7 @@ pub struct DestinationGenerationError(String);
 /// - Random selection weighted by node capacity (for simulating network activity)
 ///
 /// The trait is used in conjunction with `PaymentGenerator` to determine both where and how
+/// payments should be made in the network.
 pub trait DestinationGenerator: Send {
     /// choose_destination picks a destination node within the network, returning the node's information and its
     /// capacity (if available).
@@ -341,6 +342,7 @@ pub struct PaymentGenerationError(String);
 /// including timing, amounts, and frequency. It can be used to implement various
 /// payment strategies, from simple periodic payments to more complex patterns
 /// based on network conditions or business logic.
+///
 pub trait PaymentGenerator: Display + Send {
     /// Returns the time that the payments should start
     fn payment_start(&self) -> Option<Duration>;
@@ -350,6 +352,7 @@ pub trait PaymentGenerator: Display + Send {
     /// # Returns
     ///
     /// * `Some(u64)` - The exact number of payments to make
+    /// * `None` - Payments should continue indefinitely
     fn payment_count(&self) -> Option<u64>;
 
     /// Returns the number of seconds that a node should wait until firing its next payment.
