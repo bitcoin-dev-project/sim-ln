@@ -544,6 +544,7 @@ pub struct Simulation {
     shutdown_listener: Listener,
 }
 
+/// Configuration for writing simulation results to CSV files.
 #[derive(Clone)]
 pub struct WriteResults {
     /// Data directory where CSV result files are written.
