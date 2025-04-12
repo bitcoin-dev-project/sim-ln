@@ -8,13 +8,14 @@ use simln_lib::{
     ActivityDefinition, Amount, Interval, LightningError, LightningNode, NodeId, NodeInfo,
     Simulation, SimulationCfg, WriteResults,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::ops::AsyncFn;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_util::task::TaskTracker;
+use regex::Regex;
 
 /// The default directory where the simulation files are stored and where the results will be written to.
 pub const DEFAULT_DATA_DIR: &str = ".";
@@ -100,6 +101,9 @@ enum NodeConnection {
 /// [NodeId], which enables the use of public keys and aliases in the simulation description.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ActivityParser {
+    /// Optional identifier for this activity.
+    #[serde(default)]
+    pub name: Option<String>,
     /// The source of the payment.
     #[serde(with = "serializers::serde_node_id")]
     pub source: NodeId,
@@ -259,9 +263,55 @@ async fn validate_activities(
     get_node_info: impl AsyncFn(&PublicKey) -> Result<NodeInfo, LightningError>,
 ) -> Result<Vec<ActivityDefinition>, LightningError> {
     let mut validated_activities = vec![];
+    let mut activity_names = HashSet::new();
 
     // Make all the activities identifiable by PK internally
-    for act in activity.into_iter() {
+    for (index, act) in activity.into_iter().enumerate() {
+        // Generate a default name if one is not provided
+        let name = match &act.name {
+            Some(name) => {
+                // Disallow empty names
+                if name.is_empty() {
+                    return Err(LightningError::ValidationError(
+                        "activity name cannot be empty".to_string()
+                    ));
+                }
+
+                // Disallow users from using the reserved "Activity-x" format
+                let reserved_pattern = Regex::new(r"^Activity-\d+$").unwrap();
+                if reserved_pattern.is_match(name) {
+                    return Err(LightningError::ValidationError(format!(
+                        "'{}' uses a reserved name format. 'Activity-{{number}}' is reserved for system use.",
+                        name
+                    )));
+                }
+
+                // Check for duplicate names
+                if !activity_names.insert(name.clone()) {
+                    return Err(LightningError::ValidationError(format!(
+                        "duplicate activity name: {}",
+                        name
+                    )));
+                }
+                name.clone()
+            },
+            None => {
+                // Generate a unique system name
+                let mut counter = index;
+                let mut unique_name;
+
+                loop {
+                    unique_name = format!("Activity-{}", counter);
+                    if activity_names.insert(unique_name.clone()) {
+                        break;
+                    }
+                    counter += 1;
+                }
+
+                unique_name
+            },
+        };
+
         // We can only map aliases to nodes we control, so if either the source or destination alias
         // is not in alias_node_map, we fail
         let source = if let Some(source) = match &act.source {
@@ -297,6 +347,7 @@ async fn validate_activities(
         };
 
         validated_activities.push(ActivityDefinition {
+            name: Some(name),
             source,
             destination,
             interval_secs: act.interval_secs,

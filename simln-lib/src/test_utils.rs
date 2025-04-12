@@ -212,6 +212,7 @@ pub fn create_activity(
     amount_msat: u64,
 ) -> ActivityDefinition {
     ActivityDefinition {
+        name: None,
         source,
         destination,
         start_secs: None,
