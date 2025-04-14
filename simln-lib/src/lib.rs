@@ -1937,4 +1937,72 @@ mod tests {
             total_payments
         );
     }
+
+    #[tokio::test]
+    async fn test_manual_shutdown() {
+        // Set up test nodes
+        let ((node_1, node_2), clients) = setup_test_nodes();
+
+        // Define an activity that would make many payments (but we will shut down early)
+        let activity_definition = crate::ActivityDefinition {
+            source: node_1,
+            destination: node_2,
+            start_secs: None,
+            count: Some(10),
+            interval_secs: crate::ValueOrRange::Value(1),
+            amount_msat: crate::ValueOrRange::Value(2000),
+        };
+
+        // Create simulation with no timeout
+        let simulation = Simulation::new(
+            SimulationCfg::new(
+                None,     // No timeout
+                1000,     // Expected payment size
+                0.1,      // Activity multiplier
+                None,     // No result writing
+                Some(42), // Seed for determinism
+            ),
+            clients,
+            vec![activity_definition], // Use defined activity with many payments
+            TaskTracker::new(),
+        );
+
+        // Create a cloned reference for the shutdown task
+        let sim_clone = simulation.clone();
+
+        // Start a task that will manually shut down the simulation after a short delay
+        tokio::spawn(async move {
+            // Wait a little bit to allow some payments to complete
+            tokio::time::sleep(Duration::from_secs(3)).await;
+
+            // Manually trigger shutdown
+            log::info!("Manually triggering simulation shutdown");
+            sim_clone.shutdown();
+        });
+
+        // Run the simulation (should be interrupted by our manual shutdown)
+        let start = std::time::Instant::now();
+        let result = simulation.run().await;
+        let elapsed = start.elapsed();
+
+        // Verify the simulation shut down correctly
+        assert!(result.is_ok(), "Simulation should end without error");
+
+        // Check that simulation ran for approximately the time until manual shutdown (with some margin)
+        let expected_runtime = Duration::from_secs(3);
+        let margin = Duration::from_secs(1);
+        assert!(
+            elapsed >= expected_runtime && elapsed <= expected_runtime + margin,
+            "Simulation should have run for approximately 3 seconds, but took {:?}",
+            elapsed
+        );
+
+        // We expect fewer than the total 100 payments to be attempted
+        let total_payments = simulation.get_total_payments().await;
+        assert!(
+            total_payments > 0 && total_payments < 10,
+            "Expected between 1 and 99 payments to be attempted, got {}",
+            total_payments
+        );
+    }
 }
