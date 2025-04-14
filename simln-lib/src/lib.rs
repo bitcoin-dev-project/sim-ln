@@ -1943,7 +1943,7 @@ mod tests {
         // Set up test nodes
         let ((node_1, node_2), clients) = setup_test_nodes();
 
-        // Define an activity that would make many payments (but we will shut down early)
+        // Define an activity that would make payments (but we will shut down early)
         let activity_definition = crate::ActivityDefinition {
             source: node_1,
             destination: node_2,
@@ -1997,11 +1997,88 @@ mod tests {
             elapsed
         );
 
-        // We expect fewer than the total 100 payments to be attempted
+        // We expect fewer than the total 10 payments to be attempted
         let total_payments = simulation.get_total_payments().await;
         assert!(
             total_payments > 0 && total_payments < 10,
-            "Expected between 1 and 99 payments to be attempted, got {}",
+            "Expected between 1 and 9 payments to be attempted, got {}",
+            total_payments
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_on_error() {
+        // Set up test nodes with one that will produce a permanent error
+        let ((node_1, node_2), mut clients) = setup_test_nodes();
+        let mut mock_node_1 = MockLightningNode::new();
+
+        // Set up node 1 expectations
+        let node_1_clone = node_1.clone();
+        mock_node_1.expect_get_info().return_const(node_1.clone());
+        mock_node_1
+            .expect_get_network()
+            .returning(|| Ok(Network::Regtest));
+        mock_node_1
+            .expect_list_channels()
+            .returning(|| Ok(vec![100_000]));
+        mock_node_1
+            .expect_get_node_info()
+            .returning(move |_| Ok(node_1_clone.clone()));
+        mock_node_1.expect_track_payment().returning(|_, _| {
+            Ok(crate::PaymentResult {
+                htlc_count: 1,
+                payment_outcome: crate::PaymentOutcome::Success,
+            })
+        });
+        mock_node_1.expect_send_payment().returning(|_, _| {
+            Err(LightningError::PermanentError(
+                "Simulated permanent error".to_string(),
+            ))
+        });
+
+        clients.insert(node_1.pubkey, Arc::new(Mutex::new(mock_node_1)));
+
+        // Define an activity that attempts to send a payment from node_1 to node_2
+        let activity_definition = crate::ActivityDefinition {
+            source: node_1,
+            destination: node_2,
+            start_secs: None,                              // Start immediately
+            count: Some(5), // Would try multiple payments if no error occurred
+            interval_secs: crate::ValueOrRange::Value(1), // 1 second interval
+            amount_msat: crate::ValueOrRange::Value(2000), // 2000 msats
+        };
+
+        // Create simulation with a long timeout that we don't expect to be reached
+        let simulation = Simulation::new(
+            SimulationCfg::new(
+                Some(30), // 30 second timeout (shouldn't matter)
+                1000,     // Expected payment size
+                0.1,      // Activity multiplier
+                None,     // No result writing
+                Some(42), // Seed for determinism
+            ),
+            clients,
+            vec![activity_definition],
+            TaskTracker::new(),
+        );
+
+        // Run the simulation (should be interrupted by the error)
+        let start = std::time::Instant::now();
+        let _ = simulation.run().await;
+        let elapsed = start.elapsed();
+
+        // Check that simulation ran for a short time (less than our expected 5 seconds)
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "Simulation should have shut down quickly after encountering the error, took {:?}",
+            elapsed
+        );
+
+        // We expect no successful payments to be recorded
+        let total_payments = simulation.get_total_payments().await;
+        assert_eq!(
+            total_payments, 0,
+            "Expected no payments to be recorded, got {}",
             total_payments
         );
     }
