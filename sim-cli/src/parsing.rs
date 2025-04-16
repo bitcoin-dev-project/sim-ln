@@ -82,7 +82,7 @@ pub struct Cli {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-struct SimParams {
+pub struct SimParams {
     pub nodes: Vec<NodeConnection>,
     #[serde(default)]
     pub activity: Vec<ActivityParser>,
@@ -90,7 +90,7 @@ struct SimParams {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
-enum NodeConnection {
+pub enum NodeConnection {
     Lnd(lnd::LndConnection),
     Cln(cln::ClnConnection),
     Eclair(eclair::EclairConnection),
@@ -99,7 +99,7 @@ enum NodeConnection {
 /// Data structure used to parse information from the simulation file. It allows source and destination to be
 /// [NodeId], which enables the use of public keys and aliases in the simulation description.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ActivityParser {
+pub struct ActivityParser {
     /// The source of the payment.
     #[serde(with = "serializers::serde_node_id")]
     pub source: NodeId,
@@ -142,40 +142,21 @@ impl TryFrom<&Cli> for SimulationCfg {
 
 /// Parses the cli options provided and creates a simulation to be run, connecting to lightning nodes and validating
 /// any activity described in the simulation file.
-pub async fn create_simulation(cli: &Cli) -> Result<Simulation, anyhow::Error> {
+pub async fn create_simulation(
+    cli: &Cli,
+    sim_params: &SimParams,
+) -> Result<(Simulation, HashMap<PublicKey, NodeInfo>), anyhow::Error> {
     let cfg: SimulationCfg = SimulationCfg::try_from(cli)?;
 
-    let sim_path = read_sim_path(cli.data_dir.clone(), cli.sim_file.clone()).await?;
-    let SimParams { nodes, activity } = serde_json::from_str(&std::fs::read_to_string(sim_path)?)
-        .map_err(|e| {
-        anyhow!(
-            "Could not deserialize node connection data or activity description from simulation file (line {}, col {}, err: {}).",
-            e.line(),
-            e.column(),
-            e.to_string()
-        )
-    })?;
+    let SimParams {
+        nodes,
+        activity: _activity,
+    } = sim_params;
 
-    let (clients, clients_info) = get_clients(nodes).await?;
-    // We need to be able to look up destination nodes in the graph, because we allow defined activities to send to
-    // nodes that we do not control. To do this, we can just grab the first node in our map and perform the lookup.
-    let get_node = async |pk: &PublicKey| -> Result<NodeInfo, LightningError> {
-        if let Some(c) = clients.values().next() {
-            return c.lock().await.get_node_info(pk).await;
-        }
-
-        Err(LightningError::GetNodeInfoError(
-            "no nodes for query".to_string(),
-        ))
-    };
-
-    let (pk_node_map, alias_node_map) = add_node_to_maps(&clients_info).await?;
-
-    let validated_activities =
-        validate_activities(activity, pk_node_map, alias_node_map, get_node).await?;
+    let (clients, clients_info) = get_clients(nodes.to_vec()).await?;
     let tasks = TaskTracker::new();
 
-    Ok(Simulation::new(cfg, clients, validated_activities, tasks))
+    Ok((Simulation::new(cfg, clients, tasks), clients_info))
 }
 
 /// Connects to the set of nodes providing, returning a map of node public keys to LightningNode implementations and
@@ -361,4 +342,38 @@ pub async fn select_sim_file(data_dir: PathBuf) -> anyhow::Result<PathBuf> {
 fn mkdir(dir: PathBuf) -> anyhow::Result<PathBuf> {
     fs::create_dir_all(&dir)?;
     Ok(dir)
+}
+
+pub async fn parse_sim_params(cli: &Cli) -> anyhow::Result<SimParams> {
+    let sim_path = read_sim_path(cli.data_dir.clone(), cli.sim_file.clone()).await?;
+    let sim_params = serde_json::from_str(&std::fs::read_to_string(sim_path)?).map_err(|e| {
+        anyhow!(
+            "Could not deserialize node connection data or activity description from simulation file (line {}, col {}, err: {}).",
+            e.line(),
+            e.column(),
+            e.to_string()
+        )
+        })?;
+    Ok(sim_params)
+}
+
+pub async fn get_validated_activities(
+    clients: &HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
+    nodes_info: HashMap<PublicKey, NodeInfo>,
+    activity: Vec<ActivityParser>,
+) -> Result<Vec<ActivityDefinition>, LightningError> {
+    // We need to be able to look up destination nodes in the graph, because we allow defined activities to send to
+    // nodes that we do not control. To do this, we can just grab the first node in our map and perform the lookup.
+    let get_node = async |pk: &PublicKey| -> Result<NodeInfo, LightningError> {
+        if let Some(c) = clients.values().next() {
+            return c.lock().await.get_node_info(pk).await;
+        }
+        Err(LightningError::GetNodeInfoError(
+            "no nodes for query".to_string(),
+        ))
+    };
+    let (pk_node_map, alias_node_map) = add_node_to_maps(&nodes_info).await?;
+    let validated_activities =
+        validate_activities(activity.to_vec(), pk_node_map, alias_node_map, get_node).await?;
+    Ok(validated_activities)
 }

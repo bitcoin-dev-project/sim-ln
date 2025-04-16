@@ -195,14 +195,10 @@ impl LightningTestNodeBuilder {
 
 /// Creates a new simulation with the given clients and activity definitions.
 /// Note: This sets a runtime for the simulation of 0, so run() will exit immediately.
-pub fn create_simulation(
-    clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
-    activity: Vec<ActivityDefinition>,
-) -> Simulation {
+pub fn create_simulation(clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>) -> Simulation {
     Simulation::new(
         SimulationCfg::new(Some(0), 0, 0.0, None, None),
         clients,
-        activity,
         TaskTracker::new(),
     )
 }
