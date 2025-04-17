@@ -1,6 +1,6 @@
 use crate::clock::Clock;
 use crate::{
-    LightningError, LightningNode, NodeInfo, PaymentOutcome, PaymentResult, SimulationError,
+    Graph, LightningError, LightningNode, NodeInfo, PaymentOutcome, PaymentResult, SimulationError,
 };
 use async_trait::async_trait;
 use bitcoin::constants::ChainHash;
@@ -450,6 +450,8 @@ trait SimNetwork: Send + Sync {
 
     /// Looks up a node in the simulated network and a list of its channel capacities.
     async fn lookup_node(&self, node: &PublicKey) -> Result<(NodeInfo, Vec<u64>), LightningError>;
+    /// Lists all nodes in the simulated network.
+    async fn list_nodes(&self) -> Result<Vec<NodeInfo>, LightningError>;
 }
 
 /// A wrapper struct used to implement the LightningNode trait (can be thought of as "the" lightning node). Passes
@@ -650,6 +652,25 @@ impl<T: SimNetwork> LightningNode for SimNode<'_, T> {
             .await?
             .1)
     }
+
+    async fn get_graph(&mut self) -> Result<Graph, LightningError> {
+        let nodes = self.network.lock().await.list_nodes().await?;
+
+        let mut nodes_by_pk = HashMap::new();
+
+        for node in nodes {
+            nodes_by_pk.insert(
+                node.pubkey,
+                NodeInfo {
+                    pubkey: node.pubkey,
+                    alias: node.alias.clone(),
+                    features: node.features,
+                },
+            );
+        }
+
+        Ok(Graph { nodes_by_pk })
+    }
 }
 
 /// Graph is the top level struct that is used to coordinate simulation of lightning nodes.
@@ -846,6 +867,16 @@ impl SimNetwork for SimGraph {
             .ok_or(LightningError::GetNodeInfoError(
                 "Node not found".to_string(),
             ))
+    }
+
+    async fn list_nodes(&self) -> Result<Vec<NodeInfo>, LightningError> {
+        let mut nodes = vec![];
+
+        for node in &self.nodes {
+            nodes.push(node_info(*node.0));
+        }
+
+        Ok(nodes)
     }
 }
 
@@ -1480,6 +1511,7 @@ mod tests {
             );
 
             async fn lookup_node(&self, node: &PublicKey) -> Result<(NodeInfo, Vec<u64>), LightningError>;
+            async fn list_nodes(&self) -> Result<Vec<NodeInfo>, LightningError>;
         }
     }
 
