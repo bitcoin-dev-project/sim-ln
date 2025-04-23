@@ -1939,7 +1939,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_manual_shutdown() {
+    async fn test_shutdown_manual() {
         // Set up test nodes
         let ((node_1, node_2), clients) = setup_test_nodes();
 
@@ -2075,6 +2075,170 @@ mod tests {
         );
 
         // We expect no successful payments to be recorded
+        let total_payments = simulation.get_total_payments().await;
+        assert_eq!(
+            total_payments, 0,
+            "Expected no payments to be recorded, got {}",
+            total_payments
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_multiple_activities() {
+        let ((node_1, node_2), clients) = setup_test_nodes();
+
+        // Define activity 1: From node 0 to node 1 with a count limit of 3 payments
+        let activity_1 = crate::ActivityDefinition {
+            source: node_1.clone(),
+            destination: node_2.clone(),
+            start_secs: None,                              // Start immediately
+            count: Some(3),                                // Limited to 3 payments
+            interval_secs: crate::ValueOrRange::Value(1),  // 1 second interval
+            amount_msat: crate::ValueOrRange::Value(2000), // 2000 msats
+        };
+
+        // Define activity 2: From node 2 to node 1 with no count limit
+        let activity_2 = crate::ActivityDefinition {
+            source: node_2.clone(),
+            destination: node_1.clone(),
+            start_secs: None,                              // Start immediately
+            count: None,                                   // No limit (will run forever)
+            interval_secs: crate::ValueOrRange::Value(1),  // 1 second interval
+            amount_msat: crate::ValueOrRange::Value(3000), // 3000 msats
+        };
+
+        // Create simulation with a timeout of 6 seconds
+        // This gives enough time for first activity to complete (3 payments at 1 second each)
+        // and for the second activity to continue making payments after that
+        let timeout_secs = 6;
+        let simulation = Simulation::new(
+            SimulationCfg::new(
+                Some(timeout_secs), // Run for 6 seconds
+                1000,               // Expected payment size
+                0.1,                // Activity multiplier
+                None,               // No result writing
+                Some(42),           // Seed for determinism
+            ),
+            clients,
+            vec![activity_1, activity_2], // Use both activities
+            TaskTracker::new(),
+        );
+
+        // Run the simulation for the full timeout duration
+        let start = std::time::Instant::now();
+        let result = simulation.run().await;
+        let elapsed = start.elapsed();
+
+        // Verify the simulation ran correctly
+        assert!(result.is_ok(), "Simulation should end without error");
+
+        // Verify it ran for approximately the timeout duration
+        let margin = Duration::from_secs(1);
+        assert!(
+            elapsed >= Duration::from_secs(6) && elapsed <= Duration::from_secs(6) + margin,
+            "Simulation should have run for approximately {} seconds, but took {:?}",
+            timeout_secs,
+            elapsed
+        );
+
+        // We expect at least 8 payments in total:
+        // - 3 from activity 1 (which completes its count)
+        // - At least 5 from activity 2 (1 per second for 6 seconds)
+        // The exact number may vary slightly due to timing, but should be at least 8
+        let total_payments = simulation.get_total_payments().await;
+        assert!(
+            total_payments >= 8,
+            "Expected at least 8 payments to be attempted, got {}",
+            total_payments
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_multiple_activities_with_error() {
+        // Set up test nodes with node_1 that will produce a permanent error
+        let ((node_1, node_2), mut clients) = setup_test_nodes();
+
+        // Create mock for node_1 that will return a permanent error on send_payment
+        let mut mock_node_1 = MockLightningNode::new();
+        let node_1_clone = node_1.clone();
+
+        // Set up basic expectations for node_1
+        mock_node_1.expect_get_info().return_const(node_1.clone());
+        mock_node_1
+            .expect_get_network()
+            .returning(|| Ok(Network::Regtest));
+        mock_node_1
+            .expect_list_channels()
+            .returning(|| Ok(vec![100_000]));
+        mock_node_1
+            .expect_get_node_info()
+            .returning(move |_| Ok(node_1_clone.clone()));
+        mock_node_1.expect_track_payment().returning(|_, _| {
+            Ok(crate::PaymentResult {
+                htlc_count: 1,
+                payment_outcome: crate::PaymentOutcome::Success,
+            })
+        });
+
+        // Set up node_1 to return a permanent error on send_payment
+        mock_node_1.expect_send_payment().returning(|_, _| {
+            Err(LightningError::PermanentError(
+                "Simulated permanent error".to_string(),
+            ))
+        });
+
+        // Replace node_1 with our new mock
+        clients.insert(node_1.pubkey, Arc::new(Mutex::new(mock_node_1)));
+
+        // Define two activities
+        // Activity 1: From node_1 to node_2 - This will encounter the permanent error
+        let activity_1 = crate::ActivityDefinition {
+            source: node_1.clone(),
+            destination: node_2.clone(),
+            start_secs: None,
+            count: None,                                   // No limit
+            interval_secs: crate::ValueOrRange::Value(1),  // 1 second interval
+            amount_msat: crate::ValueOrRange::Value(2000), // 2000 msats
+        };
+
+        // Activity 2: From node_2 to node_1 - This would normally succeed
+        let activity_2 = crate::ActivityDefinition {
+            source: node_2.clone(),
+            destination: node_1.clone(),
+            start_secs: Some(2), // Start 2 seconds after the first activity
+            count: Some(10),     // 10 payments if no error
+            interval_secs: crate::ValueOrRange::Value(1), // 1 second interval
+            amount_msat: crate::ValueOrRange::Value(3000), // 3000 msats
+        };
+
+        // Create simulation with a long timeout that we don't expect to be reached
+        let simulation = Simulation::new(
+            SimulationCfg::new(
+                Some(30), // 30 second timeout (shouldn't matter)
+                1000,     // Expected payment size
+                0.1,      // Activity multiplier
+                None,     // No result writing
+                Some(42), // Seed for determinism
+            ),
+            clients,
+            vec![activity_1, activity_2], // Use both activities
+            TaskTracker::new(),
+        );
+
+        // Run the simulation (should be interrupted by the error)
+        let start = std::time::Instant::now();
+        let _ = simulation.run().await;
+        let elapsed = start.elapsed();
+
+        // Check that simulation ran for a short time (less than 3 seconds)
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "Simulation should have shut down quickly after encountering the error, took {:?}",
+            elapsed
+        );
+
+        // We expect no successful payments to be recorded since the first activity errors immediately
+        // and it should shut down the entire simulation
         let total_payments = simulation.get_total_payments().await;
         assert_eq!(
             total_payments, 0,
