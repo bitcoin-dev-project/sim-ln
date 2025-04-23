@@ -21,7 +21,7 @@ use std::{collections::HashMap, sync::Arc, time::SystemTime};
 use thiserror::Error;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::Mutex;
-use tokio::{select, time, time::Duration, time::Instant};
+use tokio::{select, time, time::Duration, time::Instant, time::Sleep};
 use tokio_util::task::TaskTracker;
 use triggered::{Listener, Trigger};
 
@@ -1345,8 +1345,7 @@ async fn run_results_logger(
 ///
 /// Note: this producer does not accept a shutdown trigger because it only expects to be dispatched once. In the single
 /// producer case exit will drop the only sending channel and the receiving channel provided to the consumer will error
-/// out. In the multiple-producer case, a single producer shutting down does not drop *all* sending channels so the
-/// consumer will not exit and a trigger is required.
+/// out.
 async fn produce_simulation_results(
     nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
     mut output_receiver: Receiver<SimulationOutput>,
@@ -1409,27 +1408,28 @@ async fn track_payment_result(
             log::debug!("Tracking payment outcome for: {}.", hex::encode(hash.0));
 
             // Trigger and listener to stop the implementation specific track payment functions (node.track_payment())
-            let (stop, listen) = triggered::trigger();
+            let (track_payment_trigger, track_payment_listener) = triggered::trigger();
 
             // Timer for waiting after getting the shutdown signal in order for current tracking to complete
-            let mut timer: Option<tokio::time::Sleep> = None;
+            let mut timer: Option<Sleep> = None;
+            let mut timer_started = false;
 
             loop {
                 tokio::select! {
-                    biased;
                     // The shutdown listener is triggered and we have not started a timer yet
-                    _ = async {}, if listener.clone().is_triggered() && timer.is_none() => {
+                    _ = async {}, if listener.clone().is_triggered() && !timer_started => {
                         log::debug!("Shutdown received by track_payment_result, starting timer...");
                         timer = Some(time::sleep_until(Instant::now() + Duration::from_secs(3)));
+                        timer_started = true;
                     },
                     // The timer has been started and it expires
                     Some(_) = conditional_sleeper(timer) => {
                         log::error!("Track payment failed for {}. The shutdown timer expired.", hex::encode(hash.0));
-                        stop.trigger();
+                        track_payment_trigger.trigger();
                         timer = None;
                     }
                     // The payment tracking completes
-                    res = node.track_payment(&hash, listen.clone()) => {
+                    res = node.track_payment(&hash, track_payment_listener.clone()) => {
                         match res {
                             Ok(res) => {
                                 log::info!(
@@ -1469,7 +1469,7 @@ async fn track_payment_result(
     Ok(())
 }
 
-async fn conditional_sleeper(t: Option<tokio::time::Sleep>) -> Option<()> {
+async fn conditional_sleeper(t: Option<Sleep>) -> Option<()> {
     match t {
         Some(timer) => {
             timer.await;
