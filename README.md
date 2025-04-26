@@ -248,10 +248,11 @@ The example simulation file below sets up the following simulation:
 ```
 
 
-Nodes can be identified by their public key or an id string (as 
-described above). Activity sources and destinations may reference the 
-`id` defined in `nodes`, but destinations that are not listed in `nodes` 
-*must* provide a valid public key.
+Activity sources must reference an `id` defined in `nodes`, because the simulator can
+only send payments from nodes that it controls. Destinations may reference either an
+`id` defined in `nodes` or provide a pubkey or alias of a node in the public network.
+If the alias provided is not unique in the public network, a pubkey must be used
+to identify the node.
 
 ### Simulation Output
 
