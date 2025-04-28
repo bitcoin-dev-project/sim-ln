@@ -1579,8 +1579,9 @@ mod tests {
         let missing_nodes = test_utils::create_nodes(1, 100_000);
         let missing_node = missing_nodes.first().unwrap().0.clone();
         let dest_node = nodes[0].clone();
+        let activity_name = None;
 
-        let activity = test_utils::create_activity(missing_node, dest_node, 1000);
+        let activity = test_utils::create_activity(activity_name, missing_node, dest_node, 1000);
         let simulation = test_utils::create_simulation(clients, vec![activity]);
         let result = simulation.validate_activity().await;
 
@@ -1596,8 +1597,9 @@ mod tests {
         let (nodes, clients) = LightningTestNodeBuilder::new(1).build_full();
         let dest_nodes = test_utils::create_nodes(1, 100_000);
         let dest_node = dest_nodes.first().unwrap().0.clone();
+        let activity_name = None;
 
-        let activity = test_utils::create_activity(nodes[0].clone(), dest_node, 1000);
+        let activity = test_utils::create_activity(activity_name, nodes[0].clone(), dest_node, 1000);
         let simulation = test_utils::create_simulation(clients, vec![activity]);
         let result = simulation.validate_activity().await;
 
@@ -1613,9 +1615,10 @@ mod tests {
         let (nodes, clients) = LightningTestNodeBuilder::new(1).build_full();
         let dest_nodes = test_utils::create_nodes(1, 100_000);
         let mut dest_node = dest_nodes.first().unwrap().0.clone();
+        let activity_name = None;
         dest_node.features.set_keysend_optional();
 
-        let activity = test_utils::create_activity(nodes[0].clone(), dest_node, 1000);
+        let activity = test_utils::create_activity(activity_name, nodes[0].clone(), dest_node, 1000);
         let simulation = test_utils::create_simulation(clients, vec![activity]);
         let result = simulation.validate_activity().await;
 
@@ -1627,8 +1630,9 @@ mod tests {
     #[tokio::test]
     async fn test_validate_zero_amount_no_valid() {
         let (nodes, clients) = LightningTestNodeBuilder::new(2).build_full();
+        let activity_name = None;
 
-        let activity = test_utils::create_activity(nodes[0].clone(), nodes[1].clone(), 0);
+        let activity = test_utils::create_activity(activity_name, nodes[0].clone(), nodes[1].clone(), 0);
         let simulation = test_utils::create_simulation(clients, vec![activity]);
         let result = simulation.validate_activity().await;
 
