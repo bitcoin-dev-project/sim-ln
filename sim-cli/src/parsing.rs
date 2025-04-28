@@ -3,6 +3,7 @@ use bitcoin::secp256k1::PublicKey;
 use clap::{builder::TypedValueParser, Parser};
 use log::LevelFilter;
 use serde::{Deserialize, Serialize};
+use simln_lib::clock::SimulationClock;
 use simln_lib::sim_node::{
     ln_node_from_graph, populate_network_graph, ChannelPolicy, SimGraph, SimulatedChannel,
 };
@@ -198,7 +199,7 @@ pub async fn create_simulation_with_network(
     cli: &Cli,
     sim_params: &SimParams,
     tasks: TaskTracker,
-) -> Result<(Simulation, Vec<ActivityDefinition>), anyhow::Error> {
+) -> Result<(Simulation<SimulationClock>, Vec<ActivityDefinition>), anyhow::Error> {
     let cfg: SimulationCfg = SimulationCfg::try_from(cli)?;
     let SimParams {
         nodes: _,
@@ -241,7 +242,14 @@ pub async fn create_simulation_with_network(
         get_validated_activities(&nodes, nodes_info, sim_params.activity.clone()).await?;
 
     Ok((
-        Simulation::new(cfg, nodes, tasks, shutdown_trigger, shutdown_listener),
+        Simulation::new(
+            cfg,
+            nodes,
+            tasks,
+            Arc::new(SimulationClock::new(1)?),
+            shutdown_trigger,
+            shutdown_listener,
+        ),
         validated_activities,
     ))
 }
@@ -252,7 +260,7 @@ pub async fn create_simulation(
     cli: &Cli,
     sim_params: &SimParams,
     tasks: TaskTracker,
-) -> Result<(Simulation, Vec<ActivityDefinition>), anyhow::Error> {
+) -> Result<(Simulation<SimulationClock>, Vec<ActivityDefinition>), anyhow::Error> {
     let cfg: SimulationCfg = SimulationCfg::try_from(cli)?;
     let SimParams {
         nodes,
@@ -267,7 +275,14 @@ pub async fn create_simulation(
         get_validated_activities(&clients, clients_info, sim_params.activity.clone()).await?;
 
     Ok((
-        Simulation::new(cfg, clients, tasks, shutdown_trigger, shutdown_listener),
+        Simulation::new(
+            cfg,
+            clients,
+            tasks,
+            Arc::new(SimulationClock::new(1)?),
+            shutdown_trigger,
+            shutdown_listener,
+        ),
         validated_activities,
     ))
 }
