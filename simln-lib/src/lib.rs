@@ -6,7 +6,6 @@ use bitcoin::Network;
 use csv::WriterBuilder;
 use lightning::ln::features::NodeFeatures;
 use lightning::ln::PaymentHash;
-use rand::rngs::StdRng;
 use rand::{Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use random_activity::RandomActivityError;
@@ -490,7 +489,10 @@ type MutRngType = Arc<StdMutex<dyn RngCore + Send>>;
 /// Newtype for `MutRngType` to encapsulate and hide implementation details for
 /// creating new `MutRngType` types. Provides convenient API for the same purpose.
 #[derive(Clone)]
-struct MutRng(MutRngType);
+struct MutRng {
+    rng: MutRngType,
+    seed: Option<u64>,
+}
 
 impl MutRng {
     /// Creates a new MutRng given an optional `u64` argument. If `seed_opt` is `Some`,
@@ -498,10 +500,33 @@ impl MutRng {
     /// If it is `None`, activity generation is truly random, and based on a
     /// non-deterministic source of entropy.
     pub fn new(seed_opt: Option<u64>) -> Self {
-        if let Some(seed) = seed_opt {
-            Self(Arc::new(StdMutex::new(ChaCha8Rng::seed_from_u64(seed))))
-        } else {
-            Self(Arc::new(StdMutex::new(StdRng::from_entropy())))
+        Self {
+            rng: Arc::new(StdMutex::new(if let Some(seed) = seed_opt {
+                ChaCha8Rng::seed_from_u64(seed)
+            } else {
+                ChaCha8Rng::from_entropy()
+            })),
+            seed: seed_opt,
+        }
+    }
+
+    /// Creates a new MutRng that is salted with a pubkey. This ensures that each node
+    /// gets a deterministic but different RNG sequence.
+    pub fn salted(&self, pubkey: &PublicKey) -> Self {
+        // Get the pubkey bytes
+        let pubkey_bytes = pubkey.serialize();
+
+        // Creates a 64-bit salt value from a pubkey, which is typically much longer than 8 bytes.
+        let mut salt: u64 = 0;
+        for (i, &byte) in pubkey_bytes.iter().enumerate() {
+            salt ^= (byte as u64) << ((i % 8) * 8);
+        }
+
+        let salted_seed = self.seed.unwrap_or(0) ^ salt;
+
+        Self {
+            rng: Arc::new(StdMutex::new(ChaCha8Rng::seed_from_u64(salted_seed))),
+            seed: Some(salted_seed),
         }
     }
 }
@@ -949,6 +974,8 @@ impl Simulation {
         );
 
         for (node_info, capacity) in active_nodes.values() {
+            // Create a salted RNG for this node based on its pubkey
+            let salted_rng = self.cfg.seeded_rng.salted(&node_info.pubkey);
             generators.push(ExecutorKit {
                 source_info: node_info.clone(),
                 network_generator: network_generator.clone(),
@@ -957,7 +984,7 @@ impl Simulation {
                         *capacity,
                         self.cfg.expected_payment_msat,
                         self.cfg.activity_multiplier,
-                        self.cfg.seeded_rng.clone(),
+                        salted_rng,
                     )
                     .map_err(SimulationError::RandomActivityError)?,
                 ),
@@ -1513,8 +1540,8 @@ mod tests {
             let mut_rng_1 = MutRng::new(Some(seed));
             let mut_rng_2 = MutRng::new(Some(seed));
 
-            let mut rng_1 = mut_rng_1.0.lock().unwrap();
-            let mut rng_2 = mut_rng_2.0.lock().unwrap();
+            let mut rng_1 = mut_rng_1.rng.lock().unwrap();
+            let mut rng_2 = mut_rng_2.rng.lock().unwrap();
 
             assert_eq!(rng_1.next_u64(), rng_2.next_u64())
         }
@@ -1525,10 +1552,55 @@ mod tests {
         let mut_rng_1 = MutRng::new(None);
         let mut_rng_2 = MutRng::new(None);
 
-        let mut rng_1 = mut_rng_1.0.lock().unwrap();
-        let mut rng_2 = mut_rng_2.0.lock().unwrap();
+        let mut rng_1 = mut_rng_1.rng.lock().unwrap();
+        let mut rng_2 = mut_rng_2.rng.lock().unwrap();
 
         assert_ne!(rng_1.next_u64(), rng_2.next_u64())
+    }
+
+    #[test]
+    fn create_salted_mut_rng() {
+        let base_rng = MutRng::new(Some(42));
+
+        let pk1 = PublicKey::from_slice(&[
+            0x02, 0x79, 0xBE, 0x66, 0x7E, 0xF9, 0xDC, 0xBB, 0xAC, 0x55, 0xA0, 0x62, 0x95, 0xCE,
+            0x87, 0x0B, 0x07, 0x02, 0x9B, 0xFC, 0xDB, 0x2D, 0xCE, 0x28, 0xD9, 0x59, 0xF2, 0x81,
+            0x5B, 0x16, 0xF8, 0x17, 0x98,
+        ])
+        .unwrap();
+
+        let pk2 = PublicKey::from_slice(&[
+            0x03, 0xDF, 0xF1, 0xD7, 0x7F, 0x2A, 0x67, 0x1C, 0x5F, 0x36, 0x18, 0x37, 0xF1, 0x81,
+            0x6E, 0x96, 0x76, 0x87, 0xF5, 0x64, 0x7A, 0xD8, 0x4A, 0xD0, 0x89, 0xFA, 0x3B, 0xFC,
+            0x58, 0xE5, 0x47, 0xCD, 0x18,
+        ])
+        .unwrap();
+
+        let salted_rng_1 = base_rng.salted(&pk1);
+        let salted_rng_2 = base_rng.salted(&pk2);
+
+        let mut seq1 = Vec::new();
+        let mut seq2 = Vec::new();
+
+        let mut rng1 = salted_rng_1.rng.lock().unwrap();
+        let mut rng2 = salted_rng_2.rng.lock().unwrap();
+
+        for _ in 0..10 {
+            seq1.push(rng1.next_u64());
+            seq2.push(rng2.next_u64());
+        }
+
+        assert_ne!(seq1, seq2);
+
+        let salted_rng_1_again = base_rng.salted(&pk1);
+        let mut rng1_again = salted_rng_1_again.rng.lock().unwrap();
+        let mut seq1_again = Vec::new();
+
+        for _ in 0..10 {
+            seq1_again.push(rng1_again.next_u64());
+        }
+
+        assert_eq!(seq1, seq1_again);
     }
 
     mock! {

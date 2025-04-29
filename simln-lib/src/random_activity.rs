@@ -75,7 +75,7 @@ impl DestinationGenerator for NetworkGraphView {
     ) -> Result<(NodeInfo, Option<u64>), DestinationGenerationError> {
         let mut rng = self
             .rng
-            .0
+            .rng
             .lock()
             .map_err(|e| DestinationGenerationError(e.to_string()))?;
         // While it's very unlikely that we can't pick a destination that is not our source, it's possible that there's
@@ -227,7 +227,7 @@ impl PaymentGenerator for RandomPaymentActivity {
     fn next_payment_wait(&self) -> Result<Duration, PaymentGenerationError> {
         let mut rng = self
             .rng
-            .0
+            .rng
             .lock()
             .map_err(|e| PaymentGenerationError(e.to_string()))?;
         let duration_in_secs = self.event_dist.sample(&mut *rng) as u64;
@@ -269,7 +269,7 @@ impl PaymentGenerator for RandomPaymentActivity {
 
         let mut rng = self
             .rng
-            .0
+            .rng
             .lock()
             .map_err(|e| PaymentGenerationError(e.to_string()))?;
         let payment_amount = log_normal.sample(&mut *rng) as u64;
