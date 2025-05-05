@@ -527,8 +527,8 @@ pub struct SimulationCfg {
     activity_multiplier: f64,
     /// Configurations for printing results to CSV. Results are not written if this option is None.
     write_results: Option<WriteResults>,
-    /// Random number generator created from fixed seed.
-    seeded_rng: MutRng,
+    /// Optional seed for deterministic random number generation.
+    seed: Option<u64>,
 }
 
 impl SimulationCfg {
@@ -544,7 +544,7 @@ impl SimulationCfg {
             expected_payment_msat,
             activity_multiplier,
             write_results,
-            seeded_rng: MutRng::new(seed),
+            seed,
         }
     }
 }
@@ -944,12 +944,11 @@ impl Simulation {
             active_nodes.insert(node_info.pubkey, (node_info, capacity));
         }
 
+        // Create a base RNG from the seed for the network generator
+        let base_rng = MutRng::new(self.cfg.seed);
         let network_generator = Arc::new(Mutex::new(
-            NetworkGraphView::new(
-                active_nodes.values().cloned().collect(),
-                MutRng(self.cfg.seeded_rng.0.clone()),
-            )
-            .map_err(SimulationError::RandomActivityError)?,
+            NetworkGraphView::new(active_nodes.values().cloned().collect(), base_rng.clone())
+                .map_err(SimulationError::RandomActivityError)?,
         ));
 
         log::info!(
@@ -959,7 +958,7 @@ impl Simulation {
 
         for (node_info, capacity) in active_nodes.values() {
             // Create a salted RNG for this node based on its pubkey
-            let salted_rng = self.cfg.seeded_rng.salted(&node_info.pubkey);
+            let salted_rng = base_rng.salted(&node_info.pubkey);
             generators.push(ExecutorKit {
                 source_info: node_info.clone(),
                 network_generator: network_generator.clone(),
