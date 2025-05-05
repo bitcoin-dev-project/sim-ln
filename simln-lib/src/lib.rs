@@ -507,9 +507,14 @@ impl MutRng {
 
     /// Creates a new MutRng that is salted with a pubkey. This ensures that each node
     /// gets a deterministic but different RNG sequence.
-    pub fn salted(&self, pubkey: &PublicKey) -> Self {
+    pub fn salted(&self, pubkey: &PublicKey, seed: u64) -> Self {
         let mut hasher = DefaultHasher::new();
-        pubkey.hash(&mut hasher);
+
+        // Get pubkey bytes and concatenate with seed bytes
+        let mut combined = pubkey.serialize().to_vec();
+        combined.extend_from_slice(&seed.to_le_bytes());
+
+        combined.hash(&mut hasher);
         let salt = hasher.finish();
         Self(Arc::new(StdMutex::new(ChaCha8Rng::seed_from_u64(salt))))
     }
@@ -958,7 +963,7 @@ impl Simulation {
 
         for (node_info, capacity) in active_nodes.values() {
             // Create a salted RNG for this node based on its pubkey
-            let salted_rng = base_rng.salted(&node_info.pubkey);
+            let salted_rng = base_rng.salted(&node_info.pubkey, self.cfg.seed.unwrap_or(0));
             generators.push(ExecutorKit {
                 source_info: node_info.clone(),
                 network_generator: network_generator.clone(),
@@ -1548,8 +1553,8 @@ mod tests {
         let (_, pk1) = test_utils::get_random_keypair();
         let (_, pk2) = test_utils::get_random_keypair();
 
-        let salted_rng_1 = base_rng.salted(&pk1);
-        let salted_rng_2 = base_rng.salted(&pk2);
+        let salted_rng_1 = base_rng.salted(&pk1, 42);
+        let salted_rng_2 = base_rng.salted(&pk2, 42);
 
         let mut seq1 = Vec::new();
         let mut seq2 = Vec::new();
@@ -1564,7 +1569,7 @@ mod tests {
 
         assert_ne!(seq1, seq2);
 
-        let salted_rng1_again = base_rng.salted(&pk1);
+        let salted_rng1_again = base_rng.salted(&pk1, 42);
         let mut rng1_again = salted_rng1_again.0.lock().unwrap();
         let mut seq1_again = Vec::new();
 
