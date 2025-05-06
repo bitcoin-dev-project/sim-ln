@@ -493,30 +493,29 @@ type MutRngType = Arc<StdMutex<dyn RngCore + Send>>;
 struct MutRng(MutRngType);
 
 impl MutRng {
-    /// Creates a new MutRng given an optional `u64` argument. If `seed_opt` is `Some`,
+    /// Creates a new MutRng given an optional `u64` seed and optional pubkey. If `seed_opt` is `Some`,
     /// random activity generation in the simulator occurs near-deterministically.
     /// If it is `None`, activity generation is truly random, and based on a
     /// non-deterministic source of entropy.
-    pub fn new(seed_opt: Option<u64>) -> Self {
-        if let Some(seed) = seed_opt {
-            Self(Arc::new(StdMutex::new(ChaCha8Rng::seed_from_u64(seed))))
+    /// If a pubkey is provided, it will be used to salt the seed to ensure each node gets a deterministic but
+    /// different RNG sequence.
+    pub fn new(seed_opt: Option<u64>, pubkey: Option<&PublicKey>) -> Self {
+        let seed = if let Some(seed) = seed_opt {
+            if let Some(pk) = pubkey {
+                let mut hasher = DefaultHasher::new();
+                let mut combined = pk.serialize().to_vec();
+                combined.extend_from_slice(&seed.to_le_bytes());
+                combined.hash(&mut hasher);
+                hasher.finish()
+            } else {
+                seed
+            }
         } else {
-            Self(Arc::new(StdMutex::new(ChaCha8Rng::from_entropy())))
-        }
-    }
+            // If no seed is provided, use a random one.
+            rand::random()
+        };
 
-    /// Creates a new MutRng that is salted with a pubkey. This ensures that each node
-    /// gets a deterministic but different RNG sequence.
-    pub fn salted(pubkey: &PublicKey, seed: u64) -> Self {
-        let mut hasher = DefaultHasher::new();
-
-        // Get pubkey bytes and concatenate with seed bytes.
-        let mut combined = pubkey.serialize().to_vec();
-        combined.extend_from_slice(&seed.to_le_bytes());
-
-        combined.hash(&mut hasher);
-        let salt = hasher.finish();
-        Self(Arc::new(StdMutex::new(ChaCha8Rng::seed_from_u64(salt))))
+        Self(Arc::new(StdMutex::new(ChaCha8Rng::seed_from_u64(seed))))
     }
 }
 
@@ -949,11 +948,13 @@ impl Simulation {
             active_nodes.insert(node_info.pubkey, (node_info, capacity));
         }
 
-        // Create a base RNG from the seed for the network generator.
-        let base_rng = MutRng::new(self.cfg.seed);
+        // Create a network generator with a shared RNG for all nodes.
         let network_generator = Arc::new(Mutex::new(
-            NetworkGraphView::new(active_nodes.values().cloned().collect(), base_rng.clone())
-                .map_err(SimulationError::RandomActivityError)?,
+            NetworkGraphView::new(
+                active_nodes.values().cloned().collect(),
+                MutRng::new(self.cfg.seed, None),
+            )
+            .map_err(SimulationError::RandomActivityError)?,
         ));
 
         log::info!(
@@ -963,7 +964,7 @@ impl Simulation {
 
         for (node_info, capacity) in active_nodes.values() {
             // Create a salted RNG for this node based on its pubkey.
-            let salted_rng = MutRng::salted(&node_info.pubkey, self.cfg.seed.unwrap_or(0));
+            let salted_rng = MutRng::new(self.cfg.seed, Some(&node_info.pubkey));
             generators.push(ExecutorKit {
                 source_info: node_info.clone(),
                 network_generator: network_generator.clone(),
@@ -1525,8 +1526,8 @@ mod tests {
         let seeds = vec![u64::MIN, u64::MAX];
 
         for seed in seeds {
-            let mut_rng_1 = MutRng::new(Some(seed));
-            let mut_rng_2 = MutRng::new(Some(seed));
+            let mut_rng_1 = MutRng::new(Some(seed), None);
+            let mut_rng_2 = MutRng::new(Some(seed), None);
 
             let mut rng_1 = mut_rng_1.0.lock().unwrap();
             let mut rng_2 = mut_rng_2.0.lock().unwrap();
@@ -1537,8 +1538,8 @@ mod tests {
 
     #[test]
     fn create_unseeded_mut_rng() {
-        let mut_rng_1 = MutRng::new(None);
-        let mut_rng_2 = MutRng::new(None);
+        let mut_rng_1 = MutRng::new(None, None);
+        let mut_rng_2 = MutRng::new(None, None);
 
         let mut rng_1 = mut_rng_1.0.lock().unwrap();
         let mut rng_2 = mut_rng_2.0.lock().unwrap();
@@ -1551,6 +1552,8 @@ mod tests {
         let (_, pk1) = test_utils::get_random_keypair();
         let (_, pk2) = test_utils::get_random_keypair();
 
+        let salted_rng_1 = MutRng::new(Some(42), Some(&pk1));
+        let salted_rng_2 = MutRng::new(Some(42), Some(&pk2));
 
         let mut seq1 = Vec::new();
         let mut seq2 = Vec::new();
@@ -1565,7 +1568,7 @@ mod tests {
 
         assert_ne!(seq1, seq2);
 
-        let salted_rng1_again = MutRng::salted(&pk1, 42);
+        let salted_rng1_again = MutRng::new(Some(42), Some(&pk1));
         let mut rng1_again = salted_rng1_again.0.lock().unwrap();
         let mut seq1_again = Vec::new();
 
