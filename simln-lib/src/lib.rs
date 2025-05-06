@@ -507,10 +507,10 @@ impl MutRng {
 
     /// Creates a new MutRng that is salted with a pubkey. This ensures that each node
     /// gets a deterministic but different RNG sequence.
-    pub fn salted(&self, pubkey: &PublicKey, seed: u64) -> Self {
+    pub fn salted(pubkey: &PublicKey, seed: u64) -> Self {
         let mut hasher = DefaultHasher::new();
 
-        // Get pubkey bytes and concatenate with seed bytes
+        // Get pubkey bytes and concatenate with seed bytes.
         let mut combined = pubkey.serialize().to_vec();
         combined.extend_from_slice(&seed.to_le_bytes());
 
@@ -949,7 +949,7 @@ impl Simulation {
             active_nodes.insert(node_info.pubkey, (node_info, capacity));
         }
 
-        // Create a base RNG from the seed for the network generator
+        // Create a base RNG from the seed for the network generator.
         let base_rng = MutRng::new(self.cfg.seed);
         let network_generator = Arc::new(Mutex::new(
             NetworkGraphView::new(active_nodes.values().cloned().collect(), base_rng.clone())
@@ -962,8 +962,8 @@ impl Simulation {
         );
 
         for (node_info, capacity) in active_nodes.values() {
-            // Create a salted RNG for this node based on its pubkey
-            let salted_rng = base_rng.salted(&node_info.pubkey, self.cfg.seed.unwrap_or(0));
+            // Create a salted RNG for this node based on its pubkey.
+            let salted_rng = MutRng::salted(&node_info.pubkey, self.cfg.seed.unwrap_or(0));
             generators.push(ExecutorKit {
                 source_info: node_info.clone(),
                 network_generator: network_generator.clone(),
@@ -1005,7 +1005,7 @@ impl Simulation {
 
             // Generate a consumer for the receiving end of the channel. It takes the event receiver that it'll pull
             // events from and the results sender to report the events it has triggered for further monitoring.
-            // ce: consume event
+            // ce: consume event.
             let ce_listener = self.shutdown_listener.clone();
             let ce_shutdown = self.shutdown_trigger.clone();
             let ce_output_sender = output_sender.clone();
@@ -1548,13 +1548,9 @@ mod tests {
 
     #[test]
     fn create_salted_mut_rng() {
-        let base_rng = MutRng::new(Some(42));
-
         let (_, pk1) = test_utils::get_random_keypair();
         let (_, pk2) = test_utils::get_random_keypair();
 
-        let salted_rng_1 = base_rng.salted(&pk1, 42);
-        let salted_rng_2 = base_rng.salted(&pk2, 42);
 
         let mut seq1 = Vec::new();
         let mut seq2 = Vec::new();
@@ -1569,7 +1565,7 @@ mod tests {
 
         assert_ne!(seq1, seq2);
 
-        let salted_rng1_again = base_rng.salted(&pk1, 42);
+        let salted_rng1_again = MutRng::salted(&pk1, 42);
         let mut rng1_again = salted_rng1_again.0.lock().unwrap();
         let mut seq1_again = Vec::new();
 
@@ -1769,9 +1765,8 @@ mod tests {
         let result = simulation.validate_node_network().await;
 
         assert!(result.is_err());
-        assert!(
-            matches!(result, Err(LightningError::ValidationError(msg)) if msg.contains("we don't control any nodes"))
-        );
+        assert!(matches!(result,
+            Err(LightningError::ValidationError(msg)) if msg.contains("we don't control any nodes")));
     }
 
     /// Verifies that a node on Bitcoin mainnet fails validation, expecting a `ValidationError`
@@ -1786,9 +1781,8 @@ mod tests {
         let result = simulation.validate_node_network().await;
 
         assert!(result.is_err());
-        assert!(
-            matches!(result, Err(LightningError::ValidationError(msg)) if msg.contains("mainnet is not supported"))
-        );
+        assert!(matches!(result,
+            Err(LightningError::ValidationError(msg)) if msg.contains("mainnet is not supported")));
     }
 
     /// Verifies that nodes on Testnet and Regtest fail validation, expecting a
@@ -1803,9 +1797,8 @@ mod tests {
         let result = simulation.validate_node_network().await;
 
         assert!(result.is_err());
-        assert!(
-            matches!(result, Err(LightningError::ValidationError(msg)) if msg.contains("nodes are not on the same network"))
-        );
+        assert!(matches!(result,
+            Err(LightningError::ValidationError(msg)) if msg.contains("nodes are not on the same network")));
     }
 
     /// Verifies that three Testnet nodes pass validation, expecting an `Ok` result.
