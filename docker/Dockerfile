@@ -1,7 +1,8 @@
 # Run from the root of the project
 
 # Use the rust image as the base image for the build stage
-FROM rust:latest AS base
+FROM rust:1.85.0 AS base
+
 # buildkit will provide this automatically, no need to pass it in
 ARG TARGETARCH
 
