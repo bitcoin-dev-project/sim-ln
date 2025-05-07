@@ -6,6 +6,7 @@ use bitcoin::constants::ChainHash;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Network, ScriptBuf, TxOut};
 use lightning::ln::chan_utils::make_funding_redeemscript;
+use serde::{Deserialize, Serialize};
 use std::collections::{hash_map::Entry, HashMap};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -109,7 +110,7 @@ struct Htlc {
 /// Represents one node in the channel's forwarding policy and restrictions. Note that this doesn't directly map to
 /// a single concept in the protocol, a few things have been combined for the sake of simplicity. Used to manage the
 /// lightning "state machine" and check that HTLCs are added in accordance of the advertised policy.
-#[derive(Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelPolicy {
     pub pubkey: PublicKey,
     pub max_htlc_count: u64,
@@ -422,6 +423,13 @@ impl SimulatedChannel {
     ) -> Result<(), ForwardingError> {
         self.get_node(forwarding_node)?
             .check_htlc_forward(cltv_delta, amount_msat, fee_msat)
+    }
+
+    pub fn create_simulated_nodes(&self) -> (NodeInfo, NodeInfo) {
+        (
+            node_info(self.node_1.policy.pubkey),
+            node_info(self.node_2.policy.pubkey),
+        )
     }
 }
 

@@ -97,7 +97,7 @@ impl std::fmt::Display for NodeId {
 }
 
 /// Represents a short channel ID, expressed as a struct so that we can implement display for the trait.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Copy, Serialize, Deserialize)]
 pub struct ShortChannelID(u64);
 
 /// Utility function to easily convert from u64 to `ShortChannelID`.
@@ -549,8 +549,6 @@ pub struct Simulation {
     cfg: SimulationCfg,
     /// The lightning node that is being simulated.
     nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
-    /// The activity that are to be executed on the node.
-    activity: Vec<ActivityDefinition>,
     /// Results logger that holds the simulation statistics.
     results: Arc<Mutex<PaymentResultLogger>>,
     /// Track all tasks spawned for use in the simulation. When used in the `run` method, it will wait for
@@ -584,14 +582,13 @@ impl Simulation {
     pub fn new(
         cfg: SimulationCfg,
         nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
-        activity: Vec<ActivityDefinition>,
         tasks: TaskTracker,
+        shutdown_trigger: Trigger,
+        shutdown_listener: Listener,
     ) -> Self {
-        let (shutdown_trigger, shutdown_listener) = triggered::trigger();
         Self {
             cfg,
             nodes,
-            activity,
             results: Arc::new(Mutex::new(PaymentResultLogger::new())),
             tasks,
             shutdown_trigger,
@@ -602,9 +599,12 @@ impl Simulation {
     /// validate_activity validates that the user-provided activity description is achievable for the network that
     /// we're working with. If no activity description is provided, then it ensures that we have configured a network
     /// that is suitable for random activity generation.
-    async fn validate_activity(&self) -> Result<(), LightningError> {
+    async fn validate_activity(
+        &self,
+        activity: &[ActivityDefinition],
+    ) -> Result<(), LightningError> {
         // For now, empty activity signals random activity generation
-        if self.activity.is_empty() {
+        if activity.is_empty() {
             if self.nodes.len() <= 1 {
                 return Err(LightningError::ValidationError(
                     "At least two nodes required for random activity generation.".to_string(),
@@ -622,7 +622,7 @@ impl Simulation {
             }
         }
 
-        for payment_flow in self.activity.iter() {
+        for payment_flow in activity.iter() {
             if payment_flow.amount_msat.value() == 0 {
                 return Err(LightningError::ValidationError(
                     "We do not allow defined activity amount_msat with zero values".to_string(),
@@ -688,8 +688,8 @@ impl Simulation {
     /// run until the simulation completes or we hit an error.
     /// Note that it will wait for the tasks in self.tasks to complete
     /// before returning.
-    pub async fn run(&self) -> Result<(), SimulationError> {
-        self.internal_run().await?;
+    pub async fn run(&self, activity: &[ActivityDefinition]) -> Result<(), SimulationError> {
+        self.internal_run(activity).await?;
         // Close our TaskTracker and wait for any background tasks
         // spawned during internal_run to complete.
         self.tasks.close();
@@ -697,7 +697,7 @@ impl Simulation {
         Ok(())
     }
 
-    async fn internal_run(&self) -> Result<(), SimulationError> {
+    async fn internal_run(&self, activity: &[ActivityDefinition]) -> Result<(), SimulationError> {
         if let Some(total_time) = self.cfg.total_time {
             log::info!("Running the simulation for {}s.", total_time.as_secs());
         } else {
@@ -705,11 +705,11 @@ impl Simulation {
         }
 
         self.validate_node_network().await?;
-        self.validate_activity().await?;
+        self.validate_activity(activity).await?;
 
         log::info!(
             "Simulating {} activity on {} nodes.",
-            self.activity.len(),
+            activity.len(),
             self.nodes.len()
         );
 
@@ -723,7 +723,7 @@ impl Simulation {
         self.run_data_collection(event_receiver, &self.tasks);
 
         // Get an execution kit per activity that we need to generate and spin up consumers for each source node.
-        let activities = match self.activity_executors().await {
+        let activities = match self.activity_executors(activity).await {
             Ok(a) => a,
             Err(e) => {
                 // If we encounter an error while setting up the activity_executors,
@@ -871,13 +871,16 @@ impl Simulation {
         log::debug!("Simulator data collection set up.");
     }
 
-    async fn activity_executors(&self) -> Result<Vec<ExecutorKit>, SimulationError> {
+    async fn activity_executors(
+        &self,
+        activity: &[ActivityDefinition],
+    ) -> Result<Vec<ExecutorKit>, SimulationError> {
         let mut generators = Vec::new();
 
         // Note: when we allow configuring both defined and random activity, this will no longer be an if/else, we'll
         // just populate with each type as configured.
-        if !self.activity.is_empty() {
-            for description in self.activity.iter() {
+        if !activity.is_empty() {
+            for description in activity.iter() {
                 let activity_generator = DefinedPaymentActivity::new(
                     description.destination.clone(),
                     description
@@ -1603,8 +1606,8 @@ mod tests {
     #[tokio::test]
     async fn test_validate_activity_empty_with_sufficient_nodes() {
         let (_, clients) = LightningTestNodeBuilder::new(3).build_full();
-        let simulation = test_utils::create_simulation(clients, vec![]);
-        let result = simulation.validate_activity().await;
+        let simulation = test_utils::create_simulation(clients);
+        let result = simulation.validate_activity(&[]).await;
         assert!(result.is_ok());
     }
 
@@ -1613,12 +1616,13 @@ mod tests {
     #[tokio::test]
     async fn test_validate_activity_empty_with_insufficient_nodes() {
         let (_, clients) = LightningTestNodeBuilder::new(1).build_full();
-        let simulation = test_utils::create_simulation(clients, vec![]);
-        let result = simulation.validate_activity().await;
+        let simulation = test_utils::create_simulation(clients);
+        let result = simulation.validate_activity(&[]).await;
 
         assert!(result.is_err());
-        assert!(matches!(result, 
-            Err(LightningError::ValidationError(msg)) if msg.contains("At least two nodes required")));
+        assert!(
+            matches!(result, Err(LightningError::ValidationError(msg)) if msg.contains("At least two nodes required"))
+        );
     }
 
     /// Verifies that an empty activity fails when one of two nodes doesn’t support keysend,
@@ -1628,12 +1632,13 @@ mod tests {
         let (_, clients) = LightningTestNodeBuilder::new(2)
             .with_keysend_nodes(vec![0])
             .build_full();
-        let simulation = test_utils::create_simulation(clients, vec![]);
-        let result = simulation.validate_activity().await;
+        let simulation = test_utils::create_simulation(clients);
+        let result = simulation.validate_activity(&[]).await;
 
         assert!(result.is_err());
-        assert!(matches!(result, 
-            Err(LightningError::ValidationError(msg)) if msg.contains("must support keysend")));
+        assert!(
+            matches!(result, Err(LightningError::ValidationError(msg)) if msg.contains("must support keysend"))
+        );
     }
 
     /// Verifies that an activity fails when the source node isn’t in the clients map,
@@ -1646,12 +1651,13 @@ mod tests {
         let dest_node = nodes[0].clone();
 
         let activity = test_utils::create_activity(missing_node, dest_node, 1000);
-        let simulation = test_utils::create_simulation(clients, vec![activity]);
-        let result = simulation.validate_activity().await;
+        let simulation = test_utils::create_simulation(clients);
+        let result = simulation.validate_activity(&vec![activity]).await;
 
         assert!(result.is_err());
-        assert!(matches!(result, 
-            Err(LightningError::ValidationError(msg)) if msg.contains("Source node not found")));
+        assert!(
+            matches!(result, Err(LightningError::ValidationError(msg)) if msg.contains("Source node not found"))
+        );
     }
 
     /// Verifies that an activity fails when the destination lacks keysend support,
@@ -1663,12 +1669,13 @@ mod tests {
         let dest_node = dest_nodes.first().unwrap().0.clone();
 
         let activity = test_utils::create_activity(nodes[0].clone(), dest_node, 1000);
-        let simulation = test_utils::create_simulation(clients, vec![activity]);
-        let result = simulation.validate_activity().await;
+        let simulation = test_utils::create_simulation(clients);
+        let result = simulation.validate_activity(&vec![activity]).await;
 
         assert!(result.is_err());
-        assert!(matches!(result, 
-            Err(LightningError::ValidationError(msg)) if msg.contains("does not support keysend")));
+        assert!(
+            matches!(result, Err(LightningError::ValidationError(msg)) if msg.contains("does not support keysend"))
+        );
     }
 
     /// Verifies that an activity with a non-zero amount between two keysend-enabled nodes
@@ -1681,8 +1688,8 @@ mod tests {
         dest_node.features.set_keysend_optional();
 
         let activity = test_utils::create_activity(nodes[0].clone(), dest_node, 1000);
-        let simulation = test_utils::create_simulation(clients, vec![activity]);
-        let result = simulation.validate_activity().await;
+        let simulation = test_utils::create_simulation(clients);
+        let result = simulation.validate_activity(&vec![activity]).await;
 
         assert!(result.is_ok());
     }
@@ -1694,12 +1701,13 @@ mod tests {
         let (nodes, clients) = LightningTestNodeBuilder::new(2).build_full();
 
         let activity = test_utils::create_activity(nodes[0].clone(), nodes[1].clone(), 0);
-        let simulation = test_utils::create_simulation(clients, vec![activity]);
-        let result = simulation.validate_activity().await;
+        let simulation = test_utils::create_simulation(clients);
+        let result = simulation.validate_activity(&vec![activity]).await;
 
         assert!(result.is_err());
-        assert!(matches!(result, 
-            Err(LightningError::ValidationError(msg)) if msg.contains("zero values")));
+        assert!(
+            matches!(result, Err(LightningError::ValidationError(msg)) if msg.contains("zero values"))
+        );
     }
 
     /// Verifies that validation fails with no nodes, expecting a `ValidationError` with
@@ -1708,12 +1716,13 @@ mod tests {
     async fn test_validate_node_network_empty_nodes() {
         let empty_nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
 
-        let simulation = test_utils::create_simulation(empty_nodes, vec![]);
+        let simulation = test_utils::create_simulation(empty_nodes);
         let result = simulation.validate_node_network().await;
 
         assert!(result.is_err());
-        assert!(matches!(result, 
-            Err(LightningError::ValidationError(msg)) if msg.contains("we don't control any nodes")));
+        assert!(
+            matches!(result, Err(LightningError::ValidationError(msg)) if msg.contains("we don't control any nodes"))
+        );
     }
 
     /// Verifies that a node on Bitcoin mainnet fails validation, expecting a `ValidationError`
@@ -1724,12 +1733,13 @@ mod tests {
             .with_networks(vec![Network::Bitcoin])
             .build_clients_only();
 
-        let simulation = test_utils::create_simulation(clients, vec![]);
+        let simulation = test_utils::create_simulation(clients);
         let result = simulation.validate_node_network().await;
 
         assert!(result.is_err());
-        assert!(matches!(result, 
-            Err(LightningError::ValidationError(msg)) if msg.contains("mainnet is not supported")));
+        assert!(
+            matches!(result, Err(LightningError::ValidationError(msg)) if msg.contains("mainnet is not supported"))
+        );
     }
 
     /// Verifies that nodes on Testnet and Regtest fail validation, expecting a
@@ -1740,12 +1750,13 @@ mod tests {
             .with_networks(vec![Network::Testnet, Network::Regtest])
             .build_clients_only();
 
-        let simulation = test_utils::create_simulation(clients, vec![]);
+        let simulation = test_utils::create_simulation(clients);
         let result = simulation.validate_node_network().await;
 
         assert!(result.is_err());
-        assert!(matches!(result, 
-            Err(LightningError::ValidationError(msg)) if msg.contains("nodes are not on the same network")));
+        assert!(
+            matches!(result, Err(LightningError::ValidationError(msg)) if msg.contains("nodes are not on the same network"))
+        );
     }
 
     /// Verifies that three Testnet nodes pass validation, expecting an `Ok` result.
@@ -1755,7 +1766,7 @@ mod tests {
             .with_networks(vec![Network::Testnet, Network::Testnet, Network::Testnet])
             .build_clients_only();
 
-        let simulation = test_utils::create_simulation(clients, vec![]);
+        let simulation = test_utils::create_simulation(clients);
         let result = simulation.validate_node_network().await;
 
         assert!(result.is_ok());
@@ -1767,7 +1778,7 @@ mod tests {
             .with_networks(vec![Network::Testnet])
             .build_clients_only();
 
-        let simulation = test_utils::create_simulation(clients, vec![]);
+        let simulation = test_utils::create_simulation(clients);
         let result = simulation.validate_node_network().await;
 
         assert!(result.is_ok());
