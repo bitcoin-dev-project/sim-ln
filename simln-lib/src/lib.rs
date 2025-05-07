@@ -174,6 +174,8 @@ pub type Interval = ValueOrRange<u16>;
 /// This is constructed during activity validation and passed along to the [Simulation].
 #[derive(Debug, Clone)]
 pub struct ActivityDefinition {
+    /// Optional identifier for this activity.
+    pub name: Option<String>,
     /// The source of the payment.
     pub source: NodeInfo,
     /// The destination of the payment.
@@ -573,6 +575,7 @@ pub struct WriteResults {
 /// ExecutorKit contains the components required to spin up an activity configured by the user, to be used to
 /// spin up the appropriate producers and consumers for the activity.
 struct ExecutorKit {
+    name: Option<String>,
     source_info: NodeInfo,
     /// We use an arc mutex here because some implementations of the trait will be very expensive to clone.
     /// See [NetworkGraphView] for details.
@@ -879,6 +882,7 @@ impl Simulation {
         if !self.activity.is_empty() {
             for description in self.activity.iter() {
                 let activity_generator = DefinedPaymentActivity::new(
+                    description.name.clone(),
                     description.destination.clone(),
                     description
                         .start_secs
@@ -889,6 +893,7 @@ impl Simulation {
                 );
 
                 generators.push(ExecutorKit {
+                    name: description.name.clone(),
                     source_info: description.source.clone(),
                     // Defined activities have very simple generators, so the traits required are implemented on
                     // a single struct which we just cheaply clone.
@@ -947,6 +952,7 @@ impl Simulation {
 
         for (node_info, capacity) in active_nodes.values() {
             generators.push(ExecutorKit {
+                name: None,
                 source_info: node_info.clone(),
                 network_generator: network_generator.clone(),
                 payment_generator: Box::new(
@@ -1031,9 +1037,11 @@ impl Simulation {
             let pe_sender = sender.clone();
             tasks.spawn(async move {
                 let source = executor.source_info.clone();
+                let name = executor.name.as_deref().unwrap();
 
                 log::info!(
-                    "Starting activity producer for {}: {}.",
+                    "[{}] Starting activity producer for {}: {}.",
+                    name,
                     source,
                     executor.payment_generator
                 );
@@ -1644,8 +1652,9 @@ mod tests {
         let missing_nodes = test_utils::create_nodes(1, 100_000);
         let missing_node = missing_nodes.first().unwrap().0.clone();
         let dest_node = nodes[0].clone();
+        let activity_name = None;
 
-        let activity = test_utils::create_activity(missing_node, dest_node, 1000);
+        let activity = test_utils::create_activity(activity_name, missing_node, dest_node, 1000);
         let simulation = test_utils::create_simulation(clients, vec![activity]);
         let result = simulation.validate_activity().await;
 
@@ -1661,8 +1670,9 @@ mod tests {
         let (nodes, clients) = LightningTestNodeBuilder::new(1).build_full();
         let dest_nodes = test_utils::create_nodes(1, 100_000);
         let dest_node = dest_nodes.first().unwrap().0.clone();
+        let activity_name = None;
 
-        let activity = test_utils::create_activity(nodes[0].clone(), dest_node, 1000);
+        let activity = test_utils::create_activity(activity_name, nodes[0].clone(), dest_node, 1000);
         let simulation = test_utils::create_simulation(clients, vec![activity]);
         let result = simulation.validate_activity().await;
 
@@ -1678,9 +1688,10 @@ mod tests {
         let (nodes, clients) = LightningTestNodeBuilder::new(1).build_full();
         let dest_nodes = test_utils::create_nodes(1, 100_000);
         let mut dest_node = dest_nodes.first().unwrap().0.clone();
+        let activity_name = None;
         dest_node.features.set_keysend_optional();
 
-        let activity = test_utils::create_activity(nodes[0].clone(), dest_node, 1000);
+        let activity = test_utils::create_activity(activity_name, nodes[0].clone(), dest_node, 1000);
         let simulation = test_utils::create_simulation(clients, vec![activity]);
         let result = simulation.validate_activity().await;
 
@@ -1692,8 +1703,9 @@ mod tests {
     #[tokio::test]
     async fn test_validate_zero_amount_no_valid() {
         let (nodes, clients) = LightningTestNodeBuilder::new(2).build_full();
+        let activity_name = None;
 
-        let activity = test_utils::create_activity(nodes[0].clone(), nodes[1].clone(), 0);
+        let activity = test_utils::create_activity(activity_name, nodes[0].clone(), nodes[1].clone(), 0);
         let simulation = test_utils::create_simulation(clients, vec![activity]);
         let result = simulation.validate_activity().await;
 

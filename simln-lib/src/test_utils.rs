@@ -207,11 +207,13 @@ pub fn create_simulation(
     )
 }
 pub fn create_activity(
+    name: Option<String>,
     source: NodeInfo,
     destination: NodeInfo,
     amount_msat: u64,
 ) -> ActivityDefinition {
     ActivityDefinition {
+        name,
         source,
         destination,
         start_secs: None,

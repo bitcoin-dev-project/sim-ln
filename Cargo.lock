@@ -2570,6 +2570,7 @@ dependencies = [
  "log",
  "openssl",
  "rand",
+ "regex",
  "serde",
  "serde_json",
  "simln-lib",
