@@ -10,6 +10,7 @@ use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 use tokio_util::task::TaskTracker;
 
+use crate::clock::SystemClock;
 use crate::{
     ActivityDefinition, LightningError, LightningNode, NodeInfo, PaymentGenerationError,
     PaymentGenerator, Simulation, SimulationCfg, ValueOrRange,
@@ -195,12 +196,15 @@ impl LightningTestNodeBuilder {
 
 /// Creates a new simulation with the given clients and activity definitions.
 /// Note: This sets a runtime for the simulation of 0, so run() will exit immediately.
-pub fn create_simulation(clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>) -> Simulation {
+pub fn create_simulation(
+    clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
+) -> Simulation<SystemClock> {
     let (shutdown_trigger, shutdown_listener) = triggered::trigger();
     Simulation::new(
         SimulationCfg::new(Some(0), 0, 0.0, None, None),
         clients,
         TaskTracker::new(),
+        Arc::new(SystemClock {}),
         shutdown_trigger,
         shutdown_listener,
     )

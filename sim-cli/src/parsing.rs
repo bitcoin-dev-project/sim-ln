@@ -3,6 +3,7 @@ use bitcoin::secp256k1::PublicKey;
 use clap::{builder::TypedValueParser, Parser};
 use log::LevelFilter;
 use serde::{Deserialize, Serialize};
+use simln_lib::clock::SimulationClock;
 use simln_lib::sim_node::{
     ln_node_from_graph, populate_network_graph, ChannelPolicy, SimGraph, SimulatedChannel,
 };
@@ -83,6 +84,10 @@ pub struct Cli {
     /// Seed to run random activity generator deterministically
     #[clap(long, short)]
     pub fix_seed: Option<u64>,
+    /// A multiplier to wall time to speed up the simulation's clock. Only available when when running on a network of
+    /// simulated nodes.
+    #[clap(long)]
+    pub speedup_clock: Option<u16>,
 }
 
 impl Cli {
@@ -102,6 +107,12 @@ impl Cli {
                 nodes or sim_graph to run with simulated nodes"
             ));
         }
+        if !sim_params.nodes.is_empty() && self.speedup_clock.is_some() {
+            return Err(anyhow!(
+                "Clock speedup is only allowed when running on a simulated network"
+            ));
+        }
+
         Ok(())
     }
 }
@@ -198,7 +209,7 @@ pub async fn create_simulation_with_network(
     cli: &Cli,
     sim_params: &SimParams,
     tasks: TaskTracker,
-) -> Result<(Simulation, Vec<ActivityDefinition>), anyhow::Error> {
+) -> Result<(Simulation<SimulationClock>, Vec<ActivityDefinition>), anyhow::Error> {
     let cfg: SimulationCfg = SimulationCfg::try_from(cli)?;
     let SimParams {
         nodes: _,
@@ -228,11 +239,13 @@ pub async fn create_simulation_with_network(
             .map_err(|e| SimulationError::SimulatedNetworkError(format!("{:?}", e)))?,
     ));
 
+    let clock = Arc::new(SimulationClock::new(cli.speedup_clock.unwrap_or(1))?);
+
     // Copy all simulated channels into a read-only routing graph, allowing to pathfind for
     // individual payments without locking th simulation graph (this is a duplication of the channels,
     // but the performance tradeoff is worthwhile for concurrent pathfinding).
     let routing_graph = Arc::new(
-        populate_network_graph(channels)
+        populate_network_graph(channels, clock.clone())
             .map_err(|e| SimulationError::SimulatedNetworkError(format!("{:?}", e)))?,
     );
 
@@ -241,7 +254,14 @@ pub async fn create_simulation_with_network(
         get_validated_activities(&nodes, nodes_info, sim_params.activity.clone()).await?;
 
     Ok((
-        Simulation::new(cfg, nodes, tasks, shutdown_trigger, shutdown_listener),
+        Simulation::new(
+            cfg,
+            nodes,
+            tasks,
+            clock,
+            shutdown_trigger,
+            shutdown_listener,
+        ),
         validated_activities,
     ))
 }
@@ -252,7 +272,7 @@ pub async fn create_simulation(
     cli: &Cli,
     sim_params: &SimParams,
     tasks: TaskTracker,
-) -> Result<(Simulation, Vec<ActivityDefinition>), anyhow::Error> {
+) -> Result<(Simulation<SimulationClock>, Vec<ActivityDefinition>), anyhow::Error> {
     let cfg: SimulationCfg = SimulationCfg::try_from(cli)?;
     let SimParams {
         nodes,
@@ -267,7 +287,16 @@ pub async fn create_simulation(
         get_validated_activities(&clients, clients_info, sim_params.activity.clone()).await?;
 
     Ok((
-        Simulation::new(cfg, clients, tasks, shutdown_trigger, shutdown_listener),
+        Simulation::new(
+            cfg,
+            clients,
+            tasks,
+            // When running on a real network, the underlying node may use wall time so we always use a clock with no
+            // speedup.
+            Arc::new(SimulationClock::new(1)?),
+            shutdown_trigger,
+            shutdown_listener,
+        ),
         validated_activities,
     ))
 }
