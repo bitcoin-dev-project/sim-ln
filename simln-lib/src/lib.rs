@@ -258,6 +258,9 @@ pub enum LightningError {
     /// Error that occurred while listing channels.
     #[error("List channels error: {0}")]
     ListChannelsError(String),
+    /// Error that occurred while getting graph.
+    #[error("Get graph error: {0}")]
+    GetGraphError(String),
 }
 
 /// Information about a Lightning Network node.
@@ -286,6 +289,33 @@ impl Display for NodeInfo {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ChannelInfo {
+    pub channel_id: ShortChannelID,
+    pub capacity_msat: u64,
+}
+
+#[derive(Debug, Clone)]
+/// Graph represents the network graph of the simulated network and is useful for efficient lookups.
+pub struct Graph {
+    // Store nodes' information keyed by their public key.
+    pub nodes_by_pk: HashMap<PublicKey, NodeInfo>,
+}
+
+impl Graph {
+    pub fn new() -> Self {
+        Graph {
+            nodes_by_pk: HashMap::new(),
+        }
+    }
+}
+
+impl Default for Graph {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// LightningNode represents the functionality that is required to execute events on a lightning node.
 #[async_trait]
 pub trait LightningNode: Send {
@@ -310,6 +340,8 @@ pub trait LightningNode: Send {
     /// Lists all channels, at present only returns a vector of channel capacities in msat because no further
     /// information is required.
     async fn list_channels(&mut self) -> Result<Vec<u64>, LightningError>;
+    /// Get the network graph from the point of view of a given node.
+    async fn get_graph(&mut self) -> Result<Graph, LightningError>;
 }
 
 /// Represents an error that occurs when generating a destination for a payment.

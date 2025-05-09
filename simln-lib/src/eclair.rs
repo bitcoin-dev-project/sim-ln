@@ -1,5 +1,6 @@
 use crate::{
-    serializers, LightningError, LightningNode, NodeId, NodeInfo, PaymentOutcome, PaymentResult,
+    serializers, Graph, LightningError, LightningNode, NodeId, NodeInfo, PaymentOutcome,
+    PaymentResult,
 };
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
@@ -243,6 +244,29 @@ impl LightningNode for EclairNode {
 
         Ok(capacities_msat)
     }
+
+    async fn get_graph(&mut self) -> Result<Graph, LightningError> {
+        let nodes: NodesResponse = self
+            .client
+            .request("nodes", None)
+            .await
+            .map_err(|err| LightningError::GetNodeInfoError(err.to_string()))?;
+
+        let mut nodes_by_pk: HashMap<PublicKey, NodeInfo> = HashMap::new();
+
+        for node in nodes {
+            nodes_by_pk.insert(
+                PublicKey::from_str(&node.node_id).expect("Public Key not valid"),
+                NodeInfo {
+                    pubkey: PublicKey::from_str(&node.node_id).expect("Public Key not valid"),
+                    alias: node.alias.clone(),
+                    features: parse_json_to_node_features(&node.features),
+                },
+            );
+        }
+
+        Ok(Graph { nodes_by_pk })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -288,7 +312,16 @@ struct NodeResponse {
     announcement: Announcement,
 }
 
+#[derive(Debug, Deserialize)]
+struct NodeInGraph {
+    #[serde(rename = "nodeId")]
+    node_id: String,
+    alias: String,
+    features: Value,
+}
+
 type ChannelsResponse = Vec<Channel>;
+type NodesResponse = Vec<NodeInGraph>;
 
 #[derive(Debug, Deserialize)]
 struct Channel {

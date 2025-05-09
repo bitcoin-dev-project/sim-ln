@@ -12,7 +12,7 @@ use tokio_util::task::TaskTracker;
 
 use crate::clock::SystemClock;
 use crate::{
-    ActivityDefinition, LightningError, LightningNode, NodeInfo, PaymentGenerationError,
+    ActivityDefinition, Graph, LightningError, LightningNode, NodeInfo, PaymentGenerationError,
     PaymentGenerator, Simulation, SimulationCfg, ValueOrRange,
 };
 
@@ -89,6 +89,7 @@ mock! {
             ) -> Result<crate::PaymentResult, LightningError>;
         async fn get_node_info(&mut self, node_id: &PublicKey) -> Result<NodeInfo, LightningError>;
         async fn list_channels(&mut self) -> Result<Vec<u64>, LightningError>;
+        async fn get_graph(&mut self) -> Result<Graph, LightningError>;
     }
 }
 

@@ -15,7 +15,6 @@ use simln_lib::{
 use simln_lib::{ShortChannelID, SimulationError};
 use std::collections::HashMap;
 use std::fs;
-use std::ops::AsyncFn;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -177,6 +176,15 @@ pub struct ActivityParser {
     /// The amount of m_sat to used in this payment.
     #[serde(with = "serializers::serde_value_or_range")]
     pub amount_msat: Amount,
+}
+
+struct ActivityValidationParams {
+    pk_node_map: HashMap<PublicKey, NodeInfo>,
+    alias_node_map: HashMap<String, NodeInfo>,
+    graph_nodes_by_pk: HashMap<PublicKey, NodeInfo>,
+    // Store graph nodes' information keyed by their alias.
+    // An alias can be mapped to multiple nodes because it is not a unique identifier.
+    graph_nodes_by_alias: HashMap<String, Vec<NodeInfo>>,
 }
 
 impl TryFrom<&Cli> for SimulationCfg {
@@ -378,15 +386,20 @@ fn add_node_to_maps(nodes: &HashMap<PublicKey, NodeInfo>) -> Result<NodeMapping,
 /// have been configured.
 async fn validate_activities(
     activity: Vec<ActivityParser>,
-    pk_node_map: HashMap<PublicKey, NodeInfo>,
-    alias_node_map: HashMap<String, NodeInfo>,
-    get_node_info: impl AsyncFn(&PublicKey) -> Result<NodeInfo, LightningError>,
+    activity_validation_params: ActivityValidationParams,
 ) -> Result<Vec<ActivityDefinition>, LightningError> {
     let mut validated_activities = vec![];
 
+    let ActivityValidationParams {
+        pk_node_map,
+        alias_node_map,
+        graph_nodes_by_pk,
+        graph_nodes_by_alias,
+    } = activity_validation_params;
+
     // Make all the activities identifiable by PK internally
     for act in activity.into_iter() {
-        // We can only map aliases to nodes we control, so if either the source or destination alias
+        // We can only map source aliases to nodes we control, so if the source alias
         // is not in alias_node_map, we fail
         let source = if let Some(source) = match &act.source {
             NodeId::PublicKey(pk) => pk_node_map.get(pk),
@@ -402,8 +415,21 @@ async fn validate_activities(
 
         let destination = match &act.destination {
             NodeId::Alias(a) => {
-                if let Some(info) = alias_node_map.get(a) {
-                    info.clone()
+                if let Some(node_info) = alias_node_map.get(a) {
+                    node_info.clone()
+                } else if let Some(node_infos) = graph_nodes_by_alias.get(a) {
+                    if node_infos.len() > 1 {
+                        let pks: Vec<PublicKey> = node_infos
+                            .iter()
+                            .map(|node_info| node_info.pubkey)
+                            .collect();
+                        return Err(LightningError::ValidationError(format!(
+                            "Multiple nodes in the graph have the same destination alias - {}. 
+                            Use one of these public keys as the destination instead - {:?}",
+                            a, pks
+                        )));
+                    }
+                    node_infos[0].clone()
                 } else {
                     return Err(LightningError::ValidationError(format!(
                         "unknown activity destination: {}.",
@@ -412,10 +438,15 @@ async fn validate_activities(
                 }
             },
             NodeId::PublicKey(pk) => {
-                if let Some(info) = pk_node_map.get(pk) {
-                    info.clone()
+                if let Some(node_info) = pk_node_map.get(pk) {
+                    node_info.clone()
+                } else if let Some(node_info) = graph_nodes_by_pk.get(pk) {
+                    node_info.clone()
                 } else {
-                    get_node_info(pk).await?
+                    return Err(LightningError::ValidationError(format!(
+                        "unknown activity destination: {}.",
+                        act.destination
+                    )));
                 }
             },
         };
@@ -507,18 +538,35 @@ pub async fn get_validated_activities(
 ) -> Result<Vec<ActivityDefinition>, LightningError> {
     // We need to be able to look up destination nodes in the graph, because we allow defined activities to send to
     // nodes that we do not control. To do this, we can just grab the first node in our map and perform the lookup.
-    let get_node = async |pk: &PublicKey| -> Result<NodeInfo, LightningError> {
-        if let Some(c) = clients.values().next() {
-            return c.lock().await.get_node_info(pk).await;
-        }
-        Err(LightningError::GetNodeInfoError(
-            "no nodes for query".to_string(),
-        ))
-    };
+    let graph = match clients.values().next() {
+        Some(client) => client
+            .lock()
+            .await
+            .get_graph()
+            .await
+            .map_err(|e| LightningError::GetGraphError(format!("Error getting graph {:?}", e))),
+        None => Err(LightningError::GetGraphError("Graph is empty".to_string())),
+    }?;
+    let mut graph_nodes_by_alias: HashMap<String, Vec<NodeInfo>> = HashMap::new();
+
+    for node in &graph.nodes_by_pk {
+        graph_nodes_by_alias
+            .entry(node.1.alias.clone())
+            .or_default()
+            .push(node.1.clone());
+    }
+
     let NodeMapping {
         pk_node_map,
         alias_node_map,
     } = add_node_to_maps(&nodes_info)?;
 
-    validate_activities(activity.to_vec(), pk_node_map, alias_node_map, get_node).await
+    let activity_validation_params = ActivityValidationParams {
+        pk_node_map,
+        alias_node_map,
+        graph_nodes_by_pk: graph.nodes_by_pk,
+        graph_nodes_by_alias,
+    };
+
+    validate_activities(activity.to_vec(), activity_validation_params).await
 }

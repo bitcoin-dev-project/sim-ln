@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
@@ -17,7 +19,8 @@ use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 use triggered::Listener;
 
 use crate::{
-    serializers, LightningError, LightningNode, NodeId, NodeInfo, PaymentOutcome, PaymentResult,
+    serializers, Graph, LightningError, LightningNode, NodeId, NodeInfo, PaymentOutcome,
+    PaymentResult,
 };
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -262,6 +265,34 @@ impl LightningNode for ClnNode {
         let mut node_channels = self.node_channels(true).await?;
         node_channels.extend(self.node_channels(false).await?);
         Ok(node_channels)
+    }
+
+    async fn get_graph(&mut self) -> Result<Graph, LightningError> {
+        let nodes: Vec<cln_grpc::pb::ListnodesNodes> = self
+            .client
+            .list_nodes(ListnodesRequest { id: None })
+            .await
+            .map_err(|err| LightningError::GetNodeInfoError(err.to_string()))?
+            .into_inner()
+            .nodes;
+
+        let mut nodes_by_pk: HashMap<PublicKey, NodeInfo> = HashMap::new();
+
+        for node in nodes {
+            nodes_by_pk.insert(
+                PublicKey::from_slice(&node.nodeid).expect("Public Key not valid"),
+                NodeInfo {
+                    pubkey: PublicKey::from_slice(&node.nodeid).expect("Public Key not valid"),
+                    alias: node.clone().alias.unwrap_or(String::new()),
+                    features: node
+                        .features
+                        .clone()
+                        .map_or(NodeFeatures::empty(), NodeFeatures::from_be_bytes),
+                },
+            );
+        }
+
+        Ok(Graph { nodes_by_pk })
     }
 }
 

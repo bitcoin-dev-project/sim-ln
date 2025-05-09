@@ -2,7 +2,8 @@ use std::collections::HashSet;
 use std::{collections::HashMap, str::FromStr};
 
 use crate::{
-    serializers, LightningError, LightningNode, NodeId, NodeInfo, PaymentOutcome, PaymentResult,
+    serializers, Graph, LightningError, LightningNode, NodeId, NodeInfo, PaymentOutcome,
+    PaymentResult,
 };
 use async_trait::async_trait;
 use bitcoin::hashes::{sha256, Hash};
@@ -12,7 +13,9 @@ use lightning::ln::features::NodeFeatures;
 use lightning::ln::{PaymentHash, PaymentPreimage};
 use serde::{Deserialize, Serialize};
 use tonic_lnd::lnrpc::{payment::PaymentStatus, GetInfoRequest, GetInfoResponse};
-use tonic_lnd::lnrpc::{ListChannelsRequest, NodeInfoRequest, PaymentFailureReason};
+use tonic_lnd::lnrpc::{
+    ChannelGraphRequest, ListChannelsRequest, NodeInfoRequest, PaymentFailureReason,
+};
 use tonic_lnd::routerrpc::TrackPaymentRequest;
 use tonic_lnd::tonic::Code::Unavailable;
 use tonic_lnd::tonic::Status;
@@ -274,6 +277,34 @@ impl LightningNode for LndNode {
             .iter()
             .map(|channel| 1000 * channel.capacity as u64)
             .collect())
+    }
+
+    async fn get_graph(&mut self) -> Result<Graph, LightningError> {
+        let nodes = self
+            .client
+            .lightning()
+            .describe_graph(ChannelGraphRequest {
+                include_unannounced: false,
+            })
+            .await
+            .map_err(|err| LightningError::GetNodeInfoError(err.to_string()))?
+            .into_inner()
+            .nodes;
+
+        let mut nodes_by_pk: HashMap<PublicKey, NodeInfo> = HashMap::new();
+
+        for node in nodes {
+            nodes_by_pk.insert(
+                PublicKey::from_str(&node.pub_key).expect("Public Key not valid"),
+                NodeInfo {
+                    pubkey: PublicKey::from_str(&node.pub_key).expect("Public Key not valid"),
+                    alias: node.alias.clone(),
+                    features: parse_node_features(node.features.keys().cloned().collect()),
+                },
+            );
+        }
+
+        Ok(Graph { nodes_by_pk })
     }
 }
 
