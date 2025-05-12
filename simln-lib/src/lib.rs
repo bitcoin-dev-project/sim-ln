@@ -7,13 +7,13 @@ use bitcoin::Network;
 use csv::WriterBuilder;
 use lightning::ln::features::NodeFeatures;
 use lightning::ln::PaymentHash;
-use rand::rngs::StdRng;
 use rand::{Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use random_activity::RandomActivityError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::marker::Send;
 use std::path::PathBuf;
 use std::sync::Mutex as StdMutex;
@@ -527,16 +527,24 @@ type MutRngType = Arc<StdMutex<dyn RngCore + Send>>;
 struct MutRng(MutRngType);
 
 impl MutRng {
-    /// Creates a new MutRng given an optional `u64` argument. If `seed_opt` is `Some`,
-    /// random activity generation in the simulator occurs near-deterministically.
-    /// If it is `None`, activity generation is truly random, and based on a
-    /// non-deterministic source of entropy.
-    pub fn new(seed_opt: Option<u64>) -> Self {
-        if let Some(seed) = seed_opt {
-            Self(Arc::new(StdMutex::new(ChaCha8Rng::seed_from_u64(seed))))
-        } else {
-            Self(Arc::new(StdMutex::new(StdRng::from_entropy())))
-        }
+    /// Creates a new MutRng given an optional `u64` seed and optional pubkey. If `seed_opt` is `Some`, random activity
+    ///  generation in the simulator occurs near-deterministically.
+    /// If it is `None`, activity generation is truly random, and based on a non-deterministic source of entropy.
+    /// If a pubkey is provided, it will be used to salt the seed to ensure each node gets a deterministic but
+    /// different RNG sequence.
+    pub fn new(seed_opt: Option<(u64, Option<&PublicKey>)>) -> Self {
+        let seed = match seed_opt {
+            Some((seed, Some(pubkey))) => {
+                let mut hasher = DefaultHasher::new();
+                let mut combined = pubkey.serialize().to_vec();
+                combined.extend_from_slice(&seed.to_le_bytes());
+                combined.hash(&mut hasher);
+                hasher.finish()
+            },
+            Some((seed, None)) => seed,
+            None => rand::random(),
+        };
+        Self(Arc::new(StdMutex::new(ChaCha8Rng::seed_from_u64(seed))))
     }
 }
 
@@ -552,8 +560,8 @@ pub struct SimulationCfg {
     activity_multiplier: f64,
     /// Configurations for printing results to CSV. Results are not written if this option is None.
     write_results: Option<WriteResults>,
-    /// Random number generator created from fixed seed.
-    seeded_rng: MutRng,
+    /// Optional seed for deterministic random number generation.
+    seed: Option<u64>,
 }
 
 impl SimulationCfg {
@@ -569,7 +577,7 @@ impl SimulationCfg {
             expected_payment_msat,
             activity_multiplier,
             write_results,
-            seeded_rng: MutRng::new(seed),
+            seed,
         }
     }
 }
@@ -985,10 +993,11 @@ impl<C: Clock + 'static> Simulation<C> {
             active_nodes.insert(node_info.pubkey, (node_info, capacity));
         }
 
+        // Create a network generator with a shared RNG for all nodes.
         let network_generator = Arc::new(Mutex::new(
             NetworkGraphView::new(
                 active_nodes.values().cloned().collect(),
-                self.cfg.seeded_rng.clone(),
+                MutRng::new(self.cfg.seed.map(|seed| (seed, None))),
             )
             .map_err(SimulationError::RandomActivityError)?,
         ));
@@ -999,6 +1008,9 @@ impl<C: Clock + 'static> Simulation<C> {
         );
 
         for (node_info, capacity) in active_nodes.values() {
+            // Create a salted RNG for this node based on its pubkey.
+            let seed_opt = self.cfg.seed.map(|seed| (seed, Some(&node_info.pubkey)));
+            let salted_rng = MutRng::new(seed_opt);
             generators.push(ExecutorKit {
                 source_info: node_info.clone(),
                 network_generator: network_generator.clone(),
@@ -1007,7 +1019,7 @@ impl<C: Clock + 'static> Simulation<C> {
                         *capacity,
                         self.cfg.expected_payment_msat,
                         self.cfg.activity_multiplier,
-                        self.cfg.seeded_rng.clone(),
+                        salted_rng,
                     )
                     .map_err(SimulationError::RandomActivityError)?,
                 ),
@@ -1040,7 +1052,7 @@ impl<C: Clock + 'static> Simulation<C> {
 
             // Generate a consumer for the receiving end of the channel. It takes the event receiver that it'll pull
             // events from and the results sender to report the events it has triggered for further monitoring.
-            // ce: consume event
+            // ce: consume event.
             let ce_listener = self.shutdown_listener.clone();
             let ce_shutdown = self.shutdown_trigger.clone();
             let ce_output_sender = output_sender.clone();
@@ -1568,8 +1580,8 @@ mod tests {
         let seeds = vec![u64::MIN, u64::MAX];
 
         for seed in seeds {
-            let mut_rng_1 = MutRng::new(Some(seed));
-            let mut_rng_2 = MutRng::new(Some(seed));
+            let mut_rng_1 = MutRng::new(Some((seed, None)));
+            let mut_rng_2 = MutRng::new(Some((seed, None)));
 
             let mut rng_1 = mut_rng_1.0.lock().unwrap();
             let mut rng_2 = mut_rng_2.0.lock().unwrap();
@@ -1587,6 +1599,38 @@ mod tests {
         let mut rng_2 = mut_rng_2.0.lock().unwrap();
 
         assert_ne!(rng_1.next_u64(), rng_2.next_u64())
+    }
+
+    #[test]
+    fn create_salted_mut_rng() {
+        let (_, pk1) = test_utils::get_random_keypair();
+        let (_, pk2) = test_utils::get_random_keypair();
+
+        let salted_rng_1 = MutRng::new(Some((42, Some(&pk1))));
+        let salted_rng_2 = MutRng::new(Some((42, Some(&pk2))));
+
+        let mut seq1 = Vec::new();
+        let mut seq2 = Vec::new();
+
+        let mut rng1 = salted_rng_1.0.lock().unwrap();
+        let mut rng2 = salted_rng_2.0.lock().unwrap();
+
+        for _ in 0..10 {
+            seq1.push(rng1.next_u64());
+            seq2.push(rng2.next_u64());
+        }
+
+        assert_ne!(seq1, seq2);
+
+        let salted_rng1_again = MutRng::new(Some((42, Some(&pk1))));
+        let mut rng1_again = salted_rng1_again.0.lock().unwrap();
+        let mut seq1_again = Vec::new();
+
+        for _ in 0..10 {
+            seq1_again.push(rng1_again.next_u64());
+        }
+
+        assert_eq!(seq1, seq1_again);
     }
 
     mock! {

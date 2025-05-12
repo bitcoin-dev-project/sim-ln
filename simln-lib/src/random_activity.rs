@@ -308,7 +308,7 @@ mod tests {
         #[test]
         fn test_new() {
             // Check that we need, at least, two nodes
-            let rng = MutRng::new(Some(u64::MAX));
+            let rng = MutRng::new(Some((u64::MAX, None)));
             for i in 0..2 {
                 assert!(matches!(
                     NetworkGraphView::new(create_nodes(i, 42 * (i as u64 + 1)), rng.clone()),
@@ -362,7 +362,7 @@ mod tests {
             nodes.extend(create_nodes(big_node_count, big_node_capacity));
             let big_node = nodes.last().unwrap().0.pubkey;
 
-            let rng = MutRng::new(Some(u64::MAX));
+            let rng = MutRng::new(Some((u64::MAX, None)));
             let view = NetworkGraphView::new(nodes, rng).unwrap();
 
             for _ in 0..10 {
@@ -380,7 +380,7 @@ mod tests {
             // For the payment activity generator to fail during construction either the provided capacity must fail validation or the exponential
             // distribution must fail building given the inputs. The former will be thoroughly tested in its own unit test, but we'll test some basic cases
             // here. Mainly, if the `capacity < expected_payment_amnt / 2`, the generator will fail building
-            let rng = MutRng::new(Some(u64::MAX));
+            let rng = MutRng::new(Some((u64::MAX, None)));
             let expected_payment = get_random_int(1, 100);
             assert!(RandomPaymentActivity::new(
                 2 * expected_payment,
@@ -453,7 +453,7 @@ mod tests {
             // All of them will yield a sigma squared smaller than 0, which we have a sanity check for.
             let expected_payment = get_random_int(1, 100);
             let source_capacity = 2 * expected_payment;
-            let rng = MutRng::new(Some(u64::MAX));
+            let rng = MutRng::new(Some((u64::MAX, None)));
             let pag =
                 RandomPaymentActivity::new(source_capacity, expected_payment, 1.0, rng).unwrap();
 
