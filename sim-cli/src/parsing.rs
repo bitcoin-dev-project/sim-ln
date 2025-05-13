@@ -2,6 +2,7 @@ use anyhow::anyhow;
 use bitcoin::secp256k1::PublicKey;
 use clap::{builder::TypedValueParser, Parser};
 use log::LevelFilter;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use simln_lib::{
     cln, cln::ClnNode, eclair, eclair::EclairNode, lnd, lnd::LndNode, serializers,
@@ -15,7 +16,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_util::task::TaskTracker;
-use regex::Regex;
 
 /// The default directory where the simulation files are stored and where the results will be written to.
 pub const DEFAULT_DATA_DIR: &str = ".";
@@ -265,6 +265,8 @@ async fn validate_activities(
     let mut validated_activities = vec![];
     let mut activity_names = HashSet::new();
 
+    let reserved_pattern = Regex::new(r"^Activity-\d+$").unwrap();
+
     // Make all the activities identifiable by PK internally
     for (index, act) in activity.into_iter().enumerate() {
         // Generate a default name if one is not provided
@@ -273,15 +275,15 @@ async fn validate_activities(
                 // Disallow empty names
                 if name.is_empty() {
                     return Err(LightningError::ValidationError(
-                        "activity name cannot be empty".to_string()
+                        "activity name cannot be an empty string, ".to_owned()
+                            + "either remove name entirely or provide a string value",
                     ));
                 }
 
                 // Disallow users from using the reserved "Activity-x" format
-                let reserved_pattern = Regex::new(r"^Activity-\d+$").unwrap();
                 if reserved_pattern.is_match(name) {
                     return Err(LightningError::ValidationError(format!(
-                        "'{}' uses a reserved name format. 'Activity-{{number}}' is reserved for system use.",
+                        "'{}' uses a reserved name format. 'Activity-{{number}}' is reserved for system use. Please choose a different name.",
                         name
                     )));
                 }

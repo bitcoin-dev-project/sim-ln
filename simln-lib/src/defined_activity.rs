@@ -8,7 +8,7 @@ use tokio::time::Duration;
 #[derive(Clone)]
 pub struct DefinedPaymentActivity {
     #[allow(dead_code)]
-    name: Option<String>,
+    name: String,
     destination: NodeInfo,
     start: Option<Duration>,
     count: Option<u64>,
@@ -18,7 +18,7 @@ pub struct DefinedPaymentActivity {
 
 impl DefinedPaymentActivity {
     pub fn new(
-        name: Option<String>,
+        name: String,
         destination: NodeInfo,
         start: Option<Duration>,
         count: Option<u64>,
@@ -98,7 +98,7 @@ mod tests {
         let payment_amt = 50;
 
         let generator = DefinedPaymentActivity::new(
-            Option::from(name),
+            name,
             node.clone(),
             None,
             None,

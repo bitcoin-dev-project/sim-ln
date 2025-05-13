@@ -809,7 +809,10 @@ impl Simulation {
         if !self.activity.is_empty() {
             for description in self.activity.iter() {
                 let activity_generator = DefinedPaymentActivity::new(
-                    description.name.clone(),
+                    description
+                        .name
+                        .clone()
+                        .expect("Defined activity name is required"),
                     description.destination.clone(),
                     description
                         .start_secs
@@ -1552,7 +1555,7 @@ mod tests {
         let result = simulation.validate_activity().await;
 
         assert!(result.is_err());
-        assert!(matches!(result, 
+        assert!(matches!(result,
             Err(LightningError::ValidationError(msg)) if msg.contains("At least two nodes required")));
     }
 
@@ -1567,7 +1570,7 @@ mod tests {
         let result = simulation.validate_activity().await;
 
         assert!(result.is_err());
-        assert!(matches!(result, 
+        assert!(matches!(result,
             Err(LightningError::ValidationError(msg)) if msg.contains("must support keysend")));
     }
 
@@ -1586,7 +1589,7 @@ mod tests {
         let result = simulation.validate_activity().await;
 
         assert!(result.is_err());
-        assert!(matches!(result, 
+        assert!(matches!(result,
             Err(LightningError::ValidationError(msg)) if msg.contains("Source node not found")));
     }
 
@@ -1599,12 +1602,13 @@ mod tests {
         let dest_node = dest_nodes.first().unwrap().0.clone();
         let activity_name = None;
 
-        let activity = test_utils::create_activity(activity_name, nodes[0].clone(), dest_node, 1000);
+        let activity =
+            test_utils::create_activity(activity_name, nodes[0].clone(), dest_node, 1000);
         let simulation = test_utils::create_simulation(clients, vec![activity]);
         let result = simulation.validate_activity().await;
 
         assert!(result.is_err());
-        assert!(matches!(result, 
+        assert!(matches!(result,
             Err(LightningError::ValidationError(msg)) if msg.contains("does not support keysend")));
     }
 
@@ -1618,7 +1622,8 @@ mod tests {
         let activity_name = None;
         dest_node.features.set_keysend_optional();
 
-        let activity = test_utils::create_activity(activity_name, nodes[0].clone(), dest_node, 1000);
+        let activity =
+            test_utils::create_activity(activity_name, nodes[0].clone(), dest_node, 1000);
         let simulation = test_utils::create_simulation(clients, vec![activity]);
         let result = simulation.validate_activity().await;
 
@@ -1632,12 +1637,13 @@ mod tests {
         let (nodes, clients) = LightningTestNodeBuilder::new(2).build_full();
         let activity_name = None;
 
-        let activity = test_utils::create_activity(activity_name, nodes[0].clone(), nodes[1].clone(), 0);
+        let activity =
+            test_utils::create_activity(activity_name, nodes[0].clone(), nodes[1].clone(), 0);
         let simulation = test_utils::create_simulation(clients, vec![activity]);
         let result = simulation.validate_activity().await;
 
         assert!(result.is_err());
-        assert!(matches!(result, 
+        assert!(matches!(result,
             Err(LightningError::ValidationError(msg)) if msg.contains("zero values")));
     }
 
@@ -1651,7 +1657,7 @@ mod tests {
         let result = simulation.validate_node_network().await;
 
         assert!(result.is_err());
-        assert!(matches!(result, 
+        assert!(matches!(result,
             Err(LightningError::ValidationError(msg)) if msg.contains("we don't control any nodes")));
     }
 
@@ -1667,7 +1673,7 @@ mod tests {
         let result = simulation.validate_node_network().await;
 
         assert!(result.is_err());
-        assert!(matches!(result, 
+        assert!(matches!(result,
             Err(LightningError::ValidationError(msg)) if msg.contains("mainnet is not supported")));
     }
 
@@ -1683,7 +1689,7 @@ mod tests {
         let result = simulation.validate_node_network().await;
 
         assert!(result.is_err());
-        assert!(matches!(result, 
+        assert!(matches!(result,
             Err(LightningError::ValidationError(msg)) if msg.contains("nodes are not on the same network")));
     }
 
