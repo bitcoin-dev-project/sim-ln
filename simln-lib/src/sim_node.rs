@@ -36,22 +36,6 @@ use crate::ShortChannelID;
 /// node and used for analysis.
 #[derive(Debug, Error)]
 pub enum ForwardingError {
-    /// Zero amount htlcs are invalid in the protocol.
-    #[error("ZeroAmountHtlc")]
-    ZeroAmountHtlc,
-    /// The outgoing channel id was not found in the network graph.
-    #[error("ChannelNotFound: {0}")]
-    ChannelNotFound(ShortChannelID),
-    /// The node pubkey provided was not associated with the channel in the network graph.
-    #[error("NodeNotFound: {0:?}")]
-    NodeNotFound(PublicKey),
-    /// The channel has already forwarded an HTLC with the payment hash provided.
-    /// TODO: remove if MPP support is added.
-    #[error("PaymentHashExists: {0:?}")]
-    PaymentHashExists(PaymentHash),
-    /// An htlc with the payment hash provided could not be found to resolve.
-    #[error("PaymentHashNotFound: {0:?}")]
-    PaymentHashNotFound(PaymentHash),
     /// The forwarding node did not have sufficient outgoing balance to forward the htlc (htlc amount / balance).
     #[error("InsufficientBalance: amount: {0} > balance: {1}")]
     InsufficientBalance(u64, u64),
@@ -77,6 +61,28 @@ pub enum ForwardingError {
     /// The forwarded htlc has insufficient fee for the channel's policy (fee / expected fee / base fee / prop fee).
     #[error("InsufficientFee: offered fee: {0} (base: {1}, prop: {2}) < expected: {3}")]
     InsufficientFee(u64, u64, u64, u64),
+}
+
+/// CriticalError represents an error while propagating a payment in a simulated network that
+/// warrants a shutdown.
+#[derive(Debug, Error)]
+pub enum CriticalError {
+    /// Zero amount htlcs are invalid in the protocol.
+    #[error("ZeroAmountHtlc")]
+    ZeroAmountHtlc,
+    /// The outgoing channel id was not found in the network graph.
+    #[error("ChannelNotFound: {0}")]
+    ChannelNotFound(ShortChannelID),
+    /// The node pubkey provided was not associated with the channel in the network graph.
+    #[error("NodeNotFound: {0:?}")]
+    NodeNotFound(PublicKey),
+    /// The channel has already forwarded an HTLC with the payment hash provided.
+    /// TODO: remove if MPP support is added.
+    #[error("PaymentHashExists: {0:?}")]
+    PaymentHashExists(PaymentHash),
+    /// An htlc with the payment hash provided could not be found to resolve.
+    #[error("PaymentHashNotFound: {0:?}")]
+    PaymentHashNotFound(PaymentHash),
     /// The fee policy for a htlc amount would overflow with the given fee policy (htlc amount / base fee / prop fee).
     #[error("FeeOverflow: htlc amount: {0} (base: {1}, prop: {2})")]
     FeeOverflow(u64, u64, u64),
@@ -85,21 +91,7 @@ pub enum ForwardingError {
     SanityCheckFailed(u64, u64),
 }
 
-impl ForwardingError {
-    /// Returns a boolean indicating whether failure to forward a htlc is a critical error that warrants shutdown.
-    fn is_critical(&self) -> bool {
-        matches!(
-            self,
-            ForwardingError::ZeroAmountHtlc
-                | ForwardingError::ChannelNotFound(_)
-                | ForwardingError::NodeNotFound(_)
-                | ForwardingError::PaymentHashExists(_)
-                | ForwardingError::PaymentHashNotFound(_)
-                | ForwardingError::SanityCheckFailed(_, _)
-                | ForwardingError::FeeOverflow(_, _, _)
-        )
-    }
-}
+type ForwardResult = Result<Result<(), ForwardingError>, CriticalError>;
 
 /// Represents an in-flight htlc that has been forwarded over a channel that is awaiting resolution.
 #[derive(Copy, Clone)]
@@ -186,28 +178,33 @@ impl ChannelState {
 
     /// Checks whether the proposed HTLC abides by the channel policy advertised for using this channel as the
     /// *outgoing* link in a forward.
-    fn check_htlc_forward(
-        &self,
-        cltv_delta: u32,
-        amt: u64,
-        fee: u64,
-    ) -> Result<(), ForwardingError> {
-        fail_forwarding_inequality!(cltv_delta, <, self.policy.cltv_expiry_delta, InsufficientCltvDelta);
+    fn check_htlc_forward(&self, cltv_delta: u32, amt: u64, fee: u64) -> ForwardResult {
+        if cltv_delta < self.policy.cltv_expiry_delta {
+            return Ok(Err(ForwardingError::InsufficientCltvDelta(
+                cltv_delta,
+                self.policy.cltv_expiry_delta,
+            )));
+        }
 
         let expected_fee = amt
             .checked_mul(self.policy.fee_rate_prop)
             .and_then(|prop_fee| (prop_fee / 1000000).checked_add(self.policy.base_fee))
-            .ok_or(ForwardingError::FeeOverflow(
+            .ok_or(CriticalError::FeeOverflow(
                 amt,
                 self.policy.base_fee,
                 self.policy.fee_rate_prop,
             ))?;
 
-        fail_forwarding_inequality!(
-            fee, <, expected_fee, InsufficientFee, self.policy.base_fee, self.policy.fee_rate_prop
-        );
+        if fee < expected_fee {
+            return Ok(Err(ForwardingError::InsufficientFee(
+                fee,
+                self.policy.base_fee,
+                self.policy.fee_rate_prop,
+                expected_fee,
+            )));
+        }
 
-        Ok(())
+        Ok(Ok(()))
     }
 
     /// Checks whether the proposed HTLC can be added to the channel as an outgoing HTLC. This requires that we have
@@ -235,21 +232,24 @@ impl ChannelState {
     ///
     /// Note: MPP payments are not currently supported, so this function will fail if a duplicate payment hash is
     /// reported.
-    fn add_outgoing_htlc(&mut self, hash: PaymentHash, htlc: Htlc) -> Result<(), ForwardingError> {
-        self.check_outgoing_addition(&htlc)?;
+    fn add_outgoing_htlc(&mut self, hash: PaymentHash, htlc: Htlc) -> ForwardResult {
+        if let Err(fwd_err) = self.check_outgoing_addition(&htlc) {
+            return Ok(Err(fwd_err));
+        }
+
         if self.in_flight.contains_key(&hash) {
-            return Err(ForwardingError::PaymentHashExists(hash));
+            return Err(CriticalError::PaymentHashExists(hash));
         }
         self.local_balance_msat -= htlc.amount_msat;
         self.in_flight.insert(hash, htlc);
-        Ok(())
+        Ok(Ok(()))
     }
 
     /// Removes the HTLC from our set of outgoing in-flight HTLCs, failing if the payment hash is not found.
-    fn remove_outgoing_htlc(&mut self, hash: &PaymentHash) -> Result<Htlc, ForwardingError> {
+    fn remove_outgoing_htlc(&mut self, hash: &PaymentHash) -> Result<Htlc, CriticalError> {
         self.in_flight
             .remove(hash)
-            .ok_or(ForwardingError::PaymentHashNotFound(*hash))
+            .ok_or(CriticalError::PaymentHashNotFound(*hash))
     }
 
     // Updates channel state to account for the resolution of an outgoing in-flight HTLC. If the HTLC failed, the
@@ -326,23 +326,23 @@ impl SimulatedChannel {
         Ok(())
     }
 
-    fn get_node_mut(&mut self, pubkey: &PublicKey) -> Result<&mut ChannelState, ForwardingError> {
+    fn get_node_mut(&mut self, pubkey: &PublicKey) -> Result<&mut ChannelState, CriticalError> {
         if pubkey == &self.node_1.policy.pubkey {
             Ok(&mut self.node_1)
         } else if pubkey == &self.node_2.policy.pubkey {
             Ok(&mut self.node_2)
         } else {
-            Err(ForwardingError::NodeNotFound(*pubkey))
+            Err(CriticalError::NodeNotFound(*pubkey))
         }
     }
 
-    fn get_node(&self, pubkey: &PublicKey) -> Result<&ChannelState, ForwardingError> {
+    fn get_node(&self, pubkey: &PublicKey) -> Result<&ChannelState, CriticalError> {
         if pubkey == &self.node_1.policy.pubkey {
             Ok(&self.node_1)
         } else if pubkey == &self.node_2.policy.pubkey {
             Ok(&self.node_2)
         } else {
-            Err(ForwardingError::NodeNotFound(*pubkey))
+            Err(CriticalError::NodeNotFound(*pubkey))
         }
     }
 
@@ -354,23 +354,34 @@ impl SimulatedChannel {
         sending_node: &PublicKey,
         hash: PaymentHash,
         htlc: Htlc,
-    ) -> Result<(), ForwardingError> {
+    ) -> ForwardResult {
         if htlc.amount_msat == 0 {
-            return Err(ForwardingError::ZeroAmountHtlc);
+            return Err(CriticalError::ZeroAmountHtlc);
         }
 
-        self.get_node_mut(sending_node)?
-            .add_outgoing_htlc(hash, htlc)?;
-        self.sanity_check()
+        if let Err(fwd_err) = self
+            .get_node_mut(sending_node)?
+            .add_outgoing_htlc(hash, htlc)?
+        {
+            return Ok(Err(fwd_err));
+        }
+        self.sanity_check()?;
+        Ok(Ok(()))
     }
 
     /// Performs a sanity check on the total balances in a channel. Note that we do not currently include on-chain
     /// fees or reserve so these values should exactly match.
-    fn sanity_check(&self) -> Result<(), ForwardingError> {
+    fn sanity_check(&self) -> Result<(), CriticalError> {
         let node_1_total = self.node_1.local_balance_msat + self.node_1.in_flight_total();
         let node_2_total = self.node_2.local_balance_msat + self.node_2.in_flight_total();
 
-        fail_forwarding_inequality!(node_1_total + node_2_total, !=, self.capacity_msat, SanityCheckFailed);
+        let channel_balance = node_1_total + node_2_total;
+        if channel_balance != self.capacity_msat {
+            return Err(CriticalError::SanityCheckFailed(
+                channel_balance,
+                self.capacity_msat,
+            ));
+        }
 
         Ok(())
     }
@@ -384,7 +395,7 @@ impl SimulatedChannel {
         sending_node: &PublicKey,
         hash: &PaymentHash,
         success: bool,
-    ) -> Result<(), ForwardingError> {
+    ) -> Result<(), CriticalError> {
         let htlc = self
             .get_node_mut(sending_node)?
             .remove_outgoing_htlc(hash)?;
@@ -400,7 +411,7 @@ impl SimulatedChannel {
         sending_node: &PublicKey,
         amount_msat: u64,
         success: bool,
-    ) -> Result<(), ForwardingError> {
+    ) -> Result<(), CriticalError> {
         if sending_node == &self.node_1.policy.pubkey {
             self.node_1.settle_outgoing_htlc(amount_msat, success);
             self.node_2.settle_incoming_htlc(amount_msat, success);
@@ -410,7 +421,7 @@ impl SimulatedChannel {
             self.node_1.settle_incoming_htlc(amount_msat, success);
             Ok(())
         } else {
-            Err(ForwardingError::NodeNotFound(*sending_node))
+            Err(CriticalError::NodeNotFound(*sending_node))
         }
     }
 
@@ -421,7 +432,7 @@ impl SimulatedChannel {
         cltv_delta: u32,
         amount_msat: u64,
         fee_msat: u64,
-    ) -> Result<(), ForwardingError> {
+    ) -> ForwardResult {
         self.get_node(forwarding_node)?
             .check_htlc_forward(cltv_delta, amount_msat, fee_msat)
     }
@@ -902,7 +913,7 @@ async fn add_htlcs(
     source: PublicKey,
     route: Path,
     payment_hash: PaymentHash,
-) -> Result<(), (Option<usize>, ForwardingError)> {
+) -> Result<Result<(), (Option<usize>, ForwardingError)>, CriticalError> {
     let mut outgoing_node = source;
     let mut outgoing_amount = route.fee_msat() + route.final_value_msat();
     let mut outgoing_cltv = route.hops.iter().map(|hop| hop.cltv_expiry_delta).sum();
@@ -922,18 +933,18 @@ async fn add_htlcs(
         let scid = ShortChannelID::from(hop.short_channel_id);
 
         if let Some(channel) = node_lock.get_mut(&scid) {
-            channel
-                .add_htlc(
-                    &outgoing_node,
-                    payment_hash,
-                    Htlc {
-                        amount_msat: outgoing_amount,
-                        cltv_expiry: outgoing_cltv,
-                    },
-                )
+            if let Err(e) = channel.add_htlc(
+                &outgoing_node,
+                payment_hash,
+                Htlc {
+                    amount_msat: outgoing_amount,
+                    cltv_expiry: outgoing_cltv,
+                },
+            )? {
                 // If we couldn't add to this HTLC, we only need to fail back from the preceding hop, so we don't
                 // have to progress our fail_idx.
-                .map_err(|e| (fail_idx, e))?;
+                return Ok(Err((fail_idx, e)));
+            }
 
             // If the HTLC was successfully added, then we'll need to remove the HTLC from this channel if we fail,
             // so we progress our failure index to include this node.
@@ -949,20 +960,20 @@ async fn add_htlcs(
                 if let Some(channel) =
                     node_lock.get(&ShortChannelID::from(route.hops[i + 1].short_channel_id))
                 {
-                    channel
-                        .check_htlc_forward(
-                            &hop.pubkey,
-                            hop.cltv_expiry_delta,
-                            outgoing_amount - hop.fee_msat,
-                            hop.fee_msat,
-                        )
+                    if let Err(e) = channel.check_htlc_forward(
+                        &hop.pubkey,
+                        hop.cltv_expiry_delta,
+                        outgoing_amount - hop.fee_msat,
+                        hop.fee_msat,
+                    )? {
                         // If we haven't met forwarding conditions for the next channel's policy, then we fail at
                         // the current index, because we've already added the HTLC as outgoing.
-                        .map_err(|e| (fail_idx, e))?;
+                        return Ok(Err((fail_idx, e)));
+                    }
                 }
             }
         } else {
-            return Err((fail_idx, ForwardingError::ChannelNotFound(scid)));
+            return Err(CriticalError::ChannelNotFound(scid));
         }
 
         // Once we've taken the "hop" to the destination pubkey, it becomes the source of the next outgoing htlc.
@@ -973,7 +984,7 @@ async fn add_htlcs(
         // TODO: introduce artificial latency between hops?
     }
 
-    Ok(())
+    Ok(Ok(()))
 }
 
 /// Removes htlcs from the simulation state from the index in the path provided (backwards).
@@ -992,7 +1003,7 @@ async fn remove_htlcs(
     route: Path,
     payment_hash: PaymentHash,
     success: bool,
-) -> Result<(), ForwardingError> {
+) -> Result<(), CriticalError> {
     for (i, hop) in route.hops[0..=resolution_idx].iter().enumerate().rev() {
         // When we add HTLCs, we do so on the state of the node that sent the htlc along the channel so we need to
         // look up our incoming node so that we can remove it when we go backwards. For the first htlc, this is just
@@ -1010,9 +1021,11 @@ async fn remove_htlcs(
             .await
             .get_mut(&ShortChannelID::from(hop.short_channel_id))
         {
-            Some(channel) => channel.remove_htlc(&incoming_node, &payment_hash, success)?,
+            Some(channel) => {
+                channel.remove_htlc(&incoming_node, &payment_hash, success)?;
+            },
             None => {
-                return Err(ForwardingError::ChannelNotFound(ShortChannelID::from(
+                return Err(CriticalError::ChannelNotFound(ShortChannelID::from(
                     hop.short_channel_id,
                 )))
             },
@@ -1034,59 +1047,59 @@ async fn propagate_payment(
     sender: Sender<Result<PaymentResult, LightningError>>,
     shutdown: Trigger,
 ) {
-    // If we partially added HTLCs along the route, we need to fail them back to the source to clean up our partial
-    // state. It's possible that we failed with the very first add, and then we don't need to clean anything up.
-    let notify_result = if let Err((fail_idx, err)) =
-        add_htlcs(nodes.clone(), source, route.clone(), payment_hash).await
-    {
-        if err.is_critical() {
-            shutdown.trigger();
-        }
-
-        if let Some(resolution_idx) = fail_idx {
-            if let Err(e) =
-                remove_htlcs(nodes, resolution_idx, source, route, payment_hash, false).await
+    let notify_result = match add_htlcs(nodes.clone(), source, route.clone(), payment_hash).await {
+        Ok(Ok(_)) => {
+            // If we successfully added the htlc, go ahead and remove all the htlcs in the route with successful resolution.
+            if let Err(e) = remove_htlcs(
+                nodes,
+                route.hops.len() - 1,
+                source,
+                route,
+                payment_hash,
+                true,
+            )
+            .await
             {
-                if e.is_critical() {
+                shutdown.trigger();
+                log::error!("Could not remove htlcs from channel: {e}.");
+            }
+            PaymentResult {
+                htlc_count: 1,
+                payment_outcome: PaymentOutcome::Success,
+            }
+        },
+        Ok(Err((fail_idx, fwd_err))) => {
+            // If we partially added HTLCs along the route, we need to fail them back to the source to clean up our partial
+            // state. It's possible that we failed with the very first add, and then we don't need to clean anything up.
+            if let Some(resolution_idx) = fail_idx {
+                if remove_htlcs(nodes, resolution_idx, source, route, payment_hash, false)
+                    .await
+                    .is_err()
+                {
                     shutdown.trigger();
                 }
             }
-        }
 
-        // We have more information about failures because we're in control of the whole route, so we log the
-        // actual failure reason and then fail back with unknown failure type.
-        log::debug!(
-            "Forwarding failure for simulated payment {}: {err}",
-            hex::encode(payment_hash.0)
-        );
-
-        PaymentResult {
-            htlc_count: 0,
-            payment_outcome: PaymentOutcome::Unknown,
-        }
-    } else {
-        // If we successfully added the htlc, go ahead and remove all the htlcs in the route with successful resolution.
-        if let Err(e) = remove_htlcs(
-            nodes,
-            route.hops.len() - 1,
-            source,
-            route,
-            payment_hash,
-            true,
-        )
-        .await
-        {
-            if e.is_critical() {
-                shutdown.trigger();
+            log::debug!(
+                "Forwarding failure for simulated payment {}: {fwd_err}",
+                hex::encode(payment_hash.0)
+            );
+            PaymentResult {
+                htlc_count: 0,
+                payment_outcome: PaymentOutcome::Unknown,
             }
-
-            log::error!("Could not remove htlcs from channel: {e}.");
-        }
-
-        PaymentResult {
-            htlc_count: 1,
-            payment_outcome: PaymentOutcome::Success,
-        }
+        },
+        Err(critical_err) => {
+            shutdown.trigger();
+            log::debug!(
+                "Critical error in simulated payment {}: {critical_err}",
+                hex::encode(payment_hash.0)
+            );
+            PaymentResult {
+                htlc_count: 0,
+                payment_outcome: PaymentOutcome::Unknown,
+            }
+        },
     };
 
     if let Err(e) = sender.send(Ok(notify_result)) {
@@ -1246,7 +1259,7 @@ mod tests {
         // at present.
         assert!(matches!(
             channel_state.add_outgoing_htlc(hash_1, htlc_1),
-            Err(ForwardingError::PaymentHashExists(_))
+            Err(CriticalError::PaymentHashExists(_))
         ));
 
         // Add a second, distinct htlc to our in-flight state.
@@ -1277,7 +1290,7 @@ mod tests {
         // Try to remove the same htlc and assert that we fail because the htlc can't be found.
         assert!(matches!(
             channel_state.remove_outgoing_htlc(&hash_2),
-            Err(ForwardingError::PaymentHashNotFound(_))
+            Err(CriticalError::PaymentHashNotFound(_))
         ));
 
         // Finally, remove our original htlc with success and assert that our local balance is accordingly updated.
@@ -1295,7 +1308,7 @@ mod tests {
         // CLTV delta insufficient (one less than required).
         assert!(matches!(
             channel_state.check_htlc_forward(channel_state.policy.cltv_expiry_delta - 1, 0, 0),
-            Err(ForwardingError::InsufficientCltvDelta(_, _))
+            Ok(Err(ForwardingError::InsufficientCltvDelta(_, _)))
         ));
 
         // Test insufficient fee.
@@ -1309,7 +1322,7 @@ mod tests {
                 htlc_amount,
                 htlc_fee - 1
             ),
-            Err(ForwardingError::InsufficientFee(_, _, _, _))
+            Ok(Err(ForwardingError::InsufficientFee(_, _, _, _)))
         ));
 
         // Test exact and over-estimation of required policy.
@@ -1460,7 +1473,7 @@ mod tests {
 
         assert!(matches!(
             simulated_channel.add_htlc(&node_2.policy.pubkey, hash_1, htlc_1),
-            Err(ForwardingError::InsufficientBalance(_, _))
+            Ok(Err(ForwardingError::InsufficientBalance(_, _)))
         ));
 
         // Assert that we can send a htlc over node_1 -> node_2.
@@ -1488,12 +1501,12 @@ mod tests {
         let (_, pk) = get_random_keypair();
         assert!(matches!(
             simulated_channel.add_htlc(&pk, hash_2, htlc_2),
-            Err(ForwardingError::NodeNotFound(_))
+            Err(CriticalError::NodeNotFound(_))
         ));
 
         assert!(matches!(
             simulated_channel.remove_htlc(&pk, &hash_2, true),
-            Err(ForwardingError::NodeNotFound(_))
+            Err(CriticalError::NodeNotFound(_))
         ));
     }
 
