@@ -1,6 +1,9 @@
+use std::sync::Arc;
+
 use clap::Parser;
 use log::LevelFilter;
 use sim_cli::parsing::{create_simulation, create_simulation_with_network, parse_sim_params, Cli};
+use simln_lib::{latency_interceptor::LatencyIntercepor, sim_node::Interceptor};
 use simple_logger::SimpleLogger;
 use tokio_util::task::TaskTracker;
 
@@ -29,7 +32,13 @@ async fn main() -> anyhow::Result<()> {
     let (sim, validated_activities) = if sim_params.sim_network.is_empty() {
         create_simulation(&cli, &sim_params, tasks.clone()).await?
     } else {
-        create_simulation_with_network(&cli, &sim_params, tasks.clone()).await?
+        let latency = cli.latency_ms.unwrap_or(0);
+        let interceptors = if latency > 0 {
+            vec![Arc::new(LatencyIntercepor::new_poisson(latency as f32)?) as Arc<dyn Interceptor>]
+        } else {
+            vec![]
+        };
+        create_simulation_with_network(&cli, &sim_params, tasks.clone(), interceptors).await?
     };
     let sim2 = sim.clone();
 
