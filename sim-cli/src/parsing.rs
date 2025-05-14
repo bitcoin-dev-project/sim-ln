@@ -243,8 +243,13 @@ pub async fn create_simulation_with_network(
 
     // Setup a simulation graph that will handle propagation of payments through the network
     let simulation_graph = Arc::new(Mutex::new(
-        SimGraph::new(channels.clone(), tasks.clone(), shutdown_trigger.clone())
-            .map_err(|e| SimulationError::SimulatedNetworkError(format!("{:?}", e)))?,
+        SimGraph::new(
+            channels.clone(),
+            tasks.clone(),
+            vec![],
+            (shutdown_trigger.clone(), shutdown_listener.clone()),
+        )
+        .map_err(|e| SimulationError::SimulatedNetworkError(format!("{:?}", e)))?,
     ));
 
     let clock = Arc::new(SimulationClock::new(cli.speedup_clock.unwrap_or(1))?);
