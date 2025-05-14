@@ -5,7 +5,8 @@ use log::LevelFilter;
 use serde::{Deserialize, Serialize};
 use simln_lib::clock::SimulationClock;
 use simln_lib::sim_node::{
-    ln_node_from_graph, populate_network_graph, ChannelPolicy, SimGraph, SimulatedChannel,
+    ln_node_from_graph, populate_network_graph, ChannelPolicy, Interceptor, SimGraph,
+    SimulatedChannel,
 };
 use simln_lib::{
     cln, cln::ClnNode, eclair, eclair::EclairNode, lnd, lnd::LndNode, serializers,
@@ -87,6 +88,9 @@ pub struct Cli {
     /// simulated nodes.
     #[clap(long)]
     pub speedup_clock: Option<u16>,
+    /// Latency to optionally introduce for simulated nodes.
+    #[clap(long)]
+    pub latency_ms: Option<f32>,
 }
 
 impl Cli {
@@ -217,6 +221,7 @@ pub async fn create_simulation_with_network(
     cli: &Cli,
     sim_params: &SimParams,
     tasks: TaskTracker,
+    interceptors: Vec<Arc<dyn Interceptor>>,
 ) -> Result<(Simulation<SimulationClock>, Vec<ActivityDefinition>), anyhow::Error> {
     let cfg: SimulationCfg = SimulationCfg::try_from(cli)?;
     let SimParams {
@@ -246,7 +251,7 @@ pub async fn create_simulation_with_network(
         SimGraph::new(
             channels.clone(),
             tasks.clone(),
-            vec![],
+            interceptors,
             (shutdown_trigger.clone(), shutdown_listener.clone()),
         )
         .map_err(|e| SimulationError::SimulatedNetworkError(format!("{:?}", e)))?,
