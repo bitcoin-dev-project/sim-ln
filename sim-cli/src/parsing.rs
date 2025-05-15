@@ -247,7 +247,7 @@ pub async fn create_simulation_with_network(
             channels.clone(),
             tasks.clone(),
             vec![],
-            shutdown_trigger.clone(),
+            (shutdown_trigger.clone(), shutdown_listener.clone()),
         )
         .map_err(|e| SimulationError::SimulatedNetworkError(format!("{:?}", e)))?,
     ));

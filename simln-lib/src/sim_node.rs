@@ -63,6 +63,7 @@ pub enum ForwardingError {
     /// The forwarded htlc has insufficient fee for the channel's policy (fee / expected fee / base fee / prop fee).
     #[error("InsufficientFee: offered fee: {0} (base: {1}, prop: {2}) < expected: {3}")]
     InsufficientFee(u64, u64, u64, u64),
+    /// Custom error for interceptors if encountered a forwarding error during htlc interception.
     #[error("InterceptorError: {0}")]
     InterceptorError(String),
 }
@@ -93,8 +94,11 @@ pub enum CriticalError {
     /// Sanity check on channel balances failed (node balances / channel capacity).
     #[error("SanityCheckFailed: node balance: {0} != capacity: {1}")]
     SanityCheckFailed(u64, u64),
+    /// Intercepted HTLCs have duplicated custom records attached.
     #[error("DuplicateCustomRecord: key {0}")]
     DuplicateCustomRecord(u64),
+    /// Custom error for interceptors if they encountered a critical error during htlc
+    /// interception.
     #[error("InterceptorError: {0}")]
     InterceptorError(String),
 }
@@ -710,6 +714,7 @@ pub trait Interceptor: Send + Sync {
 
     /// Notifies the interceptor that a previously intercepted htlc has been resolved. Default implementation is a no-op
     /// for cases where the interceptor only cares about interception, not resolution of htlcs.
+    /// This should be non-blocking.
     async fn notify_resolution(&self, _res: InterceptResolution) -> Result<(), CriticalError> {
         Ok(())
     }
@@ -749,7 +754,9 @@ pub struct InterceptRequest {
     /// The expiry height on the outgoing htlc.
     pub outgoing_expiry_height: u32,
 
-    // The listener on which the interceptor will receive shutdown signals.
+    // The listener on which the interceptor will receive shutdown signals. Interceptors should
+    // listen on this signal and shutdown. If this is not done, it could block the quick resolution
+    // of the htlc if another interceptor already signalled a failure.
     pub shutdown_listener: Listener,
 }
 
@@ -791,12 +798,82 @@ pub struct InterceptResolution {
     pub success: bool,
 }
 
+// Custom records that can be attached by an Interceptor to intercepted HTLCs.
 pub type CustomRecords = HashMap<u64, Vec<u8>>;
 
 #[derive(Debug, Clone)]
 pub struct HtlcRef {
     pub channel_id: ShortChannelID,
     pub index: u64,
+}
+
+async fn handle_intercepted_htlc(
+    request: InterceptRequest,
+    interceptors: &[Arc<dyn Interceptor>],
+    trigger: Trigger,
+) -> Result<Result<CustomRecords, ForwardingError>, CriticalError> {
+    let mut attached_custom_records: CustomRecords = HashMap::new();
+    if !interceptors.is_empty() {
+        let mut intercepts: JoinSet<Result<Result<CustomRecords, ForwardingError>, CriticalError>> =
+            JoinSet::new();
+
+        for interceptor in interceptors.iter() {
+            let request = request.clone();
+            log::trace!(
+                "Sending HTLC to intercepor: {} {request}",
+                interceptor.name()
+            );
+
+            let interceptor_clone = Arc::clone(interceptor);
+            intercepts.spawn(async move { interceptor_clone.intercept_htlc(request).await });
+        }
+
+        // Read results from the interceptors and check whether any of them returned an instruction to fail
+        // the HTLC. If any of the interceptors did return an error, we send a shutdown signal
+        // to the other interceptors that may have not returned yet.
+        let mut interceptor_failure = None;
+        while let Some(res) = intercepts.join_next().await {
+            let res =
+                res.map_err(|join_err| CriticalError::InterceptorError(join_err.to_string()))?;
+
+            match res {
+                Ok(Ok(records)) => {
+                    // Interceptor call succeeded and indicated that we should proceed with the forward. Merge
+                    // any custom records provided, failing if interceptors provide duplicate values for the
+                    // same key.
+                    for (k, v) in records {
+                        match attached_custom_records.entry(k) {
+                            Entry::Occupied(e) => {
+                                let existing_value = e.get();
+                                if *existing_value == v {
+                                    return Err(CriticalError::DuplicateCustomRecord(k));
+                                }
+                            },
+                            Entry::Vacant(e) => {
+                                e.insert(v);
+                            },
+                        };
+                    }
+                },
+                // Interceptor call succeeded but returned a ForwardingError. If this happens,
+                // we should send a trigger to other interceptors to let them know they should
+                // shutdown.
+                Ok(Err(fwd_error)) => {
+                    interceptor_failure = Some(fwd_error);
+                    trigger.trigger();
+                },
+                Err(e) => {
+                    return Err(e);
+                },
+            }
+        }
+
+        if let Some(e) = interceptor_failure {
+            return Ok(Err(e));
+        }
+    }
+
+    Ok(Ok(attached_custom_records))
 }
 
 /// Graph is the top level struct that is used to coordinate simulation of lightning nodes.
@@ -813,10 +890,14 @@ pub struct SimGraph {
     tasks: TaskTracker,
 
     /// Optional set of interceptors that will be called every time a HTLC is added to a simulated channel.
+    /// Interceptors can each attach custom records to HTLCs, however it will fail it if there are
+    /// conflicting records between them. Note that if one interceptor fails the HTLC, it will
+    /// trigger a shutdown signal to other interceptors.
     interceptors: Vec<Arc<dyn Interceptor>>,
 
-    /// trigger shutdown if a critical error occurs.
-    shutdown_trigger: Trigger,
+    /// Shutdown signal that can be used to trigger a shutdown if a critical error occurs. Listener
+    /// can be used to listen for shutdown signals coming from upstream.
+    shutdown_signal: (Trigger, Listener),
 }
 
 impl SimGraph {
@@ -825,7 +906,7 @@ impl SimGraph {
         graph_channels: Vec<SimulatedChannel>,
         tasks: TaskTracker,
         interceptors: Vec<Arc<dyn Interceptor>>,
-        shutdown_trigger: Trigger,
+        shutdown_signal: (Trigger, Listener),
     ) -> Result<Self, SimulationError> {
         let mut nodes: HashMap<PublicKey, Vec<u64>> = HashMap::new();
         let mut channels = HashMap::new();
@@ -860,7 +941,7 @@ impl SimGraph {
             channels: Arc::new(Mutex::new(channels)),
             tasks,
             interceptors,
-            shutdown_trigger,
+            shutdown_signal,
         })
     }
 }
@@ -987,7 +1068,7 @@ impl SimNetwork for SimGraph {
             payment_hash,
             sender,
             self.interceptors.clone(),
-            self.shutdown_trigger.clone(),
+            self.shutdown_signal.clone(),
         ));
     }
 
@@ -1012,8 +1093,11 @@ impl SimNetwork for SimGraph {
     }
 }
 
-/// Adds htlcs to the simulation state along the path provided. Returning the index in the path from which to fail
-/// back htlcs (if any) and a forwarding error if the payment is not successfully added to the entire path.
+/// Adds htlcs to the simulation state along the path provided. If it encounters a critical error,
+/// it will be returned in the outer Result to signal that the simulation should shut down. If a
+/// forwarding error happens, it will return the index in the path from which to fail back htlcs
+/// (if any) and the ForwardingError in the inner Result. We don't return the index during a
+/// critical error since we expect to trigger a simulation shutdown after it.
 ///
 /// For each hop in the route, we check both the addition of the HTLC and whether we can forward it. Take an example
 /// route A --> B --> C, we will add this in two hops: A --> B then B -->C. For each hop, using A --> B as an example:
@@ -1035,12 +1119,15 @@ async fn add_htlcs(
     route: Path,
     payment_hash: PaymentHash,
     interceptors: Vec<Arc<dyn Interceptor>>,
+    shutdown_signal: (Trigger, Listener),
 ) -> Result<Result<(), (Option<usize>, ForwardingError)>, CriticalError> {
     let mut outgoing_node = source;
     let mut outgoing_amount = route.fee_msat() + route.final_value_msat();
     let mut outgoing_cltv = route.hops.iter().map(|hop| hop.cltv_expiry_delta).sum();
 
     let mut incoming_custom_records = HashMap::new();
+
+    let shutdown_signal_clone = (shutdown_signal.0.clone(), shutdown_signal.1.clone());
 
     // Tracks the hop index that we need to remove htlcs from on payment completion (both success and failure).
     // Given a payment from A to C, over the route A -- B -- C, this index has the following meanings:
@@ -1116,91 +1203,34 @@ async fn add_htlcs(
         // time) without holding our entire graph hostage.
         drop(node_lock);
 
-        // Collect any custom records set by the interceptor for the outgoing link.
-        let mut outgoing_custom_records: HashMap<u64, Vec<u8>> = HashMap::new();
+        let request = InterceptRequest {
+            forwarding_node: hop.pubkey,
+            payment_hash,
+            incoming_htlc: incoming_htlc.clone(),
+            incoming_custom_records: incoming_custom_records.clone(),
+            outgoing_channel_id: next_scid,
+            incoming_amount_msat: outgoing_amount,
+            outgoing_amount_msat: outgoing_amount - hop.fee_msat,
+            incoming_expiry_height: outgoing_cltv,
+            outgoing_expiry_height: outgoing_cltv - hop.cltv_expiry_delta,
+            shutdown_listener: shutdown_signal_clone.1.clone(),
+        };
 
-        let (interceptor_trigger, interceptor_listener) = triggered::trigger();
+        let intercepted_res =
+            handle_intercepted_htlc(request, &interceptors, shutdown_signal.0.clone()).await?;
 
-        if !interceptors.is_empty() {
-            let mut intercepts: JoinSet<
-                Result<Result<CustomRecords, ForwardingError>, CriticalError>,
-            > = JoinSet::new();
-
-            for interceptor in interceptors.iter() {
-                let request = InterceptRequest {
-                    forwarding_node: hop.pubkey,
-                    payment_hash,
-                    incoming_htlc: incoming_htlc.clone(),
-                    incoming_custom_records: incoming_custom_records.clone(),
-                    outgoing_channel_id: next_scid,
-                    incoming_amount_msat: outgoing_amount,
-                    outgoing_amount_msat: outgoing_amount - hop.fee_msat,
-                    incoming_expiry_height: outgoing_cltv,
-                    outgoing_expiry_height: outgoing_cltv - hop.cltv_expiry_delta,
-                    shutdown_listener: interceptor_listener.clone(),
-                };
-
-                log::trace!(
-                    "Sending HTLC to intercepor: {} {request}",
-                    interceptor.name()
-                );
-
-                let interceptor_clone = Arc::clone(interceptor);
-                intercepts.spawn(async move { interceptor_clone.intercept_htlc(request).await });
-            }
-
-            // Read results from the interceptors and check whether any of them returned an instruction to fail
-            // the HTLC. If any of the interceptors did return an error, we send a shutdown signal
-            // to the other interceptors that may have not returned yet.
-            let mut interceptor_failure = None;
-            while let Some(res) = intercepts.join_next().await {
-                let res =
-                    res.map_err(|join_err| CriticalError::InterceptorError(join_err.to_string()))?;
-
-                match res {
-                    Ok(Ok(records)) => {
-                        // Interceptor call succeeded and indicated that we should proceed with the forward. Merge
-                        // any custom records provided, failing if interceptors provide duplicate values for the
-                        // same key.
-                        for (k, v) in records {
-                            match outgoing_custom_records.entry(k) {
-                                Entry::Occupied(e) => {
-                                    let existing_value = e.get();
-                                    if *existing_value == v {
-                                        return Err(CriticalError::DuplicateCustomRecord(k));
-                                    }
-                                },
-                                Entry::Vacant(e) => {
-                                    e.insert(v);
-                                },
-                            };
-                        }
-                    },
-                    // Interceptor call succeeded but returned a ForwardingError. If this happens,
-                    // we should send a trigger to other interceptors to let them know they should
-                    // shutdown.
-                    Ok(Err(fwd_error)) => {
-                        interceptor_failure = Some(fwd_error);
-                        interceptor_trigger.trigger();
-                    },
-                    Err(e) => {
-                        return Err(e);
-                    },
-                }
-            }
-
-            if let Some(e) = interceptor_failure {
-                return Ok(Err((fail_idx, e)));
-            }
-        }
+        // Collect any custom records (if any) set by the interceptor(s) for the outgoing link.
+        let attached_custom_records = match intercepted_res {
+            Ok(records) => records,
+            Err(fwd_err) => return Ok(Err((fail_idx, fwd_err))),
+        };
 
         // Once we've taken the "hop" to the destination pubkey, it becomes the source of the next outgoing htlc and
         // any outgoing custom records set by the interceptor become the incoming custom records for the next hop.
         outgoing_node = hop.pubkey;
         outgoing_amount -= hop.fee_msat;
         outgoing_cltv -= hop.cltv_expiry_delta;
-        incoming_custom_records = outgoing_custom_records;
-        // TODO: introduce artificial latency between hops?
+        incoming_custom_records = attached_custom_records;
     }
 
     Ok(Ok(()))
@@ -1284,14 +1314,16 @@ async fn propagate_payment(
     payment_hash: PaymentHash,
     sender: Sender<Result<PaymentResult, LightningError>>,
     interceptors: Vec<Arc<dyn Interceptor>>,
-    shutdown: Trigger,
+    shutdown_signal: (Trigger, Listener),
 ) {
+    let shutdown_clone = (shutdown_signal.0.clone(), shutdown_signal.1.clone());
     let notify_result = match add_htlcs(
         nodes.clone(),
         source,
         route.clone(),
         payment_hash,
         interceptors.clone(),
+        shutdown_clone,
     )
     .await
     {
@@ -1308,7 +1340,7 @@ async fn propagate_payment(
             )
             .await
             {
-                shutdown.trigger();
+                shutdown_signal.0.trigger();
                 log::error!("Could not remove htlcs from channel: {e}.");
             }
             PaymentResult {
@@ -1332,7 +1364,7 @@ async fn propagate_payment(
                 .await
                 .is_err()
                 {
-                    shutdown.trigger();
+                    shutdown_signal.0.trigger();
                 }
             }
 
@@ -1346,7 +1378,7 @@ async fn propagate_payment(
             }
         },
         Err(critical_err) => {
-            shutdown.trigger();
+            shutdown_signal.0.trigger();
             log::debug!(
                 "Critical error in simulated payment {}: {critical_err}",
                 hex::encode(payment_hash.0)
@@ -1401,12 +1433,12 @@ mod tests {
     use super::*;
     use crate::clock::SystemClock;
     use crate::test_utils::get_random_keypair;
-    use bitcoin::secp256k1::PublicKey;
     use lightning::routing::router::Route;
     use mockall::mock;
+    use ntest::assert_true;
     use std::time::Duration;
     use tokio::sync::oneshot;
-    use tokio::time::timeout;
+    use tokio::time::{self, timeout};
 
     /// Creates a test channel policy with its maximum HTLC size set to half of the in flight limit of the channel.
     /// The minimum HTLC size is hardcoded to 2 so that we can fall beneath this value with a 1 msat htlc.
@@ -1897,7 +1929,7 @@ mod tests {
         ///
         /// The nodes pubkeys in this chain of channels are provided in-order for easy access.
         async fn new(capacity: u64, interceptors: Vec<Arc<dyn Interceptor>>) -> Self {
-            let (shutdown, _listener) = triggered::trigger();
+            let shutdown_signal = triggered::trigger();
             let channels = create_simulated_channels(3, capacity);
             let routing_graph = Arc::new(
                 populate_network_graph(channels.clone(), Arc::new(SystemClock {})).unwrap(),
@@ -1917,18 +1949,19 @@ mod tests {
                 .collect::<Vec<PublicKey>>();
             nodes.push(channels.last().unwrap().node_2.policy.pubkey);
 
+            let trigger_clone = shutdown_signal.0.clone();
             let kit = DispatchPaymentTestKit {
                 graph: SimGraph::new(
                     channels.clone(),
                     TaskTracker::new(),
                     interceptors,
-                    shutdown.clone(),
+                    shutdown_signal,
                 )
                 .expect("could not create test graph"),
                 nodes,
                 routing_graph,
                 scorer,
-                shutdown,
+                shutdown: trigger_clone,
             };
 
             // Assert that our channel balance is all on the side of the channel opener when we start up.
@@ -2280,5 +2313,53 @@ mod tests {
         test_kit.shutdown.trigger();
         test_kit.graph.tasks.close();
         test_kit.graph.tasks.wait().await;
+    }
+
+    /// Tests a long resolving interceptor gets correctly interrupted during a shutdown.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_shutdown_intercepted_htlc() {
+        let mut mock_interceptor_1 = MockTestInterceptor::new();
+
+        let (trigger, listener) = triggered::trigger();
+        mock_interceptor_1.expect_intercept_htlc().returning(|req| {
+            futures::executor::block_on(async {
+                tokio::select! {
+                    _ = req.shutdown_listener => {},
+                    // Set a long sleep to simulate a slow interceptor. We'll trigger a shutdown
+                    // immediately so it should never take this long.
+                    _ = time::sleep(Duration::from_secs(30)) => {}
+                }
+            });
+            Ok(Ok(CustomRecords::default()))
+        });
+
+        let (_, pubkey) = get_random_keypair();
+        let mock_request = InterceptRequest {
+            forwarding_node: pubkey,
+            payment_hash: PaymentHash([0; 32]),
+            incoming_htlc: HtlcRef {
+                channel_id: ShortChannelID(0),
+                index: 0,
+            },
+            incoming_custom_records: CustomRecords::new(),
+            outgoing_channel_id: None,
+            incoming_amount_msat: 0,
+            outgoing_amount_msat: 0,
+            incoming_expiry_height: 0,
+            outgoing_expiry_height: 0,
+            shutdown_listener: listener.clone(),
+        };
+
+        let mock_1: Arc<dyn Interceptor> = Arc::new(mock_interceptor_1);
+        let interceptors = vec![mock_1];
+
+        // This should assert early instead of waiting for the sleep time since we triggered a
+        // shutdown.
+        trigger.trigger();
+        assert_true!(timeout(Duration::from_secs(1), async {
+            handle_intercepted_htlc(mock_request, &interceptors, trigger).await
+        })
+        .await
+        .is_ok());
     }
 }
