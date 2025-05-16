@@ -21,7 +21,9 @@ use lightning::ln::msgs::{
 };
 use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::routing::gossip::{NetworkGraph, NodeId};
-use lightning::routing::router::{find_route, Path, PaymentParameters, Route, RouteParameters};
+use lightning::routing::router::{
+    find_route, Path, PaymentParameters, Route, RouteParameters,
+};
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringDecayParameters};
 use lightning::routing::utxo::{UtxoLookup, UtxoResult};
 use lightning::util::logger::{Level, Logger, Record};
