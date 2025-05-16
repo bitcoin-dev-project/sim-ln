@@ -88,9 +88,10 @@ pub struct Cli {
     /// simulated nodes.
     #[clap(long)]
     pub speedup_clock: Option<u16>,
-    /// Latency to optionally introduce for simulated nodes.
+    /// Latency to optionally introduce for payments in a simulated network expressed in
+    /// milliseconds.
     #[clap(long)]
-    pub latency_ms: Option<f32>,
+    pub latency_ms: Option<u32>,
 }
 
 impl Cli {
@@ -113,6 +114,12 @@ impl Cli {
         if !sim_params.nodes.is_empty() && self.speedup_clock.is_some() {
             return Err(anyhow!(
                 "Clock speedup is only allowed when running on a simulated network"
+            ));
+        }
+
+        if !sim_params.nodes.is_empty() && self.latency_ms.is_some() {
+            return Err(anyhow!(
+                "Latency for payments is only allowed when running on a simulated network"
             ));
         }
 
