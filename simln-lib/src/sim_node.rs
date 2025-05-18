@@ -19,7 +19,9 @@ use lightning::ln::msgs::{
 };
 use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::routing::gossip::{NetworkGraph, NodeId};
-use lightning::routing::router::{find_route, Path, PaymentParameters, Route, RouteParameters};
+use lightning::routing::router::{
+    build_route_from_hops, find_route, Path, PaymentParameters, Route, RouteParameters,
+};
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringDecayParameters};
 use lightning::routing::utxo::{UtxoLookup, UtxoResult};
 use lightning::util::logger::{Level, Logger, Record};
@@ -553,6 +555,47 @@ fn find_payment_route<'a>(
     .map_err(|e| SimulationError::SimulatedNetworkError(e.err))
 }
 
+/// Uses the provided `hops` and `amount_msat` to build an LDK route.
+/// This is a helper function to build a route easily.
+/// The route built using this function can be passed into `SimGraph::send_to_route`.
+pub fn build_payment_route(
+    sending_node_id: PublicKey,
+    hops: &[PublicKey],
+    network_graph: &NetworkGraph<&WrappedLog>,
+    amount_msat: u64,
+) -> Result<Route, SimulationError> {
+    let last_hop = match hops.last() {
+        Some(last) => Ok(last),
+        None => Err(SimulationError::SimulatedNetworkError(
+            "No Last Hop".to_string(),
+        )),
+    }?;
+
+    build_route_from_hops(
+        &sending_node_id,
+        hops,
+        &RouteParameters {
+            payment_params: PaymentParameters::from_node_id(*last_hop, 0)
+                .with_max_total_cltv_expiry_delta(u32::MAX)
+                // TODO: set non-zero value to support MPP.
+                .with_max_path_count(1)
+                // Allow sending htlcs up to 50% of the channel's capacity.
+                .with_max_channel_saturation_power_of_half(1),
+            final_value_msat: amount_msat,
+            max_total_routing_fee_msat: None,
+        },
+        network_graph,
+        &WrappedLog {},
+        &[0; 32],
+    )
+    .map_err(|e| {
+        SimulationError::SimulatedNetworkError(format!(
+            "An Error occurred while building route - {}",
+            e.err
+        ))
+    })
+}
+
 #[async_trait]
 impl<T: SimNetwork> LightningNode for SimNode<'_, T> {
     fn get_info(&self) -> &NodeInfo {
@@ -699,6 +742,9 @@ pub struct SimGraph {
 
     /// trigger shutdown if a critical error occurs.
     shutdown_trigger: Trigger,
+
+    /// Tracks the channel that will provide updates for route payments by hash.
+    in_flight: HashMap<PaymentHash, Receiver<Result<PaymentResult, LightningError>>>,
 }
 
 impl SimGraph {
@@ -741,7 +787,63 @@ impl SimGraph {
             channels: Arc::new(Mutex::new(channels)),
             tasks,
             shutdown_trigger,
+            in_flight: HashMap::new(),
         })
+    }
+
+    pub async fn send_to_route(
+        &mut self,
+        sending_node_id: PublicKey,
+        route: Route,
+    ) -> Result<PaymentHash, LightningError> {
+        let (sender, receiver) = channel();
+
+        let preimage = PaymentPreimage(rand::random());
+        let payment_hash = preimage.into();
+
+        // Check for payment hash collision, failing the payment if we happen to repeat one.
+        match self.in_flight.entry(payment_hash) {
+            Entry::Occupied(_) => {
+                return Err(LightningError::SendPaymentError(
+                    "payment hash exists".to_string(),
+                ));
+            },
+            Entry::Vacant(vacant) => {
+                vacant.insert(receiver);
+            },
+        }
+
+        self.dispatch_payment(sending_node_id, route, payment_hash, sender);
+
+        Ok(payment_hash)
+    }
+
+    /// track_payment_to_route blocks until a payment outcome is returned for the payment hash provided, or the shutdown listener
+    /// provided is triggered. This call will fail if the hash provided was not obtained by calling send_to_route first.
+    pub async fn track_payment_to_route(
+        &mut self,
+        hash: &PaymentHash,
+        listener: Listener,
+    ) -> Result<PaymentResult, LightningError> {
+        match self.in_flight.remove(hash) {
+            Some(receiver) => {
+                select! {
+                    biased;
+                    _ = listener => Err(
+                        LightningError::TrackPaymentError("shutdown during payment tracking".to_string()),
+                    ),
+
+                    // If we get a payment result back, remove from our in flight set of payments and return the result.
+                    res = receiver => {
+                        res.map_err(|e| LightningError::TrackPaymentError(format!("channel receive err: {}", e)))?
+                    },
+                }
+            },
+            None => Err(LightningError::TrackPaymentError(format!(
+                "payment hash {} not found",
+                hex::encode(hash.0),
+            ))),
+        }
     }
 }
 
@@ -1887,5 +1989,112 @@ mod tests {
         test_kit.shutdown.trigger();
         test_kit.graph.tasks.close();
         test_kit.graph.tasks.wait().await;
+    }
+
+    #[tokio::test]
+    async fn test_send_and_track_successful_route_payment() {
+        let chan_capacity = 500_000_000;
+        let mut test_kit = DispatchPaymentTestKit::new(chan_capacity).await;
+
+        let sending_node = test_kit.nodes[0];
+        let hops = &[test_kit.nodes[1], test_kit.nodes[2], test_kit.nodes[3]];
+        let amount = 1_000_000;
+
+        // Get the route built by `build_payment_route`
+        let route = build_payment_route(sending_node, hops, &test_kit.routing_graph, amount)
+            .expect("Failed to build route");
+
+        let payment_hash = test_kit
+            .graph
+            .send_to_route(sending_node, route.clone())
+            .await
+            .expect("Failed to send payment to route");
+
+        let (_shutdown_trigger, shutdown_listener) = triggered::trigger();
+
+        // Track the payment
+        let payment_result = test_kit
+            .graph
+            .track_payment_to_route(&payment_hash, shutdown_listener)
+            .await
+            .expect("Failed to track payment");
+
+        // Assert the outcome
+        assert!(matches!(
+            payment_result.payment_outcome,
+            PaymentOutcome::Success
+        ));
+
+        let total_sent_by_alice = amount + route.get_total_fees();
+        // The amount for Bob to Carol is the amount paid to Dave + fee from Carol to Dave
+        let hop_1_amount_received_by_bob = amount + route.paths[0].hops[1].fee_msat;
+
+        // Calculate expected final channel balances
+        let alice_to_bob_expected = (chan_capacity - total_sent_by_alice, total_sent_by_alice);
+        let bob_to_carol_expected = (
+            chan_capacity - hop_1_amount_received_by_bob,
+            hop_1_amount_received_by_bob,
+        );
+        let carol_to_dave_expected = (chan_capacity - amount, amount);
+
+        let expected_balances = vec![
+            alice_to_bob_expected,
+            bob_to_carol_expected,
+            carol_to_dave_expected,
+        ];
+
+        // Verify channel balances after successful payment
+        assert_eq!(test_kit.channel_balances().await, expected_balances);
+
+        // Assert that the payment hash is removed from in_flight
+        assert!(!test_kit.graph.in_flight.contains_key(&payment_hash));
+    }
+
+    #[tokio::test]
+    async fn test_build_route_error() {
+        let chan_capacity = 100_000_000;
+        let test_kit = DispatchPaymentTestKit::new(chan_capacity).await;
+
+        let sending_node = test_kit.nodes[0];
+        let non_existent_node_pk = get_random_keypair().1;
+        let hops_invalid = &[non_existent_node_pk];
+        let amount = 10_000;
+
+        let result =
+            build_payment_route(sending_node, hops_invalid, &test_kit.routing_graph, amount);
+
+        assert!(matches!(
+            result,
+            Err(SimulationError::SimulatedNetworkError(msg)) if msg.contains("An Error occurred while building route - ")
+        ));
+
+        let hops_empty = &[];
+
+        let result2 =
+            build_payment_route(sending_node, hops_empty, &test_kit.routing_graph, amount);
+
+        assert!(matches!(
+            result2,
+            Err(SimulationError::SimulatedNetworkError(msg2)) if msg2.contains("No Last Hop")
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_track_payment_to_route_hash_not_found() {
+        let chan_capacity = 100_000_000;
+        let mut test_kit = DispatchPaymentTestKit::new(chan_capacity).await;
+
+        let non_existent_hash = PaymentHash([99; 32]);
+        let (_shutdown_trigger, shutdown_listener) = triggered::trigger();
+
+        let result = test_kit
+            .graph
+            .track_payment_to_route(&non_existent_hash, shutdown_listener)
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(LightningError::TrackPaymentError(msg)) if msg.contains("payment hash") && msg.contains("not found")
+        ));
     }
 }
