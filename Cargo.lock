@@ -2590,6 +2590,7 @@ dependencies = [
  "csv",
  "expanduser",
  "fedimint-tonic-lnd",
+ "futures",
  "hex",
  "lightning",
  "log",

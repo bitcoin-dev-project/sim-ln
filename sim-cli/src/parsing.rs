@@ -5,7 +5,8 @@ use log::LevelFilter;
 use serde::{Deserialize, Serialize};
 use simln_lib::clock::SimulationClock;
 use simln_lib::sim_node::{
-    ln_node_from_graph, populate_network_graph, ChannelPolicy, SimGraph, SimulatedChannel,
+    ln_node_from_graph, populate_network_graph, ChannelPolicy, Interceptor, SimGraph,
+    SimulatedChannel,
 };
 use simln_lib::{
     cln, cln::ClnNode, eclair, eclair::EclairNode, lnd, lnd::LndNode, serializers,
@@ -87,6 +88,10 @@ pub struct Cli {
     /// simulated nodes.
     #[clap(long)]
     pub speedup_clock: Option<u16>,
+    /// Latency to optionally introduce for payments in a simulated network expressed in
+    /// milliseconds.
+    #[clap(long)]
+    pub latency_ms: Option<u32>,
 }
 
 impl Cli {
@@ -109,6 +114,12 @@ impl Cli {
         if !sim_params.nodes.is_empty() && self.speedup_clock.is_some() {
             return Err(anyhow!(
                 "Clock speedup is only allowed when running on a simulated network"
+            ));
+        }
+
+        if !sim_params.nodes.is_empty() && self.latency_ms.is_some() {
+            return Err(anyhow!(
+                "Latency for payments is only allowed when running on a simulated network"
             ));
         }
 
@@ -217,6 +228,7 @@ pub async fn create_simulation_with_network(
     cli: &Cli,
     sim_params: &SimParams,
     tasks: TaskTracker,
+    interceptors: Vec<Arc<dyn Interceptor>>,
 ) -> Result<(Simulation<SimulationClock>, Vec<ActivityDefinition>), anyhow::Error> {
     let cfg: SimulationCfg = SimulationCfg::try_from(cli)?;
     let SimParams {
@@ -243,8 +255,13 @@ pub async fn create_simulation_with_network(
 
     // Setup a simulation graph that will handle propagation of payments through the network
     let simulation_graph = Arc::new(Mutex::new(
-        SimGraph::new(channels.clone(), tasks.clone(), shutdown_trigger.clone())
-            .map_err(|e| SimulationError::SimulatedNetworkError(format!("{:?}", e)))?,
+        SimGraph::new(
+            channels.clone(),
+            tasks.clone(),
+            interceptors,
+            (shutdown_trigger.clone(), shutdown_listener.clone()),
+        )
+        .map_err(|e| SimulationError::SimulatedNetworkError(format!("{:?}", e)))?,
     ));
 
     let clock = Arc::new(SimulationClock::new(cli.speedup_clock.unwrap_or(1))?);
