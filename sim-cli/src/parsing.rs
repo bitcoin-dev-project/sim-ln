@@ -6,8 +6,9 @@ use serde::{Deserialize, Serialize};
 use simln_lib::clock::SimulationClock;
 use simln_lib::sim_node::{
     ln_node_from_graph, populate_network_graph, ChannelPolicy, CustomRecords, Interceptor,
-    SimGraph, SimNode, SimulatedChannel,
+    PathFinder, SimGraph, SimulatedChannel,
 };
+
 use simln_lib::{
     cln, cln::ClnNode, eclair, eclair::EclairNode, lnd, lnd::LndNode, serializers,
     ActivityDefinition, Amount, Interval, LightningError, LightningNode, NodeId, NodeInfo,
@@ -258,6 +259,7 @@ pub async fn create_simulation_with_network(
     tasks: TaskTracker,
     interceptors: Vec<Arc<dyn Interceptor>>,
     custom_records: CustomRecords,
+    pathfinder: P,
 ) -> Result<
     (
         Simulation<SimulationClock>,
@@ -308,12 +310,11 @@ pub async fn create_simulation_with_network(
         populate_network_graph(channels, clock.clone())
             .map_err(|e| SimulationError::SimulatedNetworkError(format!("{:?}", e)))?,
     );
-
     // We want the full set of nodes in our graph to return to the caller so that they can take
     // custom actions on the simulated network. For the nodes we'll pass our simulation, cast them
     // to a dyn trait and exclude any nodes that shouldn't be included in random activity
     // generation.
-    let nodes = ln_node_from_graph(simulation_graph.clone(), routing_graph, clock.clone()).await?;
+    let nodes = ln_node_from_graph(simulation_graph.clone(), routing_graph, clock.clone(), pathfinder).await?;
     let mut nodes_dyn: HashMap<_, Arc<Mutex<dyn LightningNode>>> = nodes
         .iter()
         .map(|(pk, node)| (*pk, Arc::clone(node) as Arc<Mutex<dyn LightningNode>>))
@@ -321,7 +322,6 @@ pub async fn create_simulation_with_network(
     for pk in exclude {
         nodes_dyn.remove(pk);
     }
-
     let validated_activities =
         get_validated_activities(&nodes_dyn, nodes_info, sim_params.activity.clone()).await?;
 
@@ -338,6 +338,7 @@ pub async fn create_simulation_with_network(
         nodes,
     ))
 }
+
 
 /// Parses the cli options provided and creates a simulation to be run, connecting to lightning nodes and validating
 /// any activity described in the simulation file.
