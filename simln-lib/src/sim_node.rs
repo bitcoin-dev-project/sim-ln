@@ -824,7 +824,7 @@ async fn handle_intercepted_htlc(
     shutdown_listener: Listener,
 ) -> Result<Result<CustomRecords, ForwardingError>, CriticalError> {
     if interceptors.is_empty() {
-        return Ok(Ok(HashMap::new()));
+        return Ok(Ok(request.incoming_custom_records));
     }
 
     let mut attached_custom_records: CustomRecords = HashMap::new();
@@ -925,6 +925,9 @@ pub struct SimGraph {
     /// trigger a shutdown signal to other interceptors.
     interceptors: Vec<Arc<dyn Interceptor>>,
 
+    /// Custom records that will be added to the first outgoing HTLC in a payment.
+    default_custom_records: CustomRecords,
+
     /// Shutdown signal that can be used to trigger a shutdown if a critical error occurs. Listener
     /// can be used to listen for shutdown signals coming from upstream.
     shutdown_signal: (Trigger, Listener),
@@ -936,6 +939,7 @@ impl SimGraph {
         graph_channels: Vec<SimulatedChannel>,
         tasks: TaskTracker,
         interceptors: Vec<Arc<dyn Interceptor>>,
+        default_custom_records: CustomRecords,
         shutdown_signal: (Trigger, Listener),
     ) -> Result<Self, SimulationError> {
         let mut nodes: HashMap<PublicKey, Vec<u64>> = HashMap::new();
@@ -971,6 +975,7 @@ impl SimGraph {
             channels: Arc::new(Mutex::new(channels)),
             tasks,
             interceptors,
+            default_custom_records,
             shutdown_signal,
         })
     }
@@ -1098,6 +1103,7 @@ impl SimNetwork for SimGraph {
             payment_hash,
             sender,
             interceptors: self.interceptors.clone(),
+            custom_records: self.default_custom_records.clone(),
             shutdown_signal: self.shutdown_signal.clone(),
         }));
     }
@@ -1149,13 +1155,14 @@ async fn add_htlcs(
     route: Path,
     payment_hash: PaymentHash,
     interceptors: Vec<Arc<dyn Interceptor>>,
+    custom_records: CustomRecords,
     shutdown_listener: Listener,
 ) -> Result<Result<(), (Option<usize>, ForwardingError)>, CriticalError> {
     let mut outgoing_node = source;
     let mut outgoing_amount = route.fee_msat() + route.final_value_msat();
     let mut outgoing_cltv = route.hops.iter().map(|hop| hop.cltv_expiry_delta).sum();
 
-    let mut incoming_custom_records = HashMap::new();
+    let mut incoming_custom_records = custom_records;
 
     // Tracks the hop index that we need to remove htlcs from on payment completion (both success and failure).
     // Given a payment from A to C, over the route A -- B -- C, this index has the following meanings:
@@ -1237,7 +1244,7 @@ async fn add_htlcs(
             forwarding_node: hop.pubkey,
             payment_hash,
             incoming_htlc: incoming_htlc.clone(),
-            incoming_custom_records: incoming_custom_records.clone(),
+            incoming_custom_records,
             outgoing_channel_id: next_scid,
             incoming_amount_msat: outgoing_amount,
             outgoing_amount_msat: outgoing_amount - hop.fee_msat,
@@ -1345,6 +1352,7 @@ struct PropagatePaymentRequest {
     payment_hash: PaymentHash,
     sender: Sender<Result<PaymentResult, LightningError>>,
     interceptors: Vec<Arc<dyn Interceptor>>,
+    custom_records: CustomRecords,
     shutdown_signal: (Trigger, Listener),
 }
 
@@ -1359,6 +1367,7 @@ async fn propagate_payment(request: PropagatePaymentRequest) {
         request.route.clone(),
         request.payment_hash,
         request.interceptors.clone(),
+        request.custom_records,
         request.shutdown_signal.1,
     )
     .await
@@ -1964,7 +1973,11 @@ mod tests {
         /// Alice (100) --- (0) Bob (100) --- (0) Carol (100) --- (0) Dave
         ///
         /// The nodes pubkeys in this chain of channels are provided in-order for easy access.
-        async fn new(capacity: u64, interceptors: Vec<Arc<dyn Interceptor>>) -> Self {
+        async fn new(
+            capacity: u64,
+            interceptors: Vec<Arc<dyn Interceptor>>,
+            custom_records: CustomRecords,
+        ) -> Self {
             let shutdown_signal = triggered::trigger();
             let channels = create_simulated_channels(3, capacity);
             let routing_graph = Arc::new(
@@ -1991,6 +2004,7 @@ mod tests {
                     channels.clone(),
                     TaskTracker::new(),
                     interceptors,
+                    custom_records,
                     shutdown_signal,
                 )
                 .expect("could not create test graph"),
@@ -2071,7 +2085,8 @@ mod tests {
     #[tokio::test]
     async fn test_successful_dispatch() {
         let chan_capacity = 500_000_000;
-        let mut test_kit = DispatchPaymentTestKit::new(chan_capacity, vec![]).await;
+        let mut test_kit =
+            DispatchPaymentTestKit::new(chan_capacity, vec![], CustomRecords::default()).await;
 
         // Send a payment that should succeed from Alice -> Dave.
         let mut amt = 20_000;
@@ -2136,7 +2151,8 @@ mod tests {
     #[tokio::test]
     async fn test_successful_multi_hop() {
         let chan_capacity = 500_000_000;
-        let mut test_kit = DispatchPaymentTestKit::new(chan_capacity, vec![]).await;
+        let mut test_kit =
+            DispatchPaymentTestKit::new(chan_capacity, vec![], CustomRecords::default()).await;
 
         // Send a payment that should succeed from Alice -> Dave.
         let amt = 20_000;
@@ -2166,7 +2182,8 @@ mod tests {
     #[tokio::test]
     async fn test_single_hop_payments() {
         let chan_capacity = 500_000_000;
-        let mut test_kit = DispatchPaymentTestKit::new(chan_capacity, vec![]).await;
+        let mut test_kit =
+            DispatchPaymentTestKit::new(chan_capacity, vec![], CustomRecords::default()).await;
 
         // Send a single hop payment from Alice -> Bob, it will succeed because Alice has all the liquidity.
         let amt = 150_000;
@@ -2198,7 +2215,8 @@ mod tests {
     #[tokio::test]
     async fn test_multi_hop_faiulre() {
         let chan_capacity = 500_000_000;
-        let mut test_kit = DispatchPaymentTestKit::new(chan_capacity, vec![]).await;
+        let mut test_kit =
+            DispatchPaymentTestKit::new(chan_capacity, vec![], CustomRecords::default()).await;
 
         // Drain liquidity between Bob and Carol to force failures on Bob's outgoing linke.
         test_kit
@@ -2244,7 +2262,7 @@ mod tests {
                 channel_id: ShortChannelID(0),
                 index: 0,
             },
-            incoming_custom_records: CustomRecords::new(),
+            incoming_custom_records: CustomRecords::default(),
             outgoing_channel_id: None,
             incoming_amount_msat: 0,
             outgoing_amount_msat: 0,
@@ -2406,7 +2424,8 @@ mod tests {
             .returning(|_| Ok(()));
 
         let mock_1 = Arc::new(mock_interceptor_1);
-        let mut test_kit = DispatchPaymentTestKit::new(500_000_000, vec![mock_1]).await;
+        let mut test_kit =
+            DispatchPaymentTestKit::new(500_000_000, vec![mock_1], CustomRecords::default()).await;
         let (_, result) = test_kit
             .send_test_payment(test_kit.nodes[0], test_kit.nodes[3], 150_000_000)
             .await;
@@ -2426,5 +2445,41 @@ mod tests {
         test_kit.shutdown.0.trigger();
         test_kit.graph.tasks.close();
         test_kit.graph.tasks.wait().await;
+    }
+
+    /// Tests custom records set for interceptors in multi-hop payment.
+    #[tokio::test]
+    async fn test_custom_records() {
+        let custom_records = HashMap::from([(1000, vec![1])]);
+
+        let mut mock_interceptor_1 = MockTestInterceptor::new();
+        let custom_records_clone = custom_records.clone();
+        mock_interceptor_1
+            .expect_intercept_htlc()
+            .withf(move |req: &InterceptRequest| {
+                // Check custom records passed to interceptor are the default ones set.
+                req.incoming_custom_records == custom_records_clone
+            })
+            .returning(|_| Ok(Ok(CustomRecords::default()))); // Set empty records for 2nd hop.
+        mock_interceptor_1
+            .expect_notify_resolution()
+            .returning(|_| Ok(()))
+            .times(2);
+
+        mock_interceptor_1
+            .expect_intercept_htlc()
+            .withf(move |req: &InterceptRequest| {
+                // On this 2nd hop, the custom records should be empty.
+                req.incoming_custom_records == CustomRecords::default()
+            })
+            .returning(|_| Ok(Ok(CustomRecords::default())));
+
+        let chan_capacity = 500_000_000;
+        let mock_1: Arc<dyn Interceptor> = Arc::new(mock_interceptor_1);
+        let mut test_kit =
+            DispatchPaymentTestKit::new(chan_capacity, vec![mock_1], custom_records).await;
+        let _ = test_kit
+            .send_test_payment(test_kit.nodes[0], test_kit.nodes[2], 150_000)
+            .await;
     }
 }

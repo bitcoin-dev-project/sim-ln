@@ -3,7 +3,10 @@ use std::sync::Arc;
 use clap::Parser;
 use log::LevelFilter;
 use sim_cli::parsing::{create_simulation, create_simulation_with_network, parse_sim_params, Cli};
-use simln_lib::{latency_interceptor::LatencyIntercepor, sim_node::Interceptor};
+use simln_lib::{
+    latency_interceptor::LatencyIntercepor,
+    sim_node::{CustomRecords, Interceptor},
+};
 use simple_logger::SimpleLogger;
 use tokio_util::task::TaskTracker;
 
@@ -38,7 +41,14 @@ async fn main() -> anyhow::Result<()> {
         } else {
             vec![]
         };
-        create_simulation_with_network(&cli, &sim_params, tasks.clone(), interceptors).await?
+        create_simulation_with_network(
+            &cli,
+            &sim_params,
+            tasks.clone(),
+            interceptors,
+            CustomRecords::default(),
+        )
+        .await?
     };
     let sim2 = sim.clone();
 
