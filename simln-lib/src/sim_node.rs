@@ -1903,8 +1903,8 @@ mod tests {
             .returning(move |_| Ok((node_info(lookup_pk), vec![1, 2, 3])));
 
         // Assert that we get three channels from the mock.
-        let node_info_ = node.get_node_info(&lookup_pk).await.unwrap();
-        assert_eq!(lookup_pk, node_info_.pubkey);
+        let node_info = node.get_node_info(&lookup_pk).await.unwrap();
+        assert_eq!(lookup_pk, node_info.pubkey);
         assert_eq!(node.list_channels().await.unwrap().len(), 3);
 
         // Next, we're going to test handling of in-flight payments. To do this, we'll mock out calls to our dispatch
