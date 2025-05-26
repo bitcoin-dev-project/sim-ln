@@ -469,7 +469,8 @@ impl SimulatedChannel {
 
 /// SimNetwork represents a high level network coordinator that is responsible for the task of actually propagating
 /// payments through the simulated network.
-trait SimNetwork: Send + Sync {
+#[async_trait]
+pub trait SimNetwork: Send + Sync {
     /// Sends payments over the route provided through the network, reporting the final payment outcome to the sender
     /// channel provided.
     fn dispatch_payment(
@@ -490,7 +491,7 @@ trait SimNetwork: Send + Sync {
 /// all functionality through to a coordinating simulation network. This implementation contains both the [`SimNetwork`]
 /// implementation that will allow us to dispatch payments and a read-only NetworkGraph that is used for pathfinding.
 /// While these two could be combined, we re-use the LDK-native struct to allow re-use of their pathfinding logic.
-struct SimNode<'a, T: SimNetwork> {
+pub struct SimNode<'a, T: SimNetwork> {
     info: NodeInfo,
     /// The underlying execution network that will be responsible for dispatching payments.
     network: Arc<Mutex<T>>,
@@ -527,6 +528,33 @@ impl<'a, T: SimNetwork> SimNode<'a, T> {
             pathfinding_graph,
             scorer,
         }
+    }
+
+    /// The [`lightning::routing::router::build_route_from_hops`] function can be used to build the route to be passed here.
+    pub async fn send_to_route(&mut self, route: Route) -> Result<PaymentHash, LightningError> {
+        let (sender, receiver) = channel();
+
+        let preimage = PaymentPreimage(rand::random());
+        let payment_hash = preimage.into();
+
+        // Check for payment hash collision, failing the payment if we happen to repeat one.
+        match self.in_flight.entry(payment_hash) {
+            Entry::Occupied(_) => {
+                return Err(LightningError::SendPaymentError(
+                    "payment hash exists".to_string(),
+                ));
+            },
+            Entry::Vacant(vacant) => {
+                vacant.insert(receiver);
+            },
+        }
+
+        self.network
+            .lock()
+            .await
+            .dispatch_payment(self.info.pubkey, route, payment_hash, sender);
+
+        Ok(payment_hash)
     }
 }
 
@@ -1877,8 +1905,8 @@ mod tests {
             .returning(move |_| Ok((node_info(lookup_pk), vec![1, 2, 3])));
 
         // Assert that we get three channels from the mock.
-        let node_info = node.get_node_info(&lookup_pk).await.unwrap();
-        assert_eq!(lookup_pk, node_info.pubkey);
+        let node_info_ = node.get_node_info(&lookup_pk).await.unwrap();
+        assert_eq!(lookup_pk, node_info_.pubkey);
         assert_eq!(node.list_channels().await.unwrap().len(), 3);
 
         // Next, we're going to test handling of in-flight payments. To do this, we'll mock out calls to our dispatch
