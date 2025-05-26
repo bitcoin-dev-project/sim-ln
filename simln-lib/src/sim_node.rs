@@ -484,11 +484,57 @@ pub trait SimNetwork: Send + Sync {
     fn list_nodes(&self) -> Result<Vec<NodeInfo>, LightningError>;
 }
 
+/// A trait for custom pathfinding implementations.
+pub trait PathFinder<'a>: Send + Sync {
+    fn find_route(
+        &self,
+        source: &PublicKey,
+        dest: PublicKey,
+        amount_msat: u64,
+        pathfinding_graph: &NetworkGraph<&'a WrappedLog>,
+        scorer: &ProbabilisticScorer<Arc<NetworkGraph<&'a WrappedLog>>, &'a WrappedLog>,
+    ) -> Result<Route, SimulationError>;
+}
+
+/// Default pathfinder that uses LDK's pathfinding algorithm.
+#[derive(Clone)]
+pub struct DefaultPathFinder;
+
+impl<'a> PathFinder<'a> for DefaultPathFinder {
+    fn find_route(
+        &self,
+        source: &PublicKey,
+        dest: PublicKey,
+        amount_msat: u64,
+        pathfinding_graph: &NetworkGraph<&'a WrappedLog>,
+        scorer: &ProbabilisticScorer<Arc<NetworkGraph<&'a WrappedLog>>, &'a WrappedLog>,
+    ) -> Result<Route, SimulationError> {
+        find_route(
+            source,
+            &RouteParameters {
+                payment_params: PaymentParameters::from_node_id(dest, 0)
+                    .with_max_total_cltv_expiry_delta(u32::MAX)
+                    .with_max_path_count(1)
+                    .with_max_channel_saturation_power_of_half(1),
+                final_value_msat: amount_msat,
+                max_total_routing_fee_msat: None,
+            },
+            pathfinding_graph,
+            None,
+            &WrappedLog {},
+            scorer,
+            &Default::default(),
+            &[0; 32],
+        )
+        .map_err(|e| SimulationError::SimulatedNetworkError(e.err))
+    }
+}
+
 /// A wrapper struct used to implement the LightningNode trait (can be thought of as "the" lightning node). Passes
 /// all functionality through to a coordinating simulation network. This implementation contains both the [`SimNetwork`]
 /// implementation that will allow us to dispatch payments and a read-only NetworkGraph that is used for pathfinding.
 /// While these two could be combined, we re-use the LDK-native struct to allow re-use of their pathfinding logic.
-pub struct SimNode<'a, T: SimNetwork> {
+pub struct SimNode<'a, T: SimNetwork, P: PathFinder<'a> = DefaultPathFinder> {
     info: NodeInfo,
     /// The underlying execution network that will be responsible for dispatching payments.
     network: Arc<Mutex<T>>,
@@ -499,15 +545,18 @@ pub struct SimNode<'a, T: SimNetwork> {
     /// Probabilistic scorer used to rank paths through the network for routing. This is reused across
     /// multiple payments to maintain scoring state.
     scorer: ProbabilisticScorer<Arc<NetworkGraph<&'a WrappedLog>>, &'a WrappedLog>,
+    /// The pathfinder implementation to use for finding routes
+    pathfinder: P,
 }
 
-impl<'a, T: SimNetwork> SimNode<'a, T> {
+impl<'a, T: SimNetwork, P: PathFinder<'a>> SimNode<'a, T, P> {
     /// Creates a new simulation node that refers to the high level network coordinator provided to process payments
     /// on its behalf. The pathfinding graph is provided separately so that each node can handle its own pathfinding.
     pub fn new(
         pubkey: PublicKey,
         payment_network: Arc<Mutex<T>>,
         pathfinding_graph: Arc<NetworkGraph<&'a WrappedLog>>,
+        pathfinder: P,
     ) -> Self {
         // Initialize the probabilistic scorer with default parameters for learning from payment
         // history. These parameters control how much successful/failed payments affect routing
@@ -524,7 +573,39 @@ impl<'a, T: SimNetwork> SimNode<'a, T> {
             in_flight: HashMap::new(),
             pathfinding_graph,
             scorer,
+            pathfinder,
         }
+    }
+
+    /// Dispatches a payment to a specified route.
+    /// The [`lightning::routing::router::build_route_from_hops`] function can be used to build the route to be passed here.
+    ///
+    /// **Note:** The payment hash passed in here should be used in track_payment to track the payment outcome.
+    pub async fn send_to_route(
+        &mut self,
+        route: Route,
+        payment_hash: PaymentHash,
+    ) -> Result<(), LightningError> {
+        let (sender, receiver) = channel();
+
+        // Check for payment hash collision, failing the payment if we happen to repeat one.
+        match self.in_flight.entry(payment_hash) {
+            Entry::Occupied(_) => {
+                return Err(LightningError::SendPaymentError(
+                    "payment hash exists".to_string(),
+                ));
+            },
+            Entry::Vacant(vacant) => {
+                vacant.insert(receiver);
+            },
+        }
+
+        self.network
+            .lock()
+            .await
+            .dispatch_payment(self.info.pubkey, route, payment_hash, sender);
+
+        Ok(())
     }
 
     /// Dispatches a payment to a specified route.
@@ -572,39 +653,8 @@ fn node_info(pubkey: PublicKey) -> NodeInfo {
     }
 }
 
-/// Uses LDK's pathfinding algorithm with default parameters to find a path from source to destination, with no
-/// restrictions on fee budget.
-fn find_payment_route<'a>(
-    source: &PublicKey,
-    dest: PublicKey,
-    amount_msat: u64,
-    pathfinding_graph: &NetworkGraph<&'a WrappedLog>,
-    scorer: &ProbabilisticScorer<Arc<NetworkGraph<&'a WrappedLog>>, &'a WrappedLog>,
-) -> Result<Route, SimulationError> {
-    find_route(
-        source,
-        &RouteParameters {
-            payment_params: PaymentParameters::from_node_id(dest, 0)
-                .with_max_total_cltv_expiry_delta(u32::MAX)
-                // TODO: set non-zero value to support MPP.
-                .with_max_path_count(1)
-                // Allow sending htlcs up to 50% of the channel's capacity.
-                .with_max_channel_saturation_power_of_half(1),
-            final_value_msat: amount_msat,
-            max_total_routing_fee_msat: None,
-        },
-        pathfinding_graph,
-        None,
-        &WrappedLog {},
-        scorer,
-        &Default::default(),
-        &[0; 32],
-    )
-    .map_err(|e| SimulationError::SimulatedNetworkError(e.err))
-}
-
 #[async_trait]
-impl<T: SimNetwork> LightningNode for SimNode<'_, T> {
+impl<'a, T: SimNetwork, P: PathFinder<'a>> LightningNode for SimNode<'a, T, P> {
     fn get_info(&self) -> &NodeInfo {
         &self.info
     }
@@ -620,8 +670,24 @@ impl<T: SimNetwork> LightningNode for SimNode<'_, T> {
         dest: PublicKey,
         amount_msat: u64,
     ) -> Result<PaymentHash, LightningError> {
-        // Create a sender and receiver pair that will be used to report the results of the payment and add them to
-        // our internal tracking state along with the chosen payment hash.
+        // Use the stored scorer when finding a route
+        let route = match self.pathfinder.find_route(
+            &self.info.pubkey,
+            dest,
+            amount_msat,
+            &self.pathfinding_graph,
+            &self.scorer,
+        ) {
+            Ok(route) => route,
+            Err(e) => {
+                log::warn!("No route found: {e}");
+                return Err(LightningError::SendPaymentError(format!(
+                    "No route found: {e}"
+                )));
+            },
+        };
+
+        // Create a channel to receive the payment result.
         let (sender, receiver) = channel();
         let preimage = PaymentPreimage(rand::random());
         let payment_hash = preimage.into();
@@ -638,36 +704,13 @@ impl<T: SimNetwork> LightningNode for SimNode<'_, T> {
             },
         }
 
-        // Use the stored scorer when finding a route
-        let route = match find_payment_route(
-            &self.info.pubkey,
-            dest,
-            amount_msat,
-            &self.pathfinding_graph,
-            &self.scorer,
-        ) {
-            Ok(path) => path,
-            // In the case that we can't find a route for the payment, we still report a successful payment *api call*
-            // and report RouteNotFound to the tracking channel. This mimics the behavior of real nodes.
-            Err(e) => {
-                log::trace!("Could not find path for payment: {:?}.", e);
-
-                if let Err(e) = sender.send(Ok(PaymentResult {
-                    htlc_count: 0,
-                    payment_outcome: PaymentOutcome::RouteNotFound,
-                })) {
-                    log::error!("Could not send payment result: {:?}.", e);
-                }
-
-                return Ok(payment_hash);
-            },
-        };
-
-        // If we did successfully obtain a route, dispatch the payment through the network and then report success.
-        self.network
-            .lock()
-            .await
-            .dispatch_payment(self.info.pubkey, route, payment_hash, sender);
+        // Dispatch the payment through the network
+        self.network.lock().await.dispatch_payment(
+            self.info.pubkey,
+            route,
+            payment_hash,
+            sender,
+        );
 
         Ok(payment_hash)
     }
@@ -1007,12 +1050,16 @@ impl SimGraph {
 }
 
 /// Produces a map of node public key to lightning node implementation to be used for simulations.
-pub async fn ln_node_from_graph(
+pub async fn ln_node_from_graph<P>(
     graph: Arc<Mutex<SimGraph>>,
-    routing_graph: Arc<NetworkGraph<&'_ WrappedLog>>,
-) -> HashMap<PublicKey, Arc<Mutex<dyn LightningNode + '_>>> {
+    routing_graph: Arc<NetworkGraph<&'static WrappedLog>>,
+    pathfinder: P,
+) -> HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> 
+where
+    P: for<'a> PathFinder<'a> + Clone + 'static,
+{
     let mut nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
-
+    
     for pk in graph.lock().await.nodes.keys() {
         nodes.insert(
             *pk,
@@ -1020,6 +1067,7 @@ pub async fn ln_node_from_graph(
                 *pk,
                 graph.clone(),
                 routing_graph.clone(),
+                pathfinder.clone(),
             ))),
         );
     }
@@ -1897,7 +1945,7 @@ mod tests {
 
         // Create a simulated node for the first channel in our network.
         let pk = channels[0].node_1.policy.pubkey;
-        let mut node = SimNode::new(pk, sim_network.clone(), Arc::new(graph));
+        let mut node = SimNode::new(pk, sim_network.clone(), Arc::new(graph), DefaultPathFinder);
 
         // Prime mock to return node info from lookup and assert that we get the pubkey we're expecting.
         let lookup_pk = channels[3].node_1.policy.pubkey;
@@ -1988,6 +2036,7 @@ mod tests {
         routing_graph: Arc<NetworkGraph<&'a WrappedLog>>,
         scorer: ProbabilisticScorer<Arc<NetworkGraph<&'a WrappedLog>>, &'a WrappedLog>,
         shutdown: (Trigger, Listener),
+        pathfinder: DefaultPathFinder,
     }
 
     impl DispatchPaymentTestKit<'_> {
@@ -2036,6 +2085,7 @@ mod tests {
                 routing_graph,
                 scorer,
                 shutdown: shutdown_clone,
+                pathfinder: DefaultPathFinder,
             };
 
             // Assert that our channel balance is all on the side of the channel opener when we start up.
@@ -2078,8 +2128,13 @@ mod tests {
             dest: PublicKey,
             amt: u64,
         ) -> (Route, Result<PaymentResult, LightningError>) {
-            let route =
-                find_payment_route(&source, dest, amt, &self.routing_graph, &self.scorer).unwrap();
+            let route = self.pathfinder.find_route(
+                &source,
+                dest,
+                amt,
+                &self.routing_graph,
+                &self.scorer,
+            ).unwrap();
 
             let (sender, receiver) = oneshot::channel();
             self.graph
