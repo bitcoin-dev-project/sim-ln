@@ -5,9 +5,10 @@ use log::LevelFilter;
 use serde::{Deserialize, Serialize};
 use simln_lib::clock::SimulationClock;
 use simln_lib::sim_node::{
-    ln_node_from_graph, populate_network_graph, ChannelPolicy, CustomRecords, Interceptor,
+    ln_node_from_graph, populate_network_graph, ChannelPolicy, CustomRecords, Interceptor, PathFinder,
     SimGraph, SimulatedChannel,
 };
+
 use simln_lib::{
     cln, cln::ClnNode, eclair, eclair::EclairNode, lnd, lnd::LndNode, serializers,
     ActivityDefinition, Amount, Interval, LightningError, LightningNode, NodeId, NodeInfo,
@@ -224,12 +225,13 @@ struct NodeMapping {
     alias_node_map: HashMap<String, NodeInfo>,
 }
 
-pub async fn create_simulation_with_network(
+pub async fn create_simulation_with_network<P: for<'a> PathFinder<'a> + Clone + 'static>(
     cli: &Cli,
     sim_params: &SimParams,
     tasks: TaskTracker,
     interceptors: Vec<Arc<dyn Interceptor>>,
     custom_records: CustomRecords,
+    pathfinder: P,
 ) -> Result<(Simulation<SimulationClock>, Vec<ActivityDefinition>), anyhow::Error> {
     let cfg: SimulationCfg = SimulationCfg::try_from(cli)?;
     let SimParams {
@@ -276,7 +278,8 @@ pub async fn create_simulation_with_network(
             .map_err(|e| SimulationError::SimulatedNetworkError(format!("{:?}", e)))?,
     );
 
-    let nodes = ln_node_from_graph(simulation_graph.clone(), routing_graph).await;
+    // Pass the pathfinder to ln_node_from_graph
+    let nodes = ln_node_from_graph(simulation_graph.clone(), routing_graph, pathfinder).await;
     let validated_activities =
         get_validated_activities(&nodes, nodes_info, sim_params.activity.clone()).await?;
 
@@ -292,6 +295,7 @@ pub async fn create_simulation_with_network(
         validated_activities,
     ))
 }
+
 
 /// Parses the cli options provided and creates a simulation to be run, connecting to lightning nodes and validating
 /// any activity described in the simulation file.
