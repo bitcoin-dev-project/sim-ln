@@ -489,6 +489,15 @@ pub trait SimNetwork: Send + Sync {
 
 type LdkNetworkGraph = NetworkGraph<Arc<WrappedLog>>;
 
+struct InFlightPayment {
+    /// The channel used to report payment results to.
+    track_payment_receiver: Receiver<Result<PaymentResult, LightningError>>,
+    /// The path the payment was dispatched on.
+    /// This should be set to `None` if no payment path was found and the payment
+    /// was not dispatched.
+    path: Option<Path>,
+}
+
 /// A wrapper struct used to implement the LightningNode trait (can be thought of as "the" lightning node). Passes
 /// all functionality through to a coordinating simulation network. This implementation contains both the [`SimNetwork`]
 /// implementation that will allow us to dispatch payments and a read-only NetworkGraph that is used for pathfinding.
@@ -498,7 +507,7 @@ pub struct SimNode<T: SimNetwork> {
     /// The underlying execution network that will be responsible for dispatching payments.
     network: Arc<Mutex<T>>,
     /// Tracks the channel that will provide updates for payments by hash.
-    in_flight: Mutex<HashMap<PaymentHash, Receiver<Result<PaymentResult, LightningError>>>>,
+    in_flight: Mutex<HashMap<PaymentHash, InFlightPayment>>,
     /// A read-only graph used for pathfinding.
     pathfinding_graph: Arc<LdkNetworkGraph>,
     /// Probabilistic scorer used to rank paths through the network for routing. This is reused across
@@ -548,17 +557,18 @@ impl<T: SimNetwork> SimNode<T> {
         let (sender, receiver) = channel();
 
         // Check for payment hash collision, failing the payment if we happen to repeat one.
-        let mut in_flight = self.in_flight.lock().await;
-        match in_flight.entry(payment_hash) {
+        match self.in_flight.lock().await.entry(payment_hash) {
             Entry::Occupied(_) => {
                 return Err(LightningError::SendPaymentError(
                     "payment hash exists".to_string(),
                 ));
             },
-            Entry::Vacant(vacant) => {
-                vacant.insert(receiver);
-            },
-        }
+            Entry::Vacant(vacant) => vacant.insert(InFlightPayment {
+                track_payment_receiver: receiver,
+                path: Some(route.paths[0].clone()), // TODO: MPP payments? we check in dispatch_payment
+                                                    // should probably only pass a single path to dispatch
+            }),
+        };
 
         self.network.lock().await.dispatch_payment(
             self.info.pubkey,
@@ -640,16 +650,15 @@ impl<T: SimNetwork> LightningNode for SimNode<T> {
         let payment_hash = preimage.into();
 
         // Check for payment hash collision, failing the payment if we happen to repeat one.
-        match self.in_flight.lock().await.entry(payment_hash) {
+        let mut in_flight_guard = self.in_flight.lock().await;
+        let entry = match in_flight_guard.entry(payment_hash) {
             Entry::Occupied(_) => {
                 return Err(LightningError::SendPaymentError(
                     "payment hash exists".to_string(),
                 ));
             },
-            Entry::Vacant(vacant) => {
-                vacant.insert(receiver);
-            },
-        }
+            Entry::Vacant(vacant) => vacant,
+        };
 
         // Use the stored scorer when finding a route
         let route = match find_payment_route(
@@ -672,9 +681,21 @@ impl<T: SimNetwork> LightningNode for SimNode<T> {
                     log::error!("Could not send payment result: {:?}.", e);
                 }
 
+                entry.insert(InFlightPayment {
+                    track_payment_receiver: receiver,
+                    path: None, // TODO: how to handle non-MPP support (where would we do
+                                // paths in the world where we have them?).
+                });
+
                 return Ok(payment_hash);
             },
         };
+
+        entry.insert(InFlightPayment {
+            track_payment_receiver: receiver,
+            path: Some(route.paths[0].clone()), // TODO: how to handle non-MPP support (where would we do
+                                                // paths in the world where we have them?).
+        });
 
         // If we did successfully obtain a route, dispatch the payment through the network and then report success.
         self.network.lock().await.dispatch_payment(
@@ -696,9 +717,8 @@ impl<T: SimNetwork> LightningNode for SimNode<T> {
         hash: &PaymentHash,
         listener: Listener,
     ) -> Result<PaymentResult, LightningError> {
-        let mut in_flight = self.in_flight.lock().await;
-        match in_flight.remove(hash) {
-            Some(receiver) => {
+        match self.in_flight.lock().await.remove(hash) {
+            Some(in_flight) => {
                 select! {
                     biased;
                     _ = listener => Err(
@@ -706,7 +726,7 @@ impl<T: SimNetwork> LightningNode for SimNode<T> {
                     ),
 
                     // If we get a payment result back, remove from our in flight set of payments and return the result.
-                    res = receiver => {
+                    res = in_flight.track_payment_receiver => {
                         res.map_err(|e| LightningError::TrackPaymentError(format!("channel receive err: {}", e)))?
                     },
                 }
