@@ -1091,15 +1091,15 @@ impl SimNetwork for SimGraph {
             },
         };
 
-        self.tasks.spawn(propagate_payment(
-            self.channels.clone(),
+        self.tasks.spawn(propagate_payment(PropagatePaymentRequest {
+            nodes: Arc::clone(&self.channels),
             source,
-            path.clone(),
+            route: path.clone(),
             payment_hash,
             sender,
-            self.interceptors.clone(),
-            self.shutdown_signal.clone(),
-        ));
+            interceptors: self.interceptors.clone(),
+            shutdown_signal: self.shutdown_signal.clone(),
+        }));
     }
 
     /// lookup_node fetches a node's information and channel capacities.
@@ -1338,11 +1338,7 @@ async fn remove_htlcs(
     Ok(())
 }
 
-/// Finds a payment path from the source to destination nodes provided, and propagates the appropriate htlcs through
-/// the simulated network, notifying the sender channel provided of the payment outcome. If a critical error occurs,
-/// ie a breakdown of our state machine, it will still notify the payment outcome and will use the shutdown trigger
-/// to signal that we should exit.
-async fn propagate_payment(
+struct PropagatePaymentRequest {
     nodes: Arc<Mutex<HashMap<ShortChannelID, SimulatedChannel>>>,
     source: PublicKey,
     route: Path,
@@ -1350,31 +1346,37 @@ async fn propagate_payment(
     sender: Sender<Result<PaymentResult, LightningError>>,
     interceptors: Vec<Arc<dyn Interceptor>>,
     shutdown_signal: (Trigger, Listener),
-) {
+}
+
+/// Finds a payment path from the source to destination nodes provided, and propagates the appropriate htlcs through
+/// the simulated network, notifying the sender channel provided of the payment outcome. If a critical error occurs,
+/// ie a breakdown of our state machine, it will still notify the payment outcome and will use the shutdown trigger
+/// to signal that we should exit.
+async fn propagate_payment(request: PropagatePaymentRequest) {
     let notify_result = match add_htlcs(
-        nodes.clone(),
-        source,
-        route.clone(),
-        payment_hash,
-        interceptors.clone(),
-        shutdown_signal.1,
+        request.nodes.clone(),
+        request.source,
+        request.route.clone(),
+        request.payment_hash,
+        request.interceptors.clone(),
+        request.shutdown_signal.1,
     )
     .await
     {
         Ok(Ok(_)) => {
             // If we successfully added the htlc, go ahead and remove all the htlcs in the route with successful resolution.
             if let Err(e) = remove_htlcs(
-                nodes,
-                route.hops.len() - 1,
-                source,
-                route,
-                payment_hash,
+                request.nodes,
+                request.route.hops.len() - 1,
+                request.source,
+                request.route,
+                request.payment_hash,
                 true,
-                interceptors,
+                request.interceptors,
             )
             .await
             {
-                shutdown_signal.0.trigger();
+                request.shutdown_signal.0.trigger();
                 log::error!("Could not remove htlcs from channel: {e}.");
             }
             PaymentResult {
@@ -1387,24 +1389,24 @@ async fn propagate_payment(
             // state. It's possible that we failed with the very first add, and then we don't need to clean anything up.
             if let Some(resolution_idx) = fail_idx {
                 if remove_htlcs(
-                    nodes,
+                    request.nodes,
                     resolution_idx,
-                    source,
-                    route,
-                    payment_hash,
+                    request.source,
+                    request.route,
+                    request.payment_hash,
                     false,
-                    interceptors,
+                    request.interceptors,
                 )
                 .await
                 .is_err()
                 {
-                    shutdown_signal.0.trigger();
+                    request.shutdown_signal.0.trigger();
                 }
             }
 
             log::debug!(
                 "Forwarding failure for simulated payment {}: {fwd_err}",
-                hex::encode(payment_hash.0)
+                hex::encode(request.payment_hash.0)
             );
             PaymentResult {
                 htlc_count: 0,
@@ -1412,10 +1414,10 @@ async fn propagate_payment(
             }
         },
         Err(critical_err) => {
-            shutdown_signal.0.trigger();
+            request.shutdown_signal.0.trigger();
             log::debug!(
                 "Critical error in simulated payment {}: {critical_err}",
-                hex::encode(payment_hash.0)
+                hex::encode(request.payment_hash.0)
             );
             PaymentResult {
                 htlc_count: 0,
@@ -1424,7 +1426,7 @@ async fn propagate_payment(
         },
     };
 
-    if let Err(e) = sender.send(Ok(notify_result)) {
+    if let Err(e) = request.sender.send(Ok(notify_result)) {
         log::error!("Could not notify payment result: {:?}.", e);
     }
 }
