@@ -5,8 +5,8 @@ use log::LevelFilter;
 use serde::{Deserialize, Serialize};
 use simln_lib::clock::SimulationClock;
 use simln_lib::sim_node::{
-    ln_node_from_graph, populate_network_graph, ChannelPolicy, Interceptor, SimGraph,
-    SimulatedChannel,
+    ln_node_from_graph, populate_network_graph, ChannelPolicy, CustomRecords, Interceptor,
+    SimGraph, SimulatedChannel,
 };
 use simln_lib::{
     cln, cln::ClnNode, eclair, eclair::EclairNode, lnd, lnd::LndNode, serializers,
@@ -229,6 +229,7 @@ pub async fn create_simulation_with_network(
     sim_params: &SimParams,
     tasks: TaskTracker,
     interceptors: Vec<Arc<dyn Interceptor>>,
+    custom_records: CustomRecords,
 ) -> Result<(Simulation<SimulationClock>, Vec<ActivityDefinition>), anyhow::Error> {
     let cfg: SimulationCfg = SimulationCfg::try_from(cli)?;
     let SimParams {
@@ -259,6 +260,7 @@ pub async fn create_simulation_with_network(
             channels.clone(),
             tasks.clone(),
             interceptors,
+            custom_records,
             (shutdown_trigger.clone(), shutdown_listener.clone()),
         )
         .map_err(|e| SimulationError::SimulatedNetworkError(format!("{:?}", e)))?,
