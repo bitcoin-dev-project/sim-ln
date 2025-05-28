@@ -467,7 +467,6 @@ impl SimulatedChannel {
 
 /// SimNetwork represents a high level network coordinator that is responsible for the task of actually propagating
 /// payments through the simulated network.
-#[async_trait]
 trait SimNetwork: Send + Sync {
     /// Sends payments over the route provided through the network, reporting the final payment outcome to the sender
     /// channel provided.
@@ -480,9 +479,9 @@ trait SimNetwork: Send + Sync {
     );
 
     /// Looks up a node in the simulated network and a list of its channel capacities.
-    async fn lookup_node(&self, node: &PublicKey) -> Result<(NodeInfo, Vec<u64>), LightningError>;
+    fn lookup_node(&self, node: &PublicKey) -> Result<(NodeInfo, Vec<u64>), LightningError>;
     /// Lists all nodes in the simulated network.
-    async fn list_nodes(&self) -> Result<Vec<NodeInfo>, LightningError>;
+    fn list_nodes(&self) -> Result<Vec<NodeInfo>, LightningError>;
 }
 
 /// A wrapper struct used to implement the LightningNode trait (can be thought of as "the" lightning node). Passes
@@ -671,21 +670,15 @@ impl<T: SimNetwork> LightningNode for SimNode<'_, T> {
     }
 
     async fn get_node_info(&mut self, node_id: &PublicKey) -> Result<NodeInfo, LightningError> {
-        Ok(self.network.lock().await.lookup_node(node_id).await?.0)
+        Ok(self.network.lock().await.lookup_node(node_id)?.0)
     }
 
     async fn list_channels(&mut self) -> Result<Vec<u64>, LightningError> {
-        Ok(self
-            .network
-            .lock()
-            .await
-            .lookup_node(&self.info.pubkey)
-            .await?
-            .1)
+        Ok(self.network.lock().await.lookup_node(&self.info.pubkey)?.1)
     }
 
     async fn get_graph(&mut self) -> Result<Graph, LightningError> {
-        let nodes = self.network.lock().await.list_nodes().await?;
+        let nodes = self.network.lock().await.list_nodes()?;
 
         let mut nodes_by_pk = HashMap::new();
 
@@ -1066,7 +1059,6 @@ pub fn populate_network_graph<'a, C: Clock>(
     Ok(graph)
 }
 
-#[async_trait]
 impl SimNetwork for SimGraph {
     /// dispatch_payment asynchronously propagates a payment through the simulated network, returning a tracking
     /// channel that can be used to obtain the result of the payment. At present, MPP payments are not supported.
@@ -1109,7 +1101,7 @@ impl SimNetwork for SimGraph {
     }
 
     /// lookup_node fetches a node's information and channel capacities.
-    async fn lookup_node(&self, node: &PublicKey) -> Result<(NodeInfo, Vec<u64>), LightningError> {
+    fn lookup_node(&self, node: &PublicKey) -> Result<(NodeInfo, Vec<u64>), LightningError> {
         self.nodes
             .get(node)
             .map(|channels| (node_info(*node), channels.clone()))
@@ -1118,7 +1110,7 @@ impl SimNetwork for SimGraph {
             ))
     }
 
-    async fn list_nodes(&self) -> Result<Vec<NodeInfo>, LightningError> {
+    fn list_nodes(&self) -> Result<Vec<NodeInfo>, LightningError> {
         let mut nodes = vec![];
 
         for node in &self.nodes {
@@ -1846,7 +1838,6 @@ mod tests {
     mock! {
         Network{}
 
-        #[async_trait]
         impl SimNetwork for Network{
             fn dispatch_payment(
                 &mut self,
@@ -1856,8 +1847,8 @@ mod tests {
                 sender: Sender<Result<PaymentResult, LightningError>>,
             );
 
-            async fn lookup_node(&self, node: &PublicKey) -> Result<(NodeInfo, Vec<u64>), LightningError>;
-            async fn list_nodes(&self) -> Result<Vec<NodeInfo>, LightningError>;
+            fn lookup_node(&self, node: &PublicKey) -> Result<(NodeInfo, Vec<u64>), LightningError>;
+            fn list_nodes(&self) -> Result<Vec<NodeInfo>, LightningError>;
         }
     }
 
