@@ -467,7 +467,6 @@ impl SimulatedChannel {
 
 /// SimNetwork represents a high level network coordinator that is responsible for the task of actually propagating
 /// payments through the simulated network.
-#[async_trait]
 pub trait SimNetwork: Send + Sync {
     /// Sends payments over the route provided through the network, reporting the final payment outcome to the sender
     /// channel provided.
