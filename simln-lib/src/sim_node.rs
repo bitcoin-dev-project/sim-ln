@@ -528,12 +528,16 @@ impl<'a, T: SimNetwork> SimNode<'a, T> {
         }
     }
 
+    /// send_to_route dispatches a payment to a specified route.
     /// The [`lightning::routing::router::build_route_from_hops`] function can be used to build the route to be passed here.
-    pub async fn send_to_route(&mut self, route: Route) -> Result<PaymentHash, LightningError> {
+    ///
+    /// **Note**: The payment hash passed in here should be used in track_payment to track the payment outcome.
+    pub async fn send_to_route(
+        &mut self,
+        route: Route,
+        payment_hash: PaymentHash,
+    ) -> Result<(), LightningError> {
         let (sender, receiver) = channel();
-
-        let preimage = PaymentPreimage(rand::random());
-        let payment_hash = preimage.into();
 
         // Check for payment hash collision, failing the payment if we happen to repeat one.
         match self.in_flight.entry(payment_hash) {
@@ -552,7 +556,7 @@ impl<'a, T: SimNetwork> SimNode<'a, T> {
             .await
             .dispatch_payment(self.info.pubkey, route, payment_hash, sender);
 
-        Ok(payment_hash)
+        Ok(())
     }
 }
 
@@ -671,6 +675,7 @@ impl<T: SimNetwork> LightningNode for SimNode<'_, T> {
 
     /// track_payment blocks until a payment outcome is returned for the payment hash provided, or the shutdown listener
     /// provided is triggered. This call will fail if the hash provided was not obtained by calling send_payment first.
+    /// Payment hashes passed into send_to_route can also be tracked using track_payment.
     async fn track_payment(
         &mut self,
         hash: &PaymentHash,
@@ -1498,6 +1503,7 @@ mod tests {
     use super::*;
     use crate::clock::SystemClock;
     use crate::test_utils::get_random_keypair;
+    use lightning::routing::router::build_route_from_hops;
     use lightning::routing::router::Route;
     use mockall::mock;
     use ntest::assert_true;
@@ -2270,6 +2276,57 @@ mod tests {
         test_kit.shutdown.0.trigger();
         test_kit.graph.tasks.close();
         test_kit.graph.tasks.wait().await;
+    }
+
+    #[tokio::test]
+    async fn test_send_and_track_payment_to_route() {
+        let chan_capacity = 500_000_000;
+        let test_kit =
+            DispatchPaymentTestKit::new(chan_capacity, vec![], CustomRecords::default()).await;
+
+        let mut node = SimNode::new(
+            test_kit.nodes[0],
+            Arc::new(Mutex::new(test_kit.graph)),
+            test_kit.routing_graph.clone(),
+        );
+
+        let route = build_route_from_hops(
+            &test_kit.nodes[0],
+            &[test_kit.nodes[1], test_kit.nodes[2], test_kit.nodes[3]],
+            &RouteParameters {
+                payment_params: PaymentParameters::from_node_id(*test_kit.nodes.last().unwrap(), 0)
+                    .with_max_total_cltv_expiry_delta(u32::MAX)
+                    // TODO: set non-zero value to support MPP.
+                    .with_max_path_count(1)
+                    // Allow sending htlcs up to 50% of the channel's capacity.
+                    .with_max_channel_saturation_power_of_half(1),
+                final_value_msat: 20_000,
+                max_total_routing_fee_msat: None,
+            },
+            &test_kit.routing_graph,
+            &WrappedLog {},
+            &[0; 32],
+        )
+        .map_err(|e| {
+            SimulationError::SimulatedNetworkError(format!(
+                "An Error occurred while building route - {}",
+                e.err
+            ))
+        });
+
+        let preimage = PaymentPreimage(rand::random());
+        let payment_hash = preimage.into();
+        node.send_to_route(route.unwrap(), payment_hash)
+            .await
+            .unwrap();
+
+        let (_, shutdown_listener) = triggered::trigger();
+        let result = node
+            .track_payment(&payment_hash, shutdown_listener)
+            .await
+            .unwrap();
+
+        assert!(matches!(result.payment_outcome, PaymentOutcome::Success));
     }
 
     fn create_intercept_request(shutdown_listener: Listener) -> InterceptRequest {
