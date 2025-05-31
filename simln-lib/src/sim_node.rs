@@ -334,6 +334,16 @@ impl SimulatedChannel {
         }
     }
 
+    /// Gets the public key of node 1 in the channel.
+    pub fn get_node_1_pubkey(&self) -> PublicKey {
+        self.node_1.policy.pubkey
+    }
+
+    /// Gets the public key of node 2 in the channel.
+    pub fn get_node_2_pubkey(&self) -> PublicKey {
+        self.node_2.policy.pubkey
+    }
+
     /// Validates that a simulated channel has distinct node pairs and valid routing policies.
     fn validate(&self) -> Result<(), SimulationError> {
         if self.node_1.policy.pubkey == self.node_2.policy.pubkey {
@@ -705,12 +715,10 @@ impl<'a, T: SimNetwork, P: PathFinder<'a>> LightningNode for SimNode<'a, T, P> {
         }
 
         // Dispatch the payment through the network
-        self.network.lock().await.dispatch_payment(
-            self.info.pubkey,
-            route,
-            payment_hash,
-            sender,
-        );
+        self.network
+            .lock()
+            .await
+            .dispatch_payment(self.info.pubkey, route, payment_hash, sender);
 
         Ok(payment_hash)
     }
@@ -1054,12 +1062,12 @@ pub async fn ln_node_from_graph<P>(
     graph: Arc<Mutex<SimGraph>>,
     routing_graph: Arc<NetworkGraph<&'static WrappedLog>>,
     pathfinder: P,
-) -> HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> 
+) -> HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>
 where
     P: for<'a> PathFinder<'a> + Clone + 'static,
 {
     let mut nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
-    
+
     for pk in graph.lock().await.nodes.keys() {
         nodes.insert(
             *pk,
@@ -2128,13 +2136,10 @@ mod tests {
             dest: PublicKey,
             amt: u64,
         ) -> (Route, Result<PaymentResult, LightningError>) {
-            let route = self.pathfinder.find_route(
-                &source,
-                dest,
-                amt,
-                &self.routing_graph,
-                &self.scorer,
-            ).unwrap();
+            let route = self
+                .pathfinder
+                .find_route(&source, dest, amt, &self.routing_graph, &self.scorer)
+                .unwrap();
 
             let (sender, receiver) = oneshot::channel();
             self.graph
