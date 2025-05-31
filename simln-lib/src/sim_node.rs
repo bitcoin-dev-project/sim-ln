@@ -338,6 +338,16 @@ impl SimulatedChannel {
         }
     }
 
+    /// Gets the public key of node 1 in the channel.
+    pub fn get_node_1_pubkey(&self) -> PublicKey {
+        self.node_1.policy.pubkey
+    }
+
+    /// Gets the public key of node 2 in the channel.
+    pub fn get_node_2_pubkey(&self) -> PublicKey {
+        self.node_2.policy.pubkey
+    }
+
     /// Validates that a simulated channel has distinct node pairs and valid routing policies.
     fn validate(&self) -> Result<(), SimulationError> {
         if self.node_1.policy.pubkey == self.node_2.policy.pubkey {
@@ -1121,7 +1131,7 @@ where
     P: PathFinder + 'static,
 {
     let mut nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
-    
+
     for pk in graph.lock().await.nodes.keys() {
         nodes.insert(
             *node.0,

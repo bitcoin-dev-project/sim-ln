@@ -36,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
     cli.validate(&sim_params)?;
 
     let tasks = TaskTracker::new();
-    
+
     // Create the pathfinder instance
     let pathfinder = DefaultPathFinder;
 
@@ -57,8 +57,8 @@ async fn main() -> anyhow::Result<()> {
             clock,
             tasks.clone(),
             interceptors,
-            pathfinder,
             CustomRecords::default(),
+            pathfinder,
         )
         .await?;
         (sim, validated_activities)
@@ -73,4 +73,4 @@ async fn main() -> anyhow::Result<()> {
     sim.run(&validated_activities).await?;
 
     Ok(())
-} 
+}

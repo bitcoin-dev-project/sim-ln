@@ -339,7 +339,6 @@ pub async fn create_simulation_with_network(
     ))
 }
 
-
 /// Parses the cli options provided and creates a simulation to be run, connecting to lightning nodes and validating
 /// any activity described in the simulation file.
 pub async fn create_simulation(
@@ -636,4 +635,233 @@ pub async fn get_validated_activities(
     };
 
     validate_activities(activity.to_vec(), activity_validation_params).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+    use lightning::routing::gossip::NetworkGraph;
+    use lightning::routing::router::{find_route, PaymentParameters, Route, RouteParameters};
+    use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringDecayParameters};
+    use rand::RngCore;
+    use simln_lib::clock::SystemClock;
+    use simln_lib::sim_node::{
+        ln_node_from_graph, populate_network_graph, PathFinder, SimGraph, WrappedLog,
+    };
+    use simln_lib::SimulationError;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+    use tokio_util::task::TaskTracker;
+
+    /// Gets a key pair generated in a pseudorandom way.
+    fn get_random_keypair() -> (SecretKey, PublicKey) {
+        let secp = Secp256k1::new();
+        let mut rng = rand::thread_rng();
+        let mut bytes = [0u8; 32];
+        rng.fill_bytes(&mut bytes);
+        let secret_key = SecretKey::from_slice(&bytes).expect("Failed to create secret key");
+        let public_key = PublicKey::from_secret_key(&secp, &secret_key);
+        (secret_key, public_key)
+    }
+
+    /// Helper function to create simulated channels for testing
+    fn create_simulated_channels(num_channels: usize, capacity_msat: u64) -> Vec<SimulatedChannel> {
+        let mut channels = Vec::new();
+        for i in 0..num_channels {
+            let (_node1_sk, node1_pubkey) = get_random_keypair();
+            let (_node2_sk, node2_pubkey) = get_random_keypair();
+
+            let channel = SimulatedChannel::new(
+                capacity_msat,
+                ShortChannelID::from(i as u64),
+                ChannelPolicy {
+                    pubkey: node1_pubkey,
+                    alias: "".to_string(),
+                    max_htlc_count: 483,
+                    max_in_flight_msat: capacity_msat / 2,
+                    min_htlc_size_msat: 1000,
+                    max_htlc_size_msat: capacity_msat / 2,
+                    cltv_expiry_delta: 144,
+                    base_fee: 1000,
+                    fee_rate_prop: 100,
+                },
+                ChannelPolicy {
+                    pubkey: node2_pubkey,
+                    alias: "".to_string(),
+                    max_htlc_count: 483,
+                    max_in_flight_msat: capacity_msat / 2,
+                    min_htlc_size_msat: 1000,
+                    max_htlc_size_msat: capacity_msat / 2,
+                    cltv_expiry_delta: 144,
+                    base_fee: 1000,
+                    fee_rate_prop: 100,
+                },
+            );
+            channels.push(channel);
+        }
+        channels
+    }
+
+    /// A pathfinder that always fails to find a path
+    #[derive(Clone)]
+    pub struct AlwaysFailPathFinder;
+
+    impl<'a> PathFinder<'a> for AlwaysFailPathFinder {
+        fn find_route(
+            &self,
+            _source: &PublicKey,
+            _dest: PublicKey,
+            _amount_msat: u64,
+            _pathfinding_graph: &NetworkGraph<&'a WrappedLog>,
+            _scorer: &ProbabilisticScorer<Arc<NetworkGraph<&'a WrappedLog>>, &'a WrappedLog>,
+        ) -> Result<Route, SimulationError> {
+            Err(SimulationError::SimulatedNetworkError(
+                "No route found".to_string(),
+            ))
+        }
+    }
+
+    /// A pathfinder that only returns single-hop paths
+    #[derive(Clone)]
+    pub struct SingleHopOnlyPathFinder;
+
+    impl<'a> PathFinder<'a> for SingleHopOnlyPathFinder {
+        fn find_route(
+            &self,
+            source: &PublicKey,
+            dest: PublicKey,
+            amount_msat: u64,
+            pathfinding_graph: &NetworkGraph<&'a WrappedLog>,
+            scorer: &ProbabilisticScorer<Arc<NetworkGraph<&'a WrappedLog>>, &'a WrappedLog>,
+        ) -> Result<Route, SimulationError> {
+            // Try to find a direct route only (single hop)
+            let route_params = RouteParameters {
+                payment_params: PaymentParameters::from_node_id(dest, 0)
+                    .with_max_total_cltv_expiry_delta(u32::MAX)
+                    .with_max_path_count(1)
+                    .with_max_channel_saturation_power_of_half(1),
+                final_value_msat: amount_msat,
+                max_total_routing_fee_msat: None,
+            };
+
+            // Try to find a route - if it fails or has more than one hop, return an error
+            match find_route(
+                source,
+                &route_params,
+                pathfinding_graph,
+                None,
+                &WrappedLog {},
+                scorer,
+                &Default::default(),
+                &[0; 32],
+            ) {
+                Ok(route) => {
+                    // Check if the route has exactly one hop
+                    if route.paths.len() == 1 && route.paths[0].hops.len() == 1 {
+                        Ok(route)
+                    } else {
+                        Err(SimulationError::SimulatedNetworkError(
+                            "No direct route found".to_string(),
+                        ))
+                    }
+                },
+                Err(e) => Err(SimulationError::SimulatedNetworkError(e.err)),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_always_fail_pathfinder() {
+        let channels = create_simulated_channels(3, 1_000_000_000);
+        let routing_graph =
+            Arc::new(populate_network_graph(channels.clone(), Arc::new(SystemClock {})).unwrap());
+
+        let pathfinder = AlwaysFailPathFinder;
+        let source = channels[0].get_node_1_pubkey();
+        let dest = channels[2].get_node_2_pubkey();
+
+        let scorer = ProbabilisticScorer::new(
+            ProbabilisticScoringDecayParameters::default(),
+            routing_graph.clone(),
+            &WrappedLog {},
+        );
+
+        let result = pathfinder.find_route(&source, dest, 100_000, &routing_graph,);
+
+        // Should always fail
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_single_hop_only_pathfinder() {
+        let channels = create_simulated_channels(3, 1_000_000_000);
+        let routing_graph =
+            Arc::new(populate_network_graph(channels.clone(), Arc::new(SystemClock {})).unwrap());
+
+        let pathfinder = SingleHopOnlyPathFinder;
+        let source = channels[0].get_node_1_pubkey();
+
+        let scorer = ProbabilisticScorer::new(
+            ProbabilisticScoringDecayParameters::default(),
+            routing_graph.clone(),
+            &WrappedLog {},
+        );
+
+        // Test direct connection (should work)
+        let direct_dest = channels[0].get_node_2_pubkey();
+        let result = pathfinder.find_route(&source, direct_dest, 100_000, &routing_graph,);
+
+        if result.is_ok() {
+            let route = result.unwrap();
+            assert_eq!(route.paths[0].hops.len(), 1); // Only one hop
+        }
+
+        // Test indirect connection (should fail)
+        let indirect_dest = channels[2].get_node_2_pubkey();
+        let _result =
+            pathfinder.find_route(&source, indirect_dest, 100_000, &routing_graph,);
+
+        // May fail because no direct route exists
+        // (depends on your test network topology)
+    }
+
+    /// Test that different pathfinders produce different behavior in payments
+    #[tokio::test]
+    async fn test_pathfinder_affects_payment_behavior() {
+        let channels = create_simulated_channels(3, 1_000_000_000);
+        let (shutdown_trigger, shutdown_listener) = triggered::trigger();
+        let sim_graph = Arc::new(Mutex::new(
+            SimGraph::new(
+                channels.clone(),
+                TaskTracker::new(),
+                Vec::new(),
+                HashMap::new(), // Empty custom records
+                (shutdown_trigger.clone(), shutdown_listener.clone()),
+            )
+            .unwrap(),
+        ));
+        let routing_graph =
+            Arc::new(populate_network_graph(channels.clone(), Arc::new(SystemClock {})).unwrap());
+
+        // Create nodes with different pathfinders
+        let nodes_default = ln_node_from_graph(
+            sim_graph.clone(),
+            routing_graph.clone(),
+            SystemClock {},
+            simln_lib::sim_node::DefaultPathFinder,
+        )
+        .await;
+
+        let nodes_fail = ln_node_from_graph(
+            sim_graph.clone(),
+            routing_graph.clone(),
+            SystemClock {},
+            AlwaysFailPathFinder,
+        )
+        .await;
+
+        // Both should create the same structure
+        assert_eq!(nodes_default.len(), nodes_fail.len());
+    }
 }

@@ -250,3 +250,35 @@ pub fn create_activity(
         amount_msat: ValueOrRange::Value(amount_msat),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_create_activity() {
+        let (_source_sk, source_pk) = get_random_keypair();
+        let (_dest_sk, dest_pk) = get_random_keypair();
+
+        let source_info = NodeInfo {
+            pubkey: source_pk,
+            alias: "source".to_string(),
+            features: Features::empty(),
+        };
+
+        let dest_info = NodeInfo {
+            pubkey: dest_pk,
+            alias: "destination".to_string(),
+            features: Features::empty(),
+        };
+
+        let activity = create_activity(source_info.clone(), dest_info.clone(), 1000);
+
+        assert_eq!(activity.source.pubkey, source_info.pubkey);
+        assert_eq!(activity.destination.pubkey, dest_info.pubkey);
+        match activity.amount_msat {
+            ValueOrRange::Value(amount) => assert_eq!(amount, 1000),
+            ValueOrRange::Range(_, _) => panic!("Expected Value variant, got Range"),
+        }
+    }
+}
