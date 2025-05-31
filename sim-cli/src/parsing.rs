@@ -5,8 +5,8 @@ use log::LevelFilter;
 use serde::{Deserialize, Serialize};
 use simln_lib::clock::SimulationClock;
 use simln_lib::sim_node::{
-    ln_node_from_graph, populate_network_graph, ChannelPolicy, CustomRecords, Interceptor, PathFinder,
-    SimGraph, SimulatedChannel,
+    ln_node_from_graph, populate_network_graph, ChannelPolicy, CustomRecords, Interceptor,
+    PathFinder, SimGraph, SimulatedChannel,
 };
 
 use simln_lib::{
