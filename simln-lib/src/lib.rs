@@ -1,3 +1,4 @@
+// use anyhow::Ok;
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
@@ -9,7 +10,8 @@ use rand::{Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use random_activity::RandomActivityError;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BinaryHeap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::marker::Send;
 use std::path::PathBuf;
@@ -476,7 +478,7 @@ pub struct Simulation {
     /// Config for the simulation itself.
     cfg: SimulationCfg,
     /// The lightning node that is being simulated.
-    nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
+    nodes: BTreeMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
     /// The activity that are to be executed on the node.
     activity: Vec<ActivityDefinition>,
     /// Results logger that holds the simulation statistics.
@@ -503,14 +505,14 @@ struct ExecutorKit {
     source_info: NodeInfo,
     /// We use an arc mutex here because some implementations of the trait will be very expensive to clone.
     /// See [NetworkGraphView] for details.
-    network_generator: Arc<Mutex<dyn DestinationGenerator>>,
+    network_generator: Arc<dyn DestinationGenerator>,
     payment_generator: Box<dyn PaymentGenerator>,
 }
 
 impl Simulation {
     pub fn new(
         cfg: SimulationCfg,
-        nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
+        nodes: BTreeMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
         activity: Vec<ActivityDefinition>,
         tasks: TaskTracker,
     ) -> Self {
@@ -819,7 +821,7 @@ impl Simulation {
                     source_info: description.source.clone(),
                     // Defined activities have very simple generators, so the traits required are implemented on
                     // a single struct which we just cheaply clone.
-                    network_generator: Arc::new(Mutex::new(activity_generator.clone())),
+                    network_generator: Arc::new(activity_generator.clone()),
                     payment_generator: Box::new(activity_generator),
                 });
             }
@@ -836,7 +838,7 @@ impl Simulation {
         // Collect capacity of each node from its view of its own channels. Total capacity is divided by two to
         // avoid double counting capacity (as each node has a counterparty in the channel).
         let mut generators = Vec::new();
-        let mut active_nodes = HashMap::new();
+        let mut active_nodes = BTreeMap::new();
 
         // Do a first pass to get the capacity of each node which we need to be able to create a network generator.
         // While we're at it, we get the node info and store it with capacity to create activity generators in our
@@ -859,17 +861,12 @@ impl Simulation {
             active_nodes.insert(node_info.pubkey, (node_info, capacity));
         }
 
-        let network_generator = Arc::new(Mutex::new(
+        let network_generator = Arc::new(
             NetworkGraphView::new(
                 active_nodes.values().cloned().collect(),
                 self.cfg.seeded_rng.clone(),
             )
             .map_err(SimulationError::RandomActivityError)?,
-        ));
-
-        log::info!(
-            "Created network generator: {}.",
-            network_generator.lock().await
         );
 
         for (node_info, capacity) in active_nodes.values() {
@@ -936,6 +933,33 @@ impl Simulation {
         channels
     }
 
+    fn generate_payments<A: PaymentGenerator + ?Sized>(
+        &self,
+        heap: &mut BinaryHeap<Reverse<(Duration, usize)>>,
+        source: &NodeInfo,
+        node_generator: &A,
+        index: usize,
+    ) -> Result<(), SimulationError> {
+        let mut current_count = 0;
+        loop {
+            let wait = get_payment_delay(current_count, source, node_generator)?;
+            heap.push(Reverse((wait, index)));
+            if node_generator.payment_count().is_none() {
+                return Ok(());
+            }
+            if let Some(c) = node_generator.payment_count() {
+                if c == current_count {
+                    log::info!(
+                        "Payment count has been met for {source}: {c} payments. Stopping the activity."
+                    );
+                    return Ok(());
+                }
+            }
+            current_count += 1;
+
+        }
+    }
+
     /// Responsible for spinning up producers for a set of activities. Requires that a consumer channel is present
     /// for every source node in the set of executors.
     async fn dispatch_producers(
@@ -944,33 +968,63 @@ impl Simulation {
         producer_channels: HashMap<PublicKey, Sender<SimulationEvent>>,
         tasks: &TaskTracker,
     ) -> Result<(), SimulationError> {
-        for executor in executors {
+        let mut heap: BinaryHeap<Reverse<(Duration, usize)>> = BinaryHeap::new();
+        for (index, executor) in executors.iter().enumerate() {
+            self.generate_payments(
+                &mut heap,
+                &executor.source_info,
+                executor.payment_generator.as_ref(),
+                index,
+            )?;
+
+        }
+        while let Some(Reverse((wait, index))) = heap.pop() {
+            let executor = executors
+                .get(index)
+                .ok_or(SimulationError::MissingNodeError("Missing executor".to_string()))?;
             let sender = producer_channels.get(&executor.source_info.pubkey).ok_or(
                 SimulationError::RandomActivityError(RandomActivityError::ValueError(format!(
                     "Activity producer for: {} not found.",
                     executor.source_info.pubkey,
                 ))),
             )?;
+            let (destination, capacity) = executor
+                .network_generator
+                .choose_destination(executor.source_info.pubkey)
+                .map_err(SimulationError::DestinationGenerationError)?;
 
             // pe: produce events
             let pe_shutdown = self.shutdown_trigger.clone();
             let pe_listener = self.shutdown_listener.clone();
             let pe_sender = sender.clone();
+            let source = executor.source_info.clone();
+            // Only proceed with a payment if the amount is non-zero, otherwise skip this round. If we can't get
+            // a payment amount something has gone wrong (because we should have validated that we can always
+            // generate amounts), so we exit.
+            let amount = match executor.payment_generator.payment_amount(capacity) {
+                Ok(amt) => {
+                    if amt == 0 {
+                        log::debug!("Skipping zero amount payment for {source} -> {destination}.");
+                    }
+                    amt
+                },
+                Err(e) => {
+                    return Err(SimulationError::PaymentGenerationError(e));
+                },
+            };
             tasks.spawn(async move {
-                let source = executor.source_info.clone();
-
                 log::info!(
-                    "Starting activity producer for {}: {}.",
-                    source,
-                    executor.payment_generator
+                    "Starting activity producer for {}.",
+                    source
                 );
 
                 if let Err(e) = produce_events(
-                    executor.source_info,
-                    executor.network_generator,
-                    executor.payment_generator,
+                    source.clone(),
                     pe_sender,
                     pe_listener,
+                    wait,
+                    destination,
+                    amount,
                 )
                 .await
                 {
@@ -981,7 +1035,6 @@ impl Simulation {
                 }
             });
         }
-
         Ok(())
     }
 }
@@ -1069,73 +1122,42 @@ async fn consume_events(
 
 /// produce events generates events for the activity description provided. It accepts a shutdown listener so it can
 /// exit if other threads signal that they have errored out.
-async fn produce_events<N: DestinationGenerator + ?Sized, A: PaymentGenerator + ?Sized>(
+async fn produce_events(
     source: NodeInfo,
-    network_generator: Arc<Mutex<N>>,
-    node_generator: Box<A>,
     sender: Sender<SimulationEvent>,
     listener: Listener,
+    wait: Duration,
+    destination: NodeInfo,
+    amount: u64,
 ) -> Result<(), SimulationError> {
-    let mut current_count = 0;
-    loop {
-        if let Some(c) = node_generator.payment_count() {
-            if c == current_count {
-                log::info!(
-                    "Payment count has been met for {source}: {c} payments. Stopping the activity."
-                );
-                return Ok(());
+    select! {
+        biased;
+        _ = listener.clone() => {
+            return Ok(());
+        },
+        // Wait until our time to next payment has elapsed then execute a random amount payment to a random
+        // destination.
+        _ = time::sleep(wait) => {
+            log::debug!("Generated payment: {source} -> {}: {amount} msat.", destination);
+
+            // Send the payment, exiting if we can no longer send to the consumer.
+            let event = SimulationEvent::SendPayment(destination.clone(), amount);
+            select!{
+                biased;
+                _ = listener.clone() => {
+                    return Ok(());
+                },
+                send_result = sender.send(event.clone()) => {
+                    if send_result.is_err(){
+                        return Err(SimulationError::MpscChannelError(
+                                format!("Stopped activity producer for {amount}: {source} -> {destination}.")));
+                    }
+                },
             }
-        }
 
-        let wait = get_payment_delay(current_count, &source, node_generator.as_ref())?;
-
-        select! {
-            biased;
-            _ = listener.clone() => {
-                return Ok(());
-            },
-            // Wait until our time to next payment has elapsed then execute a random amount payment to a random
-            // destination.
-            _ = time::sleep(wait) => {
-                let (destination, capacity) = network_generator.lock().await.choose_destination(source.pubkey).map_err(SimulationError::DestinationGenerationError)?;
-
-                // Only proceed with a payment if the amount is non-zero, otherwise skip this round. If we can't get
-                // a payment amount something has gone wrong (because we should have validated that we can always
-                // generate amounts), so we exit.
-                let amount = match node_generator.payment_amount(capacity) {
-                    Ok(amt) => {
-                        if amt == 0 {
-                            log::debug!("Skipping zero amount payment for {source} -> {destination}.");
-                            continue;
-                        }
-                        amt
-                    },
-                    Err(e) => {
-                        return Err(SimulationError::PaymentGenerationError(e));
-                    },
-                };
-
-                log::debug!("Generated payment: {source} -> {}: {amount} msat.", destination);
-
-                // Send the payment, exiting if we can no longer send to the consumer.
-                let event = SimulationEvent::SendPayment(destination.clone(), amount);
-                select!{
-                    biased;
-                    _ = listener.clone() => {
-                        return Ok(());
-                    },
-                    send_result = sender.send(event.clone()) => {
-                        if send_result.is_err(){
-                            return Err(SimulationError::MpscChannelError(
-                                    format!("Stopped activity producer for {amount}: {source} -> {destination}.")));
-                        }
-                    },
-                }
-
-                current_count += 1;
-            },
-        }
-    }
+        },
+    };
+    Ok(())
 }
 
 /// Gets the wait time for the next payment. If this is the first payment being generated, and a specific start delay
@@ -1304,7 +1326,7 @@ async fn run_results_logger(
 /// out. In the multiple-producer case, a single producer shutting down does not drop *all* sending channels so the
 /// consumer will not exit and a trigger is required.
 async fn produce_simulation_results(
-    nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
+    nodes: BTreeMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
     mut output_receiver: Receiver<SimulationOutput>,
     results: Sender<(Payment, PaymentResult)>,
     listener: Listener,
@@ -1423,7 +1445,7 @@ mod tests {
     use bitcoin::secp256k1::PublicKey;
     use bitcoin::Network;
     use mockall::mock;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
     use std::fmt;
     use std::sync::Arc;
     use std::time::Duration;
@@ -1544,8 +1566,9 @@ mod tests {
         let result = simulation.validate_activity().await;
 
         assert!(result.is_err());
-        assert!(matches!(result, 
-            Err(LightningError::ValidationError(msg)) if msg.contains("At least two nodes required")));
+        assert!(
+            matches!(result, Err(LightningError::ValidationError(msg)) if msg.contains("At least two nodes required"))
+        );
     }
 
     /// Verifies that an empty activity fails when one of two nodes doesn’t support keysend,
@@ -1559,8 +1582,9 @@ mod tests {
         let result = simulation.validate_activity().await;
 
         assert!(result.is_err());
-        assert!(matches!(result, 
-            Err(LightningError::ValidationError(msg)) if msg.contains("must support keysend")));
+        assert!(
+            matches!(result, Err(LightningError::ValidationError(msg)) if msg.contains("must support keysend"))
+        );
     }
 
     /// Verifies that an activity fails when the source node isn’t in the clients map,
@@ -1577,8 +1601,9 @@ mod tests {
         let result = simulation.validate_activity().await;
 
         assert!(result.is_err());
-        assert!(matches!(result, 
-            Err(LightningError::ValidationError(msg)) if msg.contains("Source node not found")));
+        assert!(
+            matches!(result, Err(LightningError::ValidationError(msg)) if msg.contains("Source node not found"))
+        );
     }
 
     /// Verifies that an activity fails when the destination lacks keysend support,
@@ -1594,8 +1619,9 @@ mod tests {
         let result = simulation.validate_activity().await;
 
         assert!(result.is_err());
-        assert!(matches!(result, 
-            Err(LightningError::ValidationError(msg)) if msg.contains("does not support keysend")));
+        assert!(
+            matches!(result, Err(LightningError::ValidationError(msg)) if msg.contains("does not support keysend"))
+        );
     }
 
     /// Verifies that an activity with a non-zero amount between two keysend-enabled nodes
@@ -1625,22 +1651,24 @@ mod tests {
         let result = simulation.validate_activity().await;
 
         assert!(result.is_err());
-        assert!(matches!(result, 
-            Err(LightningError::ValidationError(msg)) if msg.contains("zero values")));
+        assert!(
+            matches!(result, Err(LightningError::ValidationError(msg)) if msg.contains("zero values"))
+        );
     }
 
     /// Verifies that validation fails with no nodes, expecting a `ValidationError` with
     /// "we don't control any nodes".
     #[tokio::test]
     async fn test_validate_node_network_empty_nodes() {
-        let empty_nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
+        let empty_nodes: BTreeMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = BTreeMap::new();
 
         let simulation = test_utils::create_simulation(empty_nodes, vec![]);
         let result = simulation.validate_node_network().await;
 
         assert!(result.is_err());
-        assert!(matches!(result, 
-            Err(LightningError::ValidationError(msg)) if msg.contains("we don't control any nodes")));
+        assert!(
+            matches!(result, Err(LightningError::ValidationError(msg)) if msg.contains("we don't control any nodes"))
+        );
     }
 
     /// Verifies that a node on Bitcoin mainnet fails validation, expecting a `ValidationError`
@@ -1655,8 +1683,9 @@ mod tests {
         let result = simulation.validate_node_network().await;
 
         assert!(result.is_err());
-        assert!(matches!(result, 
-            Err(LightningError::ValidationError(msg)) if msg.contains("mainnet is not supported")));
+        assert!(
+            matches!(result, Err(LightningError::ValidationError(msg)) if msg.contains("mainnet is not supported"))
+        );
     }
 
     /// Verifies that nodes on Testnet and Regtest fail validation, expecting a
@@ -1671,8 +1700,9 @@ mod tests {
         let result = simulation.validate_node_network().await;
 
         assert!(result.is_err());
-        assert!(matches!(result, 
-            Err(LightningError::ValidationError(msg)) if msg.contains("nodes are not on the same network")));
+        assert!(
+            matches!(result, Err(LightningError::ValidationError(msg)) if msg.contains("nodes are not on the same network"))
+        );
     }
 
     /// Verifies that three Testnet nodes pass validation, expecting an `Ok` result.

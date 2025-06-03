@@ -6,7 +6,8 @@ use lightning::ln::features::Features;
 use mockall::mock;
 use rand::distributions::Uniform;
 use rand::Rng;
-use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
+use std::collections::BTreeMap;
+use std::{fmt, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 use tokio_util::task::TaskTracker;
 
@@ -94,7 +95,7 @@ mock! {
 /// Type alias for the result of setup_test_nodes.
 type TestNodesResult = (
     Vec<NodeInfo>,
-    HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
+    BTreeMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
 );
 
 /// A builder for creating mock Lightning nodes for testing purposes.
@@ -157,7 +158,7 @@ impl LightningTestNodeBuilder {
     /// Builds only the client map, omitting node info.
     /// Useful for network-specific testing. Returns a map of public keys to mocked
     /// Lightning node clients.
-    pub fn build_clients_only(self) -> HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> {
+    pub fn build_clients_only(self) -> BTreeMap<PublicKey, Arc<Mutex<dyn LightningNode>>> {
         let (_, clients) = self.build_full();
         clients
     }
@@ -168,7 +169,7 @@ impl LightningTestNodeBuilder {
     pub fn build_full(self) -> TestNodesResult {
         let nodes = create_nodes(self.node_count, self.initial_balance);
         let mut node_infos = Vec::new();
-        let mut clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
+        let mut clients: BTreeMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = BTreeMap::new();
 
         for (idx, (mut node_info, _)) in nodes.into_iter().enumerate() {
             if self.keysend_indices.contains(&idx) {
@@ -196,7 +197,7 @@ impl LightningTestNodeBuilder {
 /// Creates a new simulation with the given clients and activity definitions.
 /// Note: This sets a runtime for the simulation of 0, so run() will exit immediately.
 pub fn create_simulation(
-    clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
+    clients: BTreeMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
     activity: Vec<ActivityDefinition>,
 ) -> Simulation {
     Simulation::new(

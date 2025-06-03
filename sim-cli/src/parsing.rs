@@ -8,7 +8,7 @@ use simln_lib::{
     ActivityDefinition, Amount, Interval, LightningError, LightningNode, NodeId, NodeInfo,
     Simulation, SimulationCfg, WriteResults,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::ops::AsyncFn;
 use std::path::PathBuf;
@@ -184,12 +184,12 @@ async fn get_clients(
     nodes: Vec<NodeConnection>,
 ) -> Result<
     (
-        HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
+        BTreeMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
         HashMap<PublicKey, NodeInfo>,
     ),
     LightningError,
 > {
-    let mut clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
+    let mut clients: BTreeMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = BTreeMap::new();
     let mut clients_info: HashMap<PublicKey, NodeInfo> = HashMap::new();
 
     for connection in nodes {
