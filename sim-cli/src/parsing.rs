@@ -14,7 +14,7 @@ use simln_lib::{
     Simulation, SimulationCfg, WriteResults,
 };
 use simln_lib::{ShortChannelID, SimulationError};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -357,12 +357,12 @@ async fn get_clients(
     nodes: Vec<NodeConnection>,
 ) -> Result<
     (
-        HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
+        BTreeMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
         HashMap<PublicKey, NodeInfo>,
     ),
     LightningError,
 > {
-    let mut clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
+    let mut clients: BTreeMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = BTreeMap::new();
     let mut clients_info: HashMap<PublicKey, NodeInfo> = HashMap::new();
 
     for connection in nodes {
@@ -574,7 +574,7 @@ pub async fn parse_sim_params(cli: &Cli) -> anyhow::Result<SimParams> {
 }
 
 pub async fn get_validated_activities(
-    clients: &HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
+    clients: &BTreeMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
     nodes_info: HashMap<PublicKey, NodeInfo>,
     activity: Vec<ActivityParser>,
 ) -> Result<Vec<ActivityDefinition>, LightningError> {
