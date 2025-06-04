@@ -13,7 +13,7 @@ use simln_lib::{
     ActivityDefinition, Amount, Interval, LightningError, LightningNode, NodeId, NodeInfo,
     Simulation, SimulationCfg, WriteResults,
 };
-use simln_lib::{ShortChannelID, SimulationError};
+use simln_lib::{ActivityOpts, ShortChannelID, SimulationError};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -123,6 +123,13 @@ impl Cli {
             ));
         }
 
+        if sim_params.sim_network.is_empty() && !sim_params.exclude.is_empty() {
+            return Err(anyhow!(
+                "List of nodes to exclude from sending/receiving
+                    in random activity is only allowed on a simulated network"
+            ));
+        }
+
         Ok(())
     }
 }
@@ -135,6 +142,8 @@ pub struct SimParams {
     pub sim_network: Vec<NetworkParser>,
     #[serde(default)]
     pub activity: Vec<ActivityParser>,
+    #[serde(default)]
+    pub exclude: Vec<PublicKey>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -230,12 +239,13 @@ pub async fn create_simulation_with_network(
     tasks: TaskTracker,
     interceptors: Vec<Arc<dyn Interceptor>>,
     custom_records: CustomRecords,
-) -> Result<(Simulation<SimulationClock>, Vec<ActivityDefinition>), anyhow::Error> {
+) -> Result<(Simulation<SimulationClock>, ActivityOpts), anyhow::Error> {
     let cfg: SimulationCfg = SimulationCfg::try_from(cli)?;
     let SimParams {
         nodes: _,
         sim_network,
         activity: _activity,
+        exclude,
     } = sim_params;
 
     // Convert nodes representation for parsing to SimulatedChannel
@@ -277,8 +287,11 @@ pub async fn create_simulation_with_network(
     );
 
     let nodes = ln_node_from_graph(simulation_graph.clone(), routing_graph).await;
-    let validated_activities =
-        get_validated_activities(&nodes, nodes_info, sim_params.activity.clone()).await?;
+    let validated_activities = if !exclude.is_empty() {
+        ActivityOpts::Random(Some(exclude.to_vec()))
+    } else {
+        get_validated_activities(&nodes, nodes_info, sim_params.activity.clone()).await?
+    };
 
     Ok((
         Simulation::new(
@@ -299,12 +312,13 @@ pub async fn create_simulation(
     cli: &Cli,
     sim_params: &SimParams,
     tasks: TaskTracker,
-) -> Result<(Simulation<SimulationClock>, Vec<ActivityDefinition>), anyhow::Error> {
+) -> Result<(Simulation<SimulationClock>, ActivityOpts), anyhow::Error> {
     let cfg: SimulationCfg = SimulationCfg::try_from(cli)?;
     let SimParams {
         nodes,
         sim_network: _sim_network,
         activity: _activity,
+        exclude: _,
     } = sim_params;
 
     let (clients, clients_info) = get_clients(nodes.to_vec()).await?;
@@ -406,9 +420,8 @@ fn add_node_to_maps(nodes: &HashMap<PublicKey, NodeInfo>) -> Result<NodeMapping,
 async fn validate_activities(
     activity: Vec<ActivityParser>,
     activity_validation_params: ActivityValidationParams,
-) -> Result<Vec<ActivityDefinition>, LightningError> {
-    let mut validated_activities = vec![];
-
+) -> Result<ActivityOpts, LightningError> {
+    let mut validated_activities = Vec::with_capacity(activity.len());
     let ActivityValidationParams {
         pk_node_map,
         alias_node_map,
@@ -480,7 +493,7 @@ async fn validate_activities(
         });
     }
 
-    Ok(validated_activities)
+    Ok(ActivityOpts::DefinedActivity(validated_activities))
 }
 
 async fn read_sim_path(data_dir: PathBuf, sim_file: PathBuf) -> anyhow::Result<PathBuf> {
@@ -554,7 +567,11 @@ pub async fn get_validated_activities(
     clients: &HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
     nodes_info: HashMap<PublicKey, NodeInfo>,
     activity: Vec<ActivityParser>,
-) -> Result<Vec<ActivityDefinition>, LightningError> {
+) -> Result<ActivityOpts, LightningError> {
+    if activity.is_empty() {
+        return Ok(ActivityOpts::Random(None));
+    }
+
     // We need to be able to look up destination nodes in the graph, because we allow defined activities to send to
     // nodes that we do not control. To do this, we can just grab the first node in our map and perform the lookup.
     let graph = match clients.values().next() {

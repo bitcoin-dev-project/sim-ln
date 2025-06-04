@@ -173,6 +173,17 @@ pub type Amount = ValueOrRange<u64>;
 /// The interval of seconds between payments. Either a value or a range.
 pub type Interval = ValueOrRange<u16>;
 
+/// Payment activity options for running the simulation.
+pub enum ActivityOpts {
+    /// Defined payment activity provided by user that will be executed in the simulation.
+    DefinedActivity(Vec<ActivityDefinition>),
+    /// Generate random activity. Can optionally exclude nodes provided in ExcludeList.
+    Random(Option<ExcludeList>),
+}
+
+/// Nodes to exclude from sending/receiving in random activity.
+pub type ExcludeList = Vec<PublicKey>;
+
 /// Data structure used internally by the simulator. Both source and destination are represented as [PublicKey] here.
 /// This is constructed during activity validation and passed along to the [Simulation].
 #[derive(Debug, Clone)]
@@ -646,52 +657,71 @@ impl<C: Clock + 'static> Simulation<C> {
     /// validate_activity validates that the user-provided activity description is achievable for the network that
     /// we're working with. If no activity description is provided, then it ensures that we have configured a network
     /// that is suitable for random activity generation.
-    async fn validate_activity(
-        &self,
-        activity: &[ActivityDefinition],
-    ) -> Result<(), LightningError> {
-        // For now, empty activity signals random activity generation
-        if activity.is_empty() {
-            if self.nodes.len() <= 1 {
-                return Err(LightningError::ValidationError(
-                    "At least two nodes required for random activity generation.".to_string(),
-                ));
-            } else {
-                for node in self.nodes.values() {
-                    let node = node.lock().await;
-                    if !node.get_info().features.supports_keysend() {
+    async fn validate_activity(&self, activity: &ActivityOpts) -> Result<(), LightningError> {
+        match activity {
+            ActivityOpts::DefinedActivity(activity) => {
+                // If in defined activity variant, a list of ActivityDefinition must be provided
+                if activity.is_empty() {
+                    return Err(LightningError::ValidationError(
+                        "No defined activity provided".to_string(),
+                    ));
+                }
+
+                for payment_flow in activity.iter() {
+                    if payment_flow.amount_msat.value() == 0 {
+                        return Err(LightningError::ValidationError(
+                            "We do not allow defined activity amount_msat with zero values"
+                                .to_string(),
+                        ));
+                    }
+                    // We need every source node that is configured to execute some activity to be included in our set of
+                    // nodes so that we can execute events on it.
+                    self.nodes.get(&payment_flow.source.pubkey).ok_or(
+                        LightningError::ValidationError(format!(
+                            "Source node not found, {}",
+                            payment_flow.source,
+                        )),
+                    )?;
+
+                    // Destinations must support keysend to be able to receive payments.
+                    // Note: validation should be update with a different check if an event is not a payment.
+                    if !payment_flow.destination.features.supports_keysend() {
                         return Err(LightningError::ValidationError(format!(
-                            "All nodes eligible for random activity generation must support keysend, {} does not",
-                            node.get_info()
+                            "Destination node does not support keysend, {}",
+                            payment_flow.destination,
                         )));
                     }
                 }
-            }
-        }
+            },
+            ActivityOpts::Random(exclude) => {
+                if exclude.is_some() {
+                    let exclude_list = exclude.clone().unwrap();
+                    for pk in exclude_list {
+                        if !self.nodes.contains_key(&pk) {
+                            return Err(LightningError::ValidationError(format!(
+                                "Node {} is not present to be excluded from activity",
+                                pk
+                            )));
+                        }
+                    }
+                }
 
-        for payment_flow in activity.iter() {
-            if payment_flow.amount_msat.value() == 0 {
-                return Err(LightningError::ValidationError(
-                    "We do not allow defined activity amount_msat with zero values".to_string(),
-                ));
-            }
-            // We need every source node that is configured to execute some activity to be included in our set of
-            // nodes so that we can execute events on it.
-            self.nodes
-                .get(&payment_flow.source.pubkey)
-                .ok_or(LightningError::ValidationError(format!(
-                    "Source node not found, {}",
-                    payment_flow.source,
-                )))?;
-
-            // Destinations must support keysend to be able to receive payments.
-            // Note: validation should be update with a different check if an event is not a payment.
-            if !payment_flow.destination.features.supports_keysend() {
-                return Err(LightningError::ValidationError(format!(
-                    "Destination node does not support keysend, {}",
-                    payment_flow.destination,
-                )));
-            }
+                if self.nodes.len() <= 1 {
+                    return Err(LightningError::ValidationError(
+                        "At least two nodes required for random activity generation.".to_string(),
+                    ));
+                } else {
+                    for node in self.nodes.values() {
+                        let node = node.lock().await;
+                        if !node.get_info().features.supports_keysend() {
+                            return Err(LightningError::ValidationError(format!(
+                            "All nodes eligible for random activity generation must support keysend, {} does not",
+                            node.get_info()
+                        )));
+                        }
+                    }
+                }
+            },
         }
 
         Ok(())
@@ -735,8 +765,8 @@ impl<C: Clock + 'static> Simulation<C> {
     /// run until the simulation completes or we hit an error.
     /// Note that it will wait for the tasks in self.tasks to complete
     /// before returning.
-    pub async fn run(&self, activity: &[ActivityDefinition]) -> Result<(), SimulationError> {
-        self.internal_run(activity).await?;
+    pub async fn run(&self, activity_opts: ActivityOpts) -> Result<(), SimulationError> {
+        self.internal_run(activity_opts).await?;
         // Close our TaskTracker and wait for any background tasks
         // spawned during internal_run to complete.
         self.tasks.close();
@@ -744,7 +774,7 @@ impl<C: Clock + 'static> Simulation<C> {
         Ok(())
     }
 
-    async fn internal_run(&self, activity: &[ActivityDefinition]) -> Result<(), SimulationError> {
+    async fn internal_run(&self, activity_opts: ActivityOpts) -> Result<(), SimulationError> {
         if let Some(total_time) = self.cfg.total_time {
             log::info!("Running the simulation for {}s.", total_time.as_secs());
         } else {
@@ -752,13 +782,7 @@ impl<C: Clock + 'static> Simulation<C> {
         }
 
         self.validate_node_network().await?;
-        self.validate_activity(activity).await?;
-
-        log::info!(
-            "Simulating {} activity on {} nodes.",
-            activity.len(),
-            self.nodes.len()
-        );
+        self.validate_activity(&activity_opts).await?;
 
         // Before we start the simulation up, start tasks that will be responsible for gathering simulation data.
         // The event channels are shared across our functionality:
@@ -770,7 +794,7 @@ impl<C: Clock + 'static> Simulation<C> {
         self.run_data_collection(event_receiver, &self.tasks);
 
         // Get an execution kit per activity that we need to generate and spin up consumers for each source node.
-        let activities = match self.activity_executors(activity).await {
+        let activities = match self.activity_executors(activity_opts).await {
             Ok(a) => a,
             Err(e) => {
                 // If we encounter an error while setting up the activity_executors,
@@ -932,42 +956,53 @@ impl<C: Clock + 'static> Simulation<C> {
 
     async fn activity_executors(
         &self,
-        activity: &[ActivityDefinition],
+        activity_opts: ActivityOpts,
     ) -> Result<Vec<ExecutorKit>, SimulationError> {
-        let mut generators = Vec::new();
+        let generators = match activity_opts {
+            ActivityOpts::DefinedActivity(activity) => {
+                let mut generators = Vec::with_capacity(activity.len());
 
-        // Note: when we allow configuring both defined and random activity, this will no longer be an if/else, we'll
-        // just populate with each type as configured.
-        if !activity.is_empty() {
-            for description in activity.iter() {
-                let activity_generator = DefinedPaymentActivity::new(
-                    description.destination.clone(),
-                    description
-                        .start_secs
-                        .map(|start| Duration::from_secs(start.into())),
-                    description.count,
-                    description.interval_secs,
-                    description.amount_msat,
+                // Note: when we allow configuring both defined and random activity, this will no longer be an if/else, we'll
+                // just populate with each type as configured.
+                for description in activity.iter() {
+                    let activity_generator = DefinedPaymentActivity::new(
+                        description.destination.clone(),
+                        description
+                            .start_secs
+                            .map(|start| Duration::from_secs(start.into())),
+                        description.count,
+                        description.interval_secs,
+                        description.amount_msat,
+                    );
+
+                    generators.push(ExecutorKit {
+                        source_info: description.source.clone(),
+                        // Defined activities have very simple generators, so the traits required are implemented on
+                        // a single struct which we just cheaply clone.
+                        network_generator: Arc::new(Mutex::new(activity_generator.clone())),
+                        payment_generator: Box::new(activity_generator),
+                    });
+                }
+
+                log::info!(
+                    "Simulating {} activity on {} nodes.",
+                    activity.len(),
+                    self.nodes.len()
                 );
 
-                generators.push(ExecutorKit {
-                    source_info: description.source.clone(),
-                    // Defined activities have very simple generators, so the traits required are implemented on
-                    // a single struct which we just cheaply clone.
-                    network_generator: Arc::new(Mutex::new(activity_generator.clone())),
-                    payment_generator: Box::new(activity_generator),
-                });
-            }
-        } else {
-            generators = self.random_activity_nodes().await?;
-        }
-
+                generators
+            },
+            ActivityOpts::Random(list) => self.random_activity_nodes(list).await?,
+        };
         Ok(generators)
     }
 
     /// Returns the list of nodes that are eligible for generating random activity on. This is the subset of nodes
     /// that have sufficient capacity to generate payments of our expected payment amount.
-    async fn random_activity_nodes(&self) -> Result<Vec<ExecutorKit>, SimulationError> {
+    async fn random_activity_nodes(
+        &self,
+        exclude_list: Option<Vec<PublicKey>>,
+    ) -> Result<Vec<ExecutorKit>, SimulationError> {
         // Collect capacity of each node from its view of its own channels. Total capacity is divided by two to
         // avoid double counting capacity (as each node has a counterparty in the channel).
         let mut generators = Vec::new();
@@ -992,6 +1027,13 @@ impl<C: Clock + 'static> Simulation<C> {
             let capacity = chan_capacity / 2;
             let node_info = node.lock().await.get_node_info(pk).await?;
             active_nodes.insert(node_info.pubkey, (node_info, capacity));
+        }
+
+        // Remove any nodes we want to exclude (if any)
+        if exclude_list.is_some() {
+            for pk in exclude_list.unwrap() {
+                active_nodes.remove(&pk);
+            }
         }
 
         // Create a network generator with a shared RNG for all nodes.
@@ -1563,6 +1605,7 @@ async fn track_payment_result(
 
 #[cfg(test)]
 mod tests {
+    use crate::ActivityOpts;
     use crate::{
         get_payment_delay, test_utils, test_utils::LightningTestNodeBuilder, LightningError,
         LightningNode, MutRng, PaymentGenerationError, PaymentGenerator,
@@ -1710,7 +1753,9 @@ mod tests {
     async fn test_validate_activity_empty_with_sufficient_nodes() {
         let (_, clients) = LightningTestNodeBuilder::new(3).build_full();
         let simulation = test_utils::create_simulation(clients);
-        let result = simulation.validate_activity(&[]).await;
+        let result = simulation
+            .validate_activity(&ActivityOpts::Random(None))
+            .await;
         assert!(result.is_ok());
     }
 
@@ -1720,7 +1765,9 @@ mod tests {
     async fn test_validate_activity_empty_with_insufficient_nodes() {
         let (_, clients) = LightningTestNodeBuilder::new(1).build_full();
         let simulation = test_utils::create_simulation(clients);
-        let result = simulation.validate_activity(&[]).await;
+        let result = simulation
+            .validate_activity(&ActivityOpts::Random(None))
+            .await;
 
         assert!(result.is_err());
         assert!(
@@ -1736,7 +1783,9 @@ mod tests {
             .with_keysend_nodes(vec![0])
             .build_full();
         let simulation = test_utils::create_simulation(clients);
-        let result = simulation.validate_activity(&[]).await;
+        let result = simulation
+            .validate_activity(&ActivityOpts::Random(None))
+            .await;
 
         assert!(result.is_err());
         assert!(
@@ -1755,7 +1804,9 @@ mod tests {
 
         let activity = test_utils::create_activity(missing_node, dest_node, 1000);
         let simulation = test_utils::create_simulation(clients);
-        let result = simulation.validate_activity(&vec![activity]).await;
+        let result = simulation
+            .validate_activity(&ActivityOpts::DefinedActivity(vec![activity]))
+            .await;
 
         assert!(result.is_err());
         assert!(
@@ -1773,7 +1824,9 @@ mod tests {
 
         let activity = test_utils::create_activity(nodes[0].clone(), dest_node, 1000);
         let simulation = test_utils::create_simulation(clients);
-        let result = simulation.validate_activity(&vec![activity]).await;
+        let result = simulation
+            .validate_activity(&ActivityOpts::DefinedActivity(vec![activity]))
+            .await;
 
         assert!(result.is_err());
         assert!(
@@ -1792,7 +1845,9 @@ mod tests {
 
         let activity = test_utils::create_activity(nodes[0].clone(), dest_node, 1000);
         let simulation = test_utils::create_simulation(clients);
-        let result = simulation.validate_activity(&vec![activity]).await;
+        let result = simulation
+            .validate_activity(&ActivityOpts::DefinedActivity(vec![activity]))
+            .await;
 
         assert!(result.is_ok());
     }
@@ -1805,7 +1860,9 @@ mod tests {
 
         let activity = test_utils::create_activity(nodes[0].clone(), nodes[1].clone(), 0);
         let simulation = test_utils::create_simulation(clients);
-        let result = simulation.validate_activity(&vec![activity]).await;
+        let result = simulation
+            .validate_activity(&ActivityOpts::DefinedActivity(vec![activity]))
+            .await;
 
         assert!(result.is_err());
         assert!(
@@ -1885,5 +1942,39 @@ mod tests {
         let result = simulation.validate_node_network().await;
 
         assert!(result.is_ok());
+    }
+
+    // Validate that nodes are excluded from random activity.
+    #[tokio::test]
+    async fn test_validate_node_excluded_from_random_activity() {
+        let clients = LightningTestNodeBuilder::new(5).build_clients_only();
+        let simulation = test_utils::create_simulation(clients.clone());
+
+        let mut keys = clients.keys();
+        let exclude_key_1 = keys.next().unwrap();
+        let exclude_key_2 = keys.next().unwrap();
+
+        let activity_kit = simulation
+            .random_activity_nodes(Some(vec![*exclude_key_1, *exclude_key_2]))
+            .await
+            .unwrap();
+
+        // Test that initial network of 5 nodes has nodes excluded from random activity generated.
+        assert_eq!(activity_kit.len(), 3);
+        // Excluded nodes should not be present in kit;
+        assert!(!activity_kit
+            .iter()
+            .any(|kit| kit.source_info.pubkey == *exclude_key_1));
+        assert!(!activity_kit
+            .iter()
+            .any(|kit| kit.source_info.pubkey == *exclude_key_2))
+    }
+
+    #[tokio::test]
+    async fn test_validate_kit_from_random_activity() {
+        let clients = LightningTestNodeBuilder::new(5).build_clients_only();
+        let simulation = test_utils::create_simulation(clients.clone());
+        let activity_kit = simulation.random_activity_nodes(None).await.unwrap();
+        assert_eq!(activity_kit.len(), 5);
     }
 }

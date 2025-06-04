@@ -56,8 +56,7 @@ async fn main() -> anyhow::Result<()> {
         log::info!("Shutting down simulation.");
         sim2.shutdown();
     })?;
-
-    sim.run(&validated_activities).await?;
+    sim.run(validated_activities).await?;
 
     Ok(())
 }
