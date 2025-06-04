@@ -172,13 +172,27 @@ impl LightningTestNodeBuilder {
         let mut node_infos = Vec::new();
         let mut clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
 
+        let nodes_info = nodes
+            .iter()
+            .map(|(info, _)| (info.pubkey, info.clone()))
+            .collect::<HashMap<_, _>>();
+
         for (idx, (mut node_info, _)) in nodes.into_iter().enumerate() {
             if self.keysend_indices.contains(&idx) {
                 node_info.features.set_keysend_optional();
             }
 
+            let channels = vec![self.node_count as u64; 100_000];
             let mut mock_node = MockLightningNode::new();
             mock_node.expect_get_info().return_const(node_info.clone());
+            mock_node
+                .expect_list_channels()
+                .returning(move || Ok(channels.clone()));
+
+            mock_node.expect_get_node_info().returning({
+                let nodes_info = nodes_info.clone();
+                move |pubkey: &PublicKey| Ok(nodes_info.get(pubkey).unwrap().clone())
+            });
 
             if let Some(networks) = &self.networks {
                 let network = networks[idx];
@@ -202,7 +216,7 @@ pub fn create_simulation(
 ) -> Simulation<SystemClock> {
     let (shutdown_trigger, shutdown_listener) = triggered::trigger();
     Simulation::new(
-        SimulationCfg::new(Some(0), 0, 0.0, None, None),
+        SimulationCfg::new(Some(0), 100, 2.0, None, None),
         clients,
         TaskTracker::new(),
         Arc::new(SystemClock {}),
