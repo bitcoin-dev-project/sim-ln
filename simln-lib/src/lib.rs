@@ -1005,6 +1005,7 @@ impl Simulation {
                 Ok(amt) => {
                     if amt == 0 {
                         log::debug!("Skipping zero amount payment for {source} -> {destination}.");
+                        continue
                     }
                     amt
                 },
