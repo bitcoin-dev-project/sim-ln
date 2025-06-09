@@ -225,7 +225,7 @@ struct NodeMapping {
     alias_node_map: HashMap<String, NodeInfo>,
 }
 
-pub async fn create_simulation_with_network<P: for<'a> PathFinder<'a> + Clone + 'static>(
+pub async fn create_simulation_with_network<P: PathFinder + Clone + 'static>(
     cli: &Cli,
     sim_params: &SimParams,
     tasks: TaskTracker,
@@ -278,7 +278,6 @@ pub async fn create_simulation_with_network<P: for<'a> PathFinder<'a> + Clone + 
             .map_err(|e| SimulationError::SimulatedNetworkError(format!("{:?}", e)))?,
     );
 
-    // Pass the pathfinder to ln_node_from_graph
     let nodes = ln_node_from_graph(simulation_graph.clone(), routing_graph, pathfinder).await;
     let validated_activities =
         get_validated_activities(&nodes, nodes_info, sim_params.activity.clone()).await?;
@@ -621,7 +620,7 @@ mod tests {
         (secret_key, public_key)
     }
 
-    /// Helper function to create simulated channels for testing
+    /// Helper function to create simulated channels for testing.
     fn create_simulated_channels(num_channels: usize, capacity_msat: u64) -> Vec<SimulatedChannel> {
         let mut channels = Vec::new();
         for i in 0..num_channels {
@@ -657,18 +656,17 @@ mod tests {
         channels
     }
 
-    /// A pathfinder that always fails to find a path
+    /// A pathfinder that always fails to find a path.
     #[derive(Clone)]
     pub struct AlwaysFailPathFinder;
 
-    impl<'a> PathFinder<'a> for AlwaysFailPathFinder {
+    impl PathFinder for AlwaysFailPathFinder {
         fn find_route(
             &self,
             _source: &PublicKey,
             _dest: PublicKey,
             _amount_msat: u64,
-            _pathfinding_graph: &NetworkGraph<&'a WrappedLog>,
-            _scorer: &ProbabilisticScorer<Arc<NetworkGraph<&'a WrappedLog>>, &'a WrappedLog>,
+            _pathfinding_graph: &NetworkGraph<&'static WrappedLog>,
         ) -> Result<Route, SimulationError> {
             Err(SimulationError::SimulatedNetworkError(
                 "No route found".to_string(),
@@ -676,47 +674,49 @@ mod tests {
         }
     }
 
-    /// A pathfinder that only returns single-hop paths
+    /// A pathfinder that only returns single-hop paths.
     #[derive(Clone)]
     pub struct SingleHopOnlyPathFinder;
 
-    impl<'a> PathFinder<'a> for SingleHopOnlyPathFinder {
+    impl PathFinder for SingleHopOnlyPathFinder {
         fn find_route(
             &self,
             source: &PublicKey,
             dest: PublicKey,
             amount_msat: u64,
-            pathfinding_graph: &NetworkGraph<&'a WrappedLog>,
-            scorer: &ProbabilisticScorer<Arc<NetworkGraph<&'a WrappedLog>>, &'a WrappedLog>,
+            pathfinding_graph: &NetworkGraph<&'static WrappedLog>,
         ) -> Result<Route, SimulationError> {
-            // Try to find a direct route only (single hop)
-            let route_params = RouteParameters {
-                payment_params: PaymentParameters::from_node_id(dest, 0)
-                    .with_max_total_cltv_expiry_delta(u32::MAX)
-                    .with_max_path_count(1)
-                    .with_max_channel_saturation_power_of_half(1),
-                final_value_msat: amount_msat,
-                max_total_routing_fee_msat: None,
-            };
+            let scorer = ProbabilisticScorer::new(
+                ProbabilisticScoringDecayParameters::default(),
+                pathfinding_graph,
+                &WrappedLog {},
+            );
 
-            // Try to find a route - if it fails or has more than one hop, return an error
+            // Try to find a route - if it fails or has more than one hop, return an error.
             match find_route(
                 source,
-                &route_params,
+                &RouteParameters {
+                    payment_params: PaymentParameters::from_node_id(dest, 0)
+                        .with_max_total_cltv_expiry_delta(u32::MAX)
+                        .with_max_path_count(1)
+                        .with_max_channel_saturation_power_of_half(1),
+                    final_value_msat: amount_msat,
+                    max_total_routing_fee_msat: None,
+                },
                 pathfinding_graph,
                 None,
                 &WrappedLog {},
-                scorer,
+                &scorer,
                 &Default::default(),
                 &[0; 32],
             ) {
                 Ok(route) => {
-                    // Check if the route has exactly one hop
+                    // Only allow single-hop routes.
                     if route.paths.len() == 1 && route.paths[0].hops.len() == 1 {
                         Ok(route)
                     } else {
                         Err(SimulationError::SimulatedNetworkError(
-                            "No direct route found".to_string(),
+                            "Only single-hop routes allowed".to_string(),
                         ))
                     }
                 },
@@ -735,15 +735,9 @@ mod tests {
         let source = channels[0].get_node_1_pubkey();
         let dest = channels[2].get_node_2_pubkey();
 
-        let scorer = ProbabilisticScorer::new(
-            ProbabilisticScoringDecayParameters::default(),
-            routing_graph.clone(),
-            &WrappedLog {},
-        );
+        let result = pathfinder.find_route(&source, dest, 100_000, &routing_graph);
 
-        let result = pathfinder.find_route(&source, dest, 100_000, &routing_graph, &scorer);
-
-        // Should always fail
+        // Should always fail.
         assert!(result.is_err());
     }
 
@@ -756,31 +750,24 @@ mod tests {
         let pathfinder = SingleHopOnlyPathFinder;
         let source = channels[0].get_node_1_pubkey();
 
-        let scorer = ProbabilisticScorer::new(
-            ProbabilisticScoringDecayParameters::default(),
-            routing_graph.clone(),
-            &WrappedLog {},
-        );
-
-        // Test direct connection (should work)
+        // Test direct connection (should work).
         let direct_dest = channels[0].get_node_2_pubkey();
-        let result = pathfinder.find_route(&source, direct_dest, 100_000, &routing_graph, &scorer);
+        let result = pathfinder.find_route(&source, direct_dest, 100_000, &routing_graph);
 
         if result.is_ok() {
             let route = result.unwrap();
             assert_eq!(route.paths[0].hops.len(), 1); // Only one hop
         }
 
-        // Test indirect connection (should fail)
+        // Test indirect connection (should fail).
         let indirect_dest = channels[2].get_node_2_pubkey();
-        let _result =
-            pathfinder.find_route(&source, indirect_dest, 100_000, &routing_graph, &scorer);
+        let _result = pathfinder.find_route(&source, indirect_dest, 100_000, &routing_graph);
 
-        // May fail because no direct route exists
+        // May fail because no direct route exists.
         // (depends on your test network topology)
     }
 
-    /// Test that different pathfinders produce different behavior in payments
+    /// Test that different pathfinders produce different behavior in payments.
     #[tokio::test]
     async fn test_pathfinder_affects_payment_behavior() {
         let channels = create_simulated_channels(3, 1_000_000_000);
@@ -798,7 +785,7 @@ mod tests {
         let routing_graph =
             Arc::new(populate_network_graph(channels.clone(), Arc::new(SystemClock {})).unwrap());
 
-        // Create nodes with different pathfinders
+        // Create nodes with different pathfinders.
         let nodes_default = ln_node_from_graph(
             sim_graph.clone(),
             routing_graph.clone(),
@@ -813,7 +800,7 @@ mod tests {
         )
         .await;
 
-        // Both should create the same structure
+        // Both should create the same structure.
         assert_eq!(nodes_default.len(), nodes_fail.len());
     }
 }

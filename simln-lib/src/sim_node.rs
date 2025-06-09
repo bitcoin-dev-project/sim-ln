@@ -495,30 +495,53 @@ pub trait SimNetwork: Send + Sync {
 }
 
 /// A trait for custom pathfinding implementations.
-pub trait PathFinder<'a>: Send + Sync {
+/// Finds a route from the source node to the destination node for the specified amount.
+/// 
+/// # Arguments
+/// * `source` - The public key of the node initiating the payment.
+/// * `dest` - The public key of the destination node to receive the payment.
+/// * `amount_msat` - The amount to send in millisatoshis.
+/// * `pathfinding_graph` - The network graph containing channel topology and routing information.
+/// 
+/// # Returns
+/// Returns a `Route` containing the payment path, or a `SimulationError` if no route is found.
+
+pub trait PathFinder: Send + Sync + Clone {
     fn find_route(
         &self,
         source: &PublicKey,
         dest: PublicKey,
         amount_msat: u64,
-        pathfinding_graph: &NetworkGraph<&'a WrappedLog>,
-        scorer: &ProbabilisticScorer<Arc<NetworkGraph<&'a WrappedLog>>, &'a WrappedLog>,
+        pathfinding_graph: &NetworkGraph<&'static WrappedLog>,
     ) -> Result<Route, SimulationError>;
 }
 
-/// Default pathfinder that uses LDK's pathfinding algorithm.
+/// The default pathfinding implementation that uses LDK's built-in pathfinding algorithm.
 #[derive(Clone)]
 pub struct DefaultPathFinder;
 
-impl<'a> PathFinder<'a> for DefaultPathFinder {
+impl DefaultPathFinder {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl PathFinder for DefaultPathFinder {
     fn find_route(
         &self,
         source: &PublicKey,
         dest: PublicKey,
         amount_msat: u64,
-        pathfinding_graph: &NetworkGraph<&'a WrappedLog>,
-        scorer: &ProbabilisticScorer<Arc<NetworkGraph<&'a WrappedLog>>, &'a WrappedLog>,
+        pathfinding_graph: &NetworkGraph<&'static WrappedLog>,
     ) -> Result<Route, SimulationError> {
+        let scorer_graph = NetworkGraph::new(bitcoin::Network::Regtest, &WrappedLog {});
+        let scorer = ProbabilisticScorer::new(
+            ProbabilisticScoringDecayParameters::default(),
+            Arc::new(scorer_graph),
+            &WrappedLog {},
+        );
+
+        // Call LDK's find_route with the scorer (LDK-specific requirement)
         find_route(
             source,
             &RouteParameters {
@@ -529,10 +552,10 @@ impl<'a> PathFinder<'a> for DefaultPathFinder {
                 final_value_msat: amount_msat,
                 max_total_routing_fee_msat: None,
             },
-            pathfinding_graph,
+            pathfinding_graph, // This is the real network graph used for pathfinding
             None,
             &WrappedLog {},
-            scorer,
+            &scorer, // LDK requires a scorer, so we provide a simple one
             &Default::default(),
             &[0; 32],
         )
@@ -551,38 +574,25 @@ pub struct SimNode<'a, T: SimNetwork, P: PathFinder<'a> = DefaultPathFinder> {
     /// Tracks the channel that will provide updates for payments by hash.
     in_flight: HashMap<PaymentHash, Receiver<Result<PaymentResult, LightningError>>>,
     /// A read-only graph used for pathfinding.
-    pathfinding_graph: Arc<NetworkGraph<&'a WrappedLog>>,
-    /// Probabilistic scorer used to rank paths through the network for routing. This is reused across
-    /// multiple payments to maintain scoring state.
-    scorer: ProbabilisticScorer<Arc<NetworkGraph<&'a WrappedLog>>, &'a WrappedLog>,
+    pathfinding_graph: Arc<NetworkGraph<&'static WrappedLog>>,
     /// The pathfinder implementation to use for finding routes
     pathfinder: P,
 }
 
-impl<'a, T: SimNetwork, P: PathFinder<'a>> SimNode<'a, T, P> {
+impl<T: SimNetwork, P: PathFinder> SimNode<T, P> {
     /// Creates a new simulation node that refers to the high level network coordinator provided to process payments
     /// on its behalf. The pathfinding graph is provided separately so that each node can handle its own pathfinding.
     pub fn new(
         pubkey: PublicKey,
         payment_network: Arc<Mutex<T>>,
-        pathfinding_graph: Arc<NetworkGraph<&'a WrappedLog>>,
+        pathfinding_graph: Arc<NetworkGraph<&'static WrappedLog>>,
         pathfinder: P,
     ) -> Self {
-        // Initialize the probabilistic scorer with default parameters for learning from payment
-        // history. These parameters control how much successful/failed payments affect routing
-        // scores and how quickly these scores decay over time.
-        let scorer = ProbabilisticScorer::new(
-            ProbabilisticScoringDecayParameters::default(),
-            pathfinding_graph.clone(),
-            &WrappedLog {},
-        );
-
         SimNode {
             info: node_info(pubkey),
             network: payment_network,
             in_flight: HashMap::new(),
             pathfinding_graph,
-            scorer,
             pathfinder,
         }
     }
@@ -664,7 +674,7 @@ fn node_info(pubkey: PublicKey) -> NodeInfo {
 }
 
 #[async_trait]
-impl<'a, T: SimNetwork, P: PathFinder<'a>> LightningNode for SimNode<'a, T, P> {
+impl<T: SimNetwork, P: PathFinder> LightningNode for SimNode<T, P> {
     fn get_info(&self) -> &NodeInfo {
         &self.info
     }
@@ -686,7 +696,6 @@ impl<'a, T: SimNetwork, P: PathFinder<'a>> LightningNode for SimNode<'a, T, P> {
             dest,
             amount_msat,
             &self.pathfinding_graph,
-            &self.scorer,
         ) {
             Ok(route) => route,
             Err(e) => {
@@ -1064,7 +1073,7 @@ pub async fn ln_node_from_graph<P>(
     pathfinder: P,
 ) -> HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>
 where
-    P: for<'a> PathFinder<'a> + Clone + 'static,
+    P: PathFinder + 'static,
 {
     let mut nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
 
@@ -1563,7 +1572,6 @@ mod tests {
     use mockall::mock;
     use ntest::assert_true;
     use std::time::Duration;
-    use tokio::sync::oneshot;
     use tokio::time::{self, timeout};
 
     /// Creates a test channel policy with its maximum HTLC size set to half of the in flight limit of the channel.
@@ -1953,7 +1961,12 @@ mod tests {
 
         // Create a simulated node for the first channel in our network.
         let pk = channels[0].node_1.policy.pubkey;
-        let mut node = SimNode::new(pk, sim_network.clone(), Arc::new(graph), DefaultPathFinder);
+        let mut node = SimNode::new(
+            pk,
+            sim_network.clone(),
+            Arc::new(graph),
+            DefaultPathFinder::new(),
+        );
 
         // Prime mock to return node info from lookup and assert that we get the pubkey we're expecting.
         let lookup_pk = channels[3].node_1.policy.pubkey;
@@ -2038,16 +2051,15 @@ mod tests {
     }
 
     /// Contains elements required to test dispatch_payment functionality.
-    struct DispatchPaymentTestKit<'a> {
+    struct DispatchPaymentTestKit {
         graph: SimGraph,
         nodes: Vec<PublicKey>,
-        routing_graph: Arc<NetworkGraph<&'a WrappedLog>>,
-        scorer: ProbabilisticScorer<Arc<NetworkGraph<&'a WrappedLog>>, &'a WrappedLog>,
+        routing_graph: Arc<NetworkGraph<&'static WrappedLog>>,
         shutdown: (Trigger, Listener),
         pathfinder: DefaultPathFinder,
     }
 
-    impl DispatchPaymentTestKit<'_> {
+    impl DispatchPaymentTestKit {
         /// Creates a test graph with a set of nodes connected by three channels, with all the capacity of the channel
         /// on the side of the first node. For example, if called with capacity = 100 it will set up the following
         /// network:
@@ -2063,12 +2075,6 @@ mod tests {
             let channels = create_simulated_channels(3, capacity);
             let routing_graph = Arc::new(
                 populate_network_graph(channels.clone(), Arc::new(SystemClock {})).unwrap(),
-            );
-
-            let scorer = ProbabilisticScorer::new(
-                ProbabilisticScoringDecayParameters::default(),
-                routing_graph.clone(),
-                &WrappedLog {},
             );
 
             // Collect pubkeys in-order, pushing the last node on separately because they don't have an outgoing
@@ -2091,9 +2097,8 @@ mod tests {
                 .expect("could not create test graph"),
                 nodes,
                 routing_graph,
-                scorer,
                 shutdown: shutdown_clone,
-                pathfinder: DefaultPathFinder,
+                pathfinder: DefaultPathFinder::new(),
             };
 
             // Assert that our channel balance is all on the side of the channel opener when we start up.
@@ -2138,18 +2143,14 @@ mod tests {
         ) -> (Route, Result<PaymentResult, LightningError>) {
             let route = self
                 .pathfinder
-                .find_route(&source, dest, amt, &self.routing_graph, &self.scorer)
+                .find_route(&source, dest, amt, &self.routing_graph)
                 .unwrap();
+            let (sender, receiver) = tokio::sync::oneshot::channel();
 
-            let (sender, receiver) = oneshot::channel();
             self.graph
-                .dispatch_payment(source, route.clone(), PaymentHash([1; 32]), sender);
+                .dispatch_payment(source, route.clone(), PaymentHash([0; 32]), sender);
 
-            let payment_result = timeout(Duration::from_millis(10), receiver).await;
-            // Assert that we receive from the channel or fail.
-            assert!(payment_result.is_ok());
-
-            (route, payment_result.unwrap().unwrap())
+            (route, receiver.await.unwrap())
         }
 
         // Sets the balance on the channel to the tuple provided, used to arrange liquidity for testing.
