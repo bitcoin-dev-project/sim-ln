@@ -496,16 +496,15 @@ pub trait SimNetwork: Send + Sync {
 
 /// A trait for custom pathfinding implementations.
 /// Finds a route from the source node to the destination node for the specified amount.
-/// 
+///
 /// # Arguments
 /// * `source` - The public key of the node initiating the payment.
 /// * `dest` - The public key of the destination node to receive the payment.
 /// * `amount_msat` - The amount to send in millisatoshis.
 /// * `pathfinding_graph` - The network graph containing channel topology and routing information.
-/// 
+///
 /// # Returns
 /// Returns a `Route` containing the payment path, or a `SimulationError` if no route is found.
-
 pub trait PathFinder: Send + Sync + Clone {
     fn find_route(
         &self,
@@ -567,7 +566,7 @@ impl PathFinder for DefaultPathFinder {
 /// all functionality through to a coordinating simulation network. This implementation contains both the [`SimNetwork`]
 /// implementation that will allow us to dispatch payments and a read-only NetworkGraph that is used for pathfinding.
 /// While these two could be combined, we re-use the LDK-native struct to allow re-use of their pathfinding logic.
-pub struct SimNode<'a, T: SimNetwork, P: PathFinder<'a> = DefaultPathFinder> {
+pub struct SimNode<T: SimNetwork, P: PathFinder = DefaultPathFinder> {
     info: NodeInfo,
     /// The underlying execution network that will be responsible for dispatching payments.
     network: Arc<Mutex<T>>,
@@ -595,37 +594,6 @@ impl<T: SimNetwork, P: PathFinder> SimNode<T, P> {
             pathfinding_graph,
             pathfinder,
         }
-    }
-
-    /// Dispatches a payment to a specified route.
-    /// The [`lightning::routing::router::build_route_from_hops`] function can be used to build the route to be passed here.
-    ///
-    /// **Note:** The payment hash passed in here should be used in track_payment to track the payment outcome.
-    pub async fn send_to_route(
-        &mut self,
-        route: Route,
-        payment_hash: PaymentHash,
-    ) -> Result<(), LightningError> {
-        let (sender, receiver) = channel();
-
-        // Check for payment hash collision, failing the payment if we happen to repeat one.
-        match self.in_flight.entry(payment_hash) {
-            Entry::Occupied(_) => {
-                return Err(LightningError::SendPaymentError(
-                    "payment hash exists".to_string(),
-                ));
-            },
-            Entry::Vacant(vacant) => {
-                vacant.insert(receiver);
-            },
-        }
-
-        self.network
-            .lock()
-            .await
-            .dispatch_payment(self.info.pubkey, route, payment_hash, sender);
-
-        Ok(())
     }
 
     /// Dispatches a payment to a specified route.
@@ -2348,6 +2316,7 @@ mod tests {
             test_kit.nodes[0],
             Arc::new(Mutex::new(test_kit.graph)),
             test_kit.routing_graph.clone(),
+            test_kit.pathfinder.clone(),
         );
 
         let route = build_route_from_hops(
