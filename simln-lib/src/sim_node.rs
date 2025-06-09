@@ -22,7 +22,9 @@ use lightning::ln::msgs::{
 use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::routing::gossip::{NetworkGraph, NodeId};
 use lightning::routing::router::{find_route, Path, PaymentParameters, Route, RouteParameters};
-use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringDecayParameters};
+use lightning::routing::scoring::{
+    ProbabilisticScorer, ProbabilisticScoringDecayParameters, ScoreUpdate,
+};
 use lightning::routing::utxo::{UtxoLookup, UtxoResult};
 use lightning::util::logger::{Level, Logger, Record};
 use thiserror::Error;
@@ -512,7 +514,7 @@ pub struct SimNode<T: SimNetwork, C: Clock> {
     pathfinding_graph: Arc<LdkNetworkGraph>,
     /// Probabilistic scorer used to rank paths through the network for routing. This is reused across
     /// multiple payments to maintain scoring state.
-    scorer: ProbabilisticScorer<Arc<LdkNetworkGraph>, Arc<WrappedLog>>,
+    scorer: Mutex<ProbabilisticScorer<Arc<LdkNetworkGraph>, Arc<WrappedLog>>>,
     /// Clock for tracking simulation time.
     clock: Arc<C>,
 }
@@ -540,7 +542,7 @@ impl<T: SimNetwork, C: Clock> SimNode<T, C> {
             network: payment_network,
             in_flight: Mutex::new(HashMap::new()),
             pathfinding_graph,
-            scorer,
+            scorer: Mutex::new(scorer),
             clock,
         })
     }
@@ -601,13 +603,14 @@ fn node_info(pubkey: PublicKey, alias: String) -> NodeInfo {
 
 /// Uses LDK's pathfinding algorithm with default parameters to find a path from source to destination, with no
 /// restrictions on fee budget.
-fn find_payment_route(
+async fn find_payment_route(
     source: &PublicKey,
     dest: PublicKey,
     amount_msat: u64,
     pathfinding_graph: &LdkNetworkGraph,
-    scorer: &ProbabilisticScorer<Arc<LdkNetworkGraph>, Arc<WrappedLog>>,
+    scorer: &Mutex<ProbabilisticScorer<Arc<LdkNetworkGraph>, Arc<WrappedLog>>>,
 ) -> Result<Route, SimulationError> {
+    let scorer_guard = scorer.lock().await;
     find_route(
         source,
         &RouteParameters {
@@ -623,7 +626,7 @@ fn find_payment_route(
         pathfinding_graph,
         None,
         &WrappedLog {},
-        &scorer,
+        &scorer_guard,
         &Default::default(),
         &[0; 32],
     )
@@ -671,7 +674,9 @@ impl<T: SimNetwork, C: Clock> LightningNode for SimNode<T, C> {
             amount_msat,
             &self.pathfinding_graph,
             &self.scorer,
-        ) {
+        )
+        .await
+        {
             Ok(path) => path,
             // In the case that we can't find a route for the payment, we still report a successful payment *api call*
             // and report RouteNotFound to the tracking channel. This mimics the behavior of real nodes.
@@ -731,7 +736,33 @@ impl<T: SimNetwork, C: Clock> LightningNode for SimNode<T, C> {
 
                     // If we get a payment result back, remove from our in flight set of payments and return the result.
                     res = in_flight.track_payment_receiver => {
-                        res.map_err(|e| LightningError::TrackPaymentError(format!("channel receive err: {}", e)))?
+                        let track_result = res.map_err(|e| LightningError::TrackPaymentError(format!("channel receive err: {}", e)))?;
+                        if let Ok(ref payment_result) = track_result {
+                            let duration = match self.clock.now().duration_since(UNIX_EPOCH) {
+                                Ok(d) => d,
+                                Err(e) => {
+                                    log::error!("Failed to get duration: {}", e);
+                                    return Err(LightningError::SystemTimeConversionError(e));
+                                }
+                            };
+                            match &in_flight.path {
+                                Some(path) => {
+                                    if payment_result.payment_outcome == PaymentOutcome::Success {
+                                        self.scorer.lock().await.payment_path_successful(path, duration);
+                                    } else if let PaymentOutcome::IndexFailure(index) = payment_result.payment_outcome {
+                                        self.scorer.lock().await.payment_path_failed(path, index as u64, duration);
+                                    }
+                                },
+                                None => {
+                                    if payment_result.payment_outcome != PaymentOutcome::RouteNotFound {
+                                        return Err(LightningError::TrackPaymentError(
+                                            "payment outcome was not RouteNotFound, but no path was provided".to_string(),
+                                        ))?;
+                                    }
+                                }
+                            }
+                        }
+                        track_result
                     },
                 }
             },
@@ -2038,7 +2069,7 @@ mod tests {
         graph: SimGraph,
         nodes: Vec<PublicKey>,
         routing_graph: Arc<LdkNetworkGraph>,
-        scorer: ProbabilisticScorer<Arc<LdkNetworkGraph>, Arc<WrappedLog>>,
+        scorer: Mutex<ProbabilisticScorer<Arc<LdkNetworkGraph>, Arc<WrappedLog>>>,
         shutdown: (Trigger, Listener),
     }
 
@@ -2060,11 +2091,11 @@ mod tests {
                 populate_network_graph(channels.clone(), Arc::new(SystemClock {})).unwrap(),
             );
 
-            let scorer = ProbabilisticScorer::new(
+            let scorer = Mutex::new(ProbabilisticScorer::new(
                 ProbabilisticScoringDecayParameters::default(),
                 routing_graph.clone(),
                 Arc::new(WrappedLog {}),
-            );
+            ));
 
             // Collect pubkeys in-order, pushing the last node on separately because they don't have an outgoing
             // channel (they are not node_1 in any channel, only node_2).
@@ -2130,8 +2161,9 @@ mod tests {
             dest: PublicKey,
             amt: u64,
         ) -> (Route, Result<PaymentResult, LightningError>) {
-            let route =
-                find_payment_route(&source, dest, amt, &self.routing_graph, &self.scorer).unwrap();
+            let route = find_payment_route(&source, dest, amt, &self.routing_graph, &self.scorer)
+                .await
+                .unwrap();
 
             let (sender, receiver) = oneshot::channel();
             self.graph

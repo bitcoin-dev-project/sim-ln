@@ -433,7 +433,7 @@ impl Display for PaymentResult {
 }
 
 /// Represents all possible outcomes of a Lightning Network payment attempt.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum PaymentOutcome {
     /// Payment completed successfully, reaching its intended recipient.
     Success,
