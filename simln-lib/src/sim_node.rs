@@ -519,6 +519,12 @@ pub trait PathFinder: Send + Sync + Clone {
 #[derive(Clone)]
 pub struct DefaultPathFinder;
 
+impl Default for DefaultPathFinder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DefaultPathFinder {
     pub fn new() -> Self {
         Self
