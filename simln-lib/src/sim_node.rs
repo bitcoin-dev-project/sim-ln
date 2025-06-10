@@ -1467,7 +1467,7 @@ async fn propagate_payment(request: PropagatePaymentRequest) {
             );
             PaymentResult {
                 htlc_count: 0,
-                payment_outcome: PaymentOutcome::Unknown,
+                payment_outcome: PaymentOutcome::IndexFailure(fail_idx.unwrap_or(0)),
             }
         },
         Err(critical_err) => {
@@ -2536,7 +2536,7 @@ mod tests {
 
         assert!(matches!(
             result.unwrap().payment_outcome,
-            PaymentOutcome::Unknown
+            PaymentOutcome::IndexFailure(_)
         ));
 
         // The interceptor returned a forwarding error, check that a simulation shutdown has not
