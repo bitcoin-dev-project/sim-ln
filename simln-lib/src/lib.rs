@@ -456,6 +456,8 @@ pub enum PaymentOutcome {
     NotDispatched,
     /// The payment was dispatched but its final status could not be determined.
     TrackPaymentFailed,
+    /// The payment failed at the provided index in the path.
+    IndexFailure(usize),
 }
 
 /// Describes a payment from a source node to a destination node.
