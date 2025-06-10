@@ -123,6 +123,21 @@ impl Cli {
             ));
         }
 
+        if !sim_params.exclude.is_empty() {
+            if sim_params.sim_network.is_empty() {
+                return Err(anyhow!(
+                    "List of nodes to exclude from sending/receiving
+                    in random activity is only allowed on a simulated network"
+                ));
+            }
+
+            if !sim_params.activity.is_empty() {
+                return Err(anyhow!(
+                    "List of nodes to exclude from sending/receiving is only allowed on random activity"
+                ));
+            }
+        }
+
         Ok(())
     }
 }
@@ -135,6 +150,8 @@ pub struct SimParams {
     pub sim_network: Vec<NetworkParser>,
     #[serde(default)]
     pub activity: Vec<ActivityParser>,
+    #[serde(default)]
+    pub exclude: Vec<PublicKey>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -236,6 +253,7 @@ pub async fn create_simulation_with_network(
         nodes: _,
         sim_network,
         activity: _activity,
+        exclude,
     } = sim_params;
 
     // Convert nodes representation for parsing to SimulatedChannel
@@ -276,7 +294,11 @@ pub async fn create_simulation_with_network(
             .map_err(|e| SimulationError::SimulatedNetworkError(format!("{:?}", e)))?,
     );
 
-    let nodes = ln_node_from_graph(simulation_graph.clone(), routing_graph).await;
+    let mut nodes = ln_node_from_graph(simulation_graph.clone(), routing_graph).await;
+    for pk in exclude {
+        nodes.remove(pk);
+    }
+
     let validated_activities =
         get_validated_activities(&nodes, nodes_info, sim_params.activity.clone()).await?;
 
@@ -305,6 +327,7 @@ pub async fn create_simulation(
         nodes,
         sim_network: _sim_network,
         activity: _activity,
+        exclude: _,
     } = sim_params;
 
     let (clients, clients_info) = get_clients(nodes.to_vec()).await?;
