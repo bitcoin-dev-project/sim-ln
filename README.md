@@ -104,7 +104,8 @@ To run the simulator with random activity generation, you just need to
 provide a set of nodes and the simulator will generate activity based 
 on the topology of the underlying graph. Note that payments will only 
 be sent between the `nodes` that are provided so that liquidity does 
-not "drain" from the simulation.
+not "drain" from the simulation. Every node specified will be eligible
+to send and receive payments when running with random activity.
 
 ```
 {
@@ -347,6 +348,27 @@ nodes by their pubkey (aliases are not yet supported).
 Note that you need to provide forwarding policies in each direction, 
 because each participant in the channel sets their own forwarding 
 policy and restrictions on their counterparty. 
+
+
+### Random Activity Exclusions
+
+When running with random activity (implied by the absence of `activity`),
+every node listed in `sim_network` will be eligible to send and receive
+payments. If you'd like to specify nodes in `sim_network` that do not
+send/receive payments, you can include them in an `exclude` list:
+
+```
+{
+  "sim_network": [ ... ],
+  "exclude": [
+    "020a30431ce58843eedf8051214dbfadb65b107cc598b8277f14bb9b33c9cd026f"
+  ]
+}
+```
+
+This is required for the case where you want to specify a channel that
+will be used in the simulated network that is just responsible for 
+forwarding payments, but does not send or receive any payments itself.
 
 ### Inclusions and Limitations
 
