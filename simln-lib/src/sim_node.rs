@@ -481,7 +481,7 @@ pub trait SimNetwork: Send + Sync {
     /// Looks up a node in the simulated network and a list of its channel capacities.
     fn lookup_node(&self, node: &PublicKey) -> Result<(NodeInfo, Vec<u64>), LightningError>;
     /// Lists all nodes in the simulated network.
-    fn list_nodes(&self) -> Result<Vec<NodeInfo>, LightningError>;
+    fn list_nodes(&self) -> Vec<NodeInfo>;
 }
 
 /// A wrapper struct used to implement the LightningNode trait (can be thought of as "the" lightning node). Passes
@@ -710,7 +710,7 @@ impl<T: SimNetwork> LightningNode for SimNode<'_, T> {
     }
 
     async fn get_graph(&mut self) -> Result<Graph, LightningError> {
-        let nodes = self.network.lock().await.list_nodes()?;
+        let nodes = self.network.lock().await.list_nodes();
 
         let mut nodes_by_pk = HashMap::new();
 
@@ -1142,14 +1142,12 @@ impl SimNetwork for SimGraph {
             ))
     }
 
-    fn list_nodes(&self) -> Result<Vec<NodeInfo>, LightningError> {
-        let mut nodes = vec![];
-
+    fn list_nodes(&self) -> Vec<NodeInfo> {
+        let mut nodes = Vec::with_capacity(self.nodes.len());
         for node in &self.nodes {
             nodes.push(node_info(*node.0));
         }
-
-        Ok(nodes)
+        nodes
     }
 }
 
@@ -1881,7 +1879,7 @@ mod tests {
             );
 
             fn lookup_node(&self, node: &PublicKey) -> Result<(NodeInfo, Vec<u64>), LightningError>;
-            fn list_nodes(&self) -> Result<Vec<NodeInfo>, LightningError>;
+            fn list_nodes(&self) -> Vec<NodeInfo>;
         }
     }
 
