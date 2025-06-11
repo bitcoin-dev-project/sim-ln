@@ -118,6 +118,8 @@ struct Htlc {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelPolicy {
     pub pubkey: PublicKey,
+    #[serde(default)]
+    pub alias: String,
     pub max_htlc_count: u64,
     pub max_in_flight_msat: u64,
     pub min_htlc_size_msat: u64,
@@ -459,8 +461,8 @@ impl SimulatedChannel {
 
     pub fn create_simulated_nodes(&self) -> (NodeInfo, NodeInfo) {
         (
-            node_info(self.node_1.policy.pubkey),
-            node_info(self.node_2.policy.pubkey),
+            node_info(self.node_1.policy.pubkey, self.node_1.policy.alias.clone()),
+            node_info(self.node_2.policy.pubkey, self.node_2.policy.alias.clone()),
         )
     }
 }
@@ -505,7 +507,7 @@ impl<'a, T: SimNetwork> SimNode<'a, T> {
     /// Creates a new simulation node that refers to the high level network coordinator provided to process payments
     /// on its behalf. The pathfinding graph is provided separately so that each node can handle its own pathfinding.
     pub fn new(
-        pubkey: PublicKey,
+        info: NodeInfo,
         payment_network: Arc<Mutex<T>>,
         pathfinding_graph: Arc<NetworkGraph<&'a WrappedLog>>,
     ) -> Self {
@@ -519,7 +521,7 @@ impl<'a, T: SimNetwork> SimNode<'a, T> {
         );
 
         SimNode {
-            info: node_info(pubkey),
+            info,
             network: payment_network,
             in_flight: HashMap::new(),
             pathfinding_graph,
@@ -560,14 +562,14 @@ impl<'a, T: SimNetwork> SimNode<'a, T> {
 }
 
 /// Produces the node info for a mocked node, filling in the features that the simulator requires.
-fn node_info(pubkey: PublicKey) -> NodeInfo {
+fn node_info(pubkey: PublicKey, alias: String) -> NodeInfo {
     // Set any features that the simulator requires here.
     let mut features = NodeFeatures::empty();
     features.set_keysend_optional();
 
     NodeInfo {
         pubkey,
-        alias: "".to_string(), // TODO: store alias?
+        alias,
         features,
     }
 }
@@ -713,16 +715,8 @@ impl<T: SimNetwork> LightningNode for SimNode<'_, T> {
         let nodes = self.network.lock().await.list_nodes();
 
         let mut nodes_by_pk = HashMap::new();
-
         for node in nodes {
-            nodes_by_pk.insert(
-                node.pubkey,
-                NodeInfo {
-                    pubkey: node.pubkey,
-                    alias: node.alias.clone(),
-                    features: node.features,
-                },
-            );
+            nodes_by_pk.insert(node.pubkey, node);
         }
 
         Ok(Graph { nodes_by_pk })
@@ -935,7 +929,7 @@ async fn handle_intercepted_htlc(
 pub struct SimGraph {
     /// nodes caches the list of nodes in the network with a vector of their channel capacities, only used for quick
     /// lookup.
-    nodes: HashMap<PublicKey, Vec<u64>>,
+    nodes: HashMap<PublicKey, (NodeInfo, Vec<u64>)>,
 
     /// channels maps the scid of a channel to its current simulation state.
     channels: Arc<Mutex<HashMap<ShortChannelID, SimulatedChannel>>>,
@@ -967,7 +961,7 @@ impl SimGraph {
         default_custom_records: CustomRecords,
         shutdown_signal: (Trigger, Listener),
     ) -> Result<Self, SimulationError> {
-        let mut nodes: HashMap<PublicKey, Vec<u64>> = HashMap::new();
+        let mut nodes: HashMap<PublicKey, (NodeInfo, Vec<u64>)> = HashMap::new();
         let mut channels = HashMap::new();
 
         for channel in graph_channels.iter() {
@@ -985,11 +979,14 @@ impl SimGraph {
             };
 
             // It's okay to have duplicate pubkeys because one node can have many channels.
-            for pubkey in [channel.node_1.policy.pubkey, channel.node_2.policy.pubkey] {
-                match nodes.entry(pubkey) {
-                    Entry::Occupied(o) => o.into_mut().push(channel.capacity_msat),
+            for info in [&channel.node_1.policy, &channel.node_2.policy] {
+                match nodes.entry(info.pubkey) {
+                    Entry::Occupied(o) => o.into_mut().1.push(channel.capacity_msat),
                     Entry::Vacant(v) => {
-                        v.insert(vec![channel.capacity_msat]);
+                        v.insert((
+                            node_info(info.pubkey, info.alias.clone()),
+                            vec![channel.capacity_msat],
+                        ));
                     },
                 }
             }
@@ -1013,11 +1010,11 @@ pub async fn ln_node_from_graph(
 ) -> HashMap<PublicKey, Arc<Mutex<dyn LightningNode + '_>>> {
     let mut nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
 
-    for pk in graph.lock().await.nodes.keys() {
+    for node in graph.lock().await.nodes.iter() {
         nodes.insert(
-            *pk,
+            *node.0,
             Arc::new(Mutex::new(SimNode::new(
-                *pk,
+                node.1 .0.clone(),
                 graph.clone(),
                 routing_graph.clone(),
             ))),
@@ -1134,18 +1131,18 @@ impl SimNetwork for SimGraph {
 
     /// lookup_node fetches a node's information and channel capacities.
     fn lookup_node(&self, node: &PublicKey) -> Result<(NodeInfo, Vec<u64>), LightningError> {
-        self.nodes
-            .get(node)
-            .map(|channels| (node_info(*node), channels.clone()))
-            .ok_or(LightningError::GetNodeInfoError(
+        match self.nodes.get(node) {
+            Some(node) => Ok(node.clone()),
+            None => Err(LightningError::GetNodeInfoError(
                 "Node not found".to_string(),
-            ))
+            )),
+        }
     }
 
     fn list_nodes(&self) -> Vec<NodeInfo> {
         let mut nodes = Vec::with_capacity(self.nodes.len());
         for node in &self.nodes {
-            nodes.push(node_info(*node.0));
+            nodes.push(node.1 .0.clone());
         }
         nodes
     }
@@ -1514,6 +1511,7 @@ mod tests {
         let (_, pk) = get_random_keypair();
         ChannelPolicy {
             pubkey: pk,
+            alias: String::default(),
             max_htlc_count: 10,
             max_in_flight_msat,
             min_htlc_size_msat: 2,
@@ -1541,6 +1539,7 @@ mod tests {
 
             let node_1_to_2 = ChannelPolicy {
                 pubkey: node_1,
+                alias: String::default(),
                 max_htlc_count: 483,
                 max_in_flight_msat: capacity_msat / 2,
                 min_htlc_size_msat: 1,
@@ -1552,6 +1551,7 @@ mod tests {
 
             let node_2_to_1 = ChannelPolicy {
                 pubkey: node_2,
+                alias: String::default(),
                 max_htlc_count: 483,
                 max_in_flight_msat: capacity_msat / 2,
                 min_htlc_size_msat: 1,
@@ -1895,7 +1895,11 @@ mod tests {
 
         // Create a simulated node for the first channel in our network.
         let pk = channels[0].node_1.policy.pubkey;
-        let mut node = SimNode::new(pk, sim_network.clone(), Arc::new(graph));
+        let mut node = SimNode::new(
+            node_info(pk, String::default()),
+            sim_network.clone(),
+            Arc::new(graph),
+        );
 
         // Prime mock to return node info from lookup and assert that we get the pubkey we're expecting.
         let lookup_pk = channels[3].node_1.policy.pubkey;
@@ -1903,7 +1907,7 @@ mod tests {
             .lock()
             .await
             .expect_lookup_node()
-            .returning(move |_| Ok((node_info(lookup_pk), vec![1, 2, 3])));
+            .returning(move |_| Ok((node_info(lookup_pk, String::default()), vec![1, 2, 3])));
 
         // Assert that we get three channels from the mock.
         let node_info = node.get_node_info(&lookup_pk).await.unwrap();
@@ -2282,7 +2286,7 @@ mod tests {
             DispatchPaymentTestKit::new(chan_capacity, vec![], CustomRecords::default()).await;
 
         let mut node = SimNode::new(
-            test_kit.nodes[0],
+            node_info(test_kit.nodes[0], String::default()),
             Arc::new(Mutex::new(test_kit.graph)),
             test_kit.routing_graph.clone(),
         );
