@@ -145,7 +145,7 @@ impl Cli {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SimParams {
     #[serde(default)]
-    nodes: Vec<NodeConnection>,
+    pub nodes: Vec<NodeConnection>,
     #[serde(default)]
     pub sim_network: Vec<NetworkParser>,
     #[serde(default)]
@@ -242,13 +242,13 @@ struct NodeMapping {
 }
 
 pub async fn create_simulation_with_network(
-    cli: &Cli,
+    cfg: SimulationCfg,
     sim_params: &SimParams,
+    clock_speedup: u16,
     tasks: TaskTracker,
     interceptors: Vec<Arc<dyn Interceptor>>,
     custom_records: CustomRecords,
 ) -> Result<(Simulation<SimulationClock>, Vec<ActivityDefinition>), anyhow::Error> {
-    let cfg: SimulationCfg = SimulationCfg::try_from(cli)?;
     let SimParams {
         nodes: _,
         sim_network,
@@ -284,7 +284,7 @@ pub async fn create_simulation_with_network(
         .map_err(|e| SimulationError::SimulatedNetworkError(format!("{:?}", e)))?,
     ));
 
-    let clock = Arc::new(SimulationClock::new(cli.speedup_clock.unwrap_or(1))?);
+    let clock = Arc::new(SimulationClock::new(clock_speedup)?);
 
     // Copy all simulated channels into a read-only routing graph, allowing to pathfind for
     // individual payments without locking th simulation graph (this is a duplication of the channels,
