@@ -61,6 +61,16 @@ impl SimulationClock {
         })
     }
 
+    /// Returns the instant that the simulation clock was started at.
+    pub fn get_start_instant(&self) -> Instant {
+        self.start_instant
+    }
+
+    /// Returns the speedup multiplier applied to time.
+    pub fn get_speedup_multiplier(&self) -> u16 {
+        self.speedup_multiplier
+    }
+
     /// Calculates the current simulation time based on the current wall clock time.
     ///
     /// Separated for testing purposes so that we can fix the current wall clock time and elapsed interval.
