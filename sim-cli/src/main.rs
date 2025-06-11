@@ -6,6 +6,7 @@ use sim_cli::parsing::{create_simulation, create_simulation_with_network, parse_
 use simln_lib::{
     latency_interceptor::LatencyIntercepor,
     sim_node::{CustomRecords, Interceptor},
+    SimulationCfg,
 };
 use simple_logger::SimpleLogger;
 use tokio_util::task::TaskTracker;
@@ -41,9 +42,11 @@ async fn main() -> anyhow::Result<()> {
         } else {
             vec![]
         };
+        let sim_cfg: SimulationCfg = SimulationCfg::try_from(&cli)?;
         create_simulation_with_network(
-            &cli,
+            sim_cfg,
             &sim_params,
+            cli.speedup_clock.unwrap_or(1),
             tasks.clone(),
             interceptors,
             CustomRecords::default(),
