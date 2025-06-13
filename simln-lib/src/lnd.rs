@@ -12,6 +12,7 @@ use bitcoin::Network;
 use lightning::ln::features::NodeFeatures;
 use lightning::ln::{PaymentHash, PaymentPreimage};
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 use tonic_lnd::lnrpc::{payment::PaymentStatus, GetInfoRequest, GetInfoResponse};
 use tonic_lnd::lnrpc::{
     ChannelGraphRequest, ListChannelsRequest, NodeInfoRequest, PaymentFailureReason,
@@ -38,7 +39,7 @@ pub struct LndConnection {
 }
 
 pub struct LndNode {
-    client: Client,
+    client: Mutex<Client>,
     info: NodeInfo,
 }
 
@@ -84,7 +85,7 @@ impl LndNode {
         connection.id.validate(&pubkey, &mut alias)?;
 
         Ok(Self {
-            client,
+            client: Mutex::new(client),
             info: NodeInfo {
                 pubkey,
                 features: parse_node_features(features.keys().cloned().collect()),
@@ -103,9 +104,9 @@ impl LightningNode for LndNode {
         &self.info
     }
 
-    async fn get_network(&mut self) -> Result<Network, LightningError> {
-        let info = self
-            .client
+    async fn get_network(&self) -> Result<Network, LightningError> {
+        let mut client = self.client.lock().await;
+        let info = client
             .lightning()
             .get_info(GetInfoRequest {})
             .await
@@ -138,7 +139,7 @@ impl LightningNode for LndNode {
     }
 
     async fn send_payment(
-        &mut self,
+        &self,
         dest: PublicKey,
         amount_msat: u64,
     ) -> Result<PaymentHash, LightningError> {
@@ -151,9 +152,8 @@ impl LightningNode for LndNode {
         let mut dest_custom_records = HashMap::new();
         let payment_hash = sha256::Hash::hash(&preimage.0).to_byte_array().to_vec();
         dest_custom_records.insert(KEYSEND_KEY, preimage.0.to_vec());
-
-        let response = self
-            .client
+        let mut client = self.client.lock().await;
+        let response = client
             .router()
             .send_payment_v2(SendPaymentRequest {
                 amt_msat,
@@ -178,12 +178,12 @@ impl LightningNode for LndNode {
     }
 
     async fn track_payment(
-        &mut self,
+        &self,
         hash: &PaymentHash,
         shutdown: Listener,
     ) -> Result<PaymentResult, LightningError> {
-        let response = self
-            .client
+        let mut client = self.client.lock().await;
+        let response = client
             .router()
             .track_payment_v2(TrackPaymentRequest {
                 payment_hash: hash.0.to_vec(),
@@ -235,9 +235,9 @@ impl LightningNode for LndNode {
         }
     }
 
-    async fn get_node_info(&mut self, node_id: &PublicKey) -> Result<NodeInfo, LightningError> {
-        let node_info = self
-            .client
+    async fn get_node_info(&self, node_id: &PublicKey) -> Result<NodeInfo, LightningError> {
+        let mut client = self.client.lock().await;
+        let node_info = client
             .lightning()
             .get_node_info(NodeInfoRequest {
                 pub_key: node_id.to_string(),
@@ -261,8 +261,8 @@ impl LightningNode for LndNode {
     }
 
     async fn list_channels(&mut self) -> Result<Vec<u64>, LightningError> {
-        let channels = self
-            .client
+        let mut client = self.client.lock().await;
+        let channels = client
             .lightning()
             .list_channels(ListChannelsRequest {
                 ..Default::default()
@@ -279,9 +279,9 @@ impl LightningNode for LndNode {
             .collect())
     }
 
-    async fn get_graph(&mut self) -> Result<Graph, LightningError> {
-        let nodes = self
-            .client
+    async fn get_graph(&self) -> Result<Graph, LightningError> {
+        let mut client = self.client.lock().await;
+        let nodes = client
             .lightning()
             .describe_graph(ChannelGraphRequest {
                 include_unannounced: false,
