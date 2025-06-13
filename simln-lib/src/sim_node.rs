@@ -495,7 +495,7 @@ pub struct SimNode<'a, T: SimNetwork> {
     /// The underlying execution network that will be responsible for dispatching payments.
     network: Arc<Mutex<T>>,
     /// Tracks the channel that will provide updates for payments by hash.
-    in_flight: HashMap<PaymentHash, Receiver<Result<PaymentResult, LightningError>>>,
+    in_flight: Mutex<HashMap<PaymentHash, Receiver<Result<PaymentResult, LightningError>>>>, // HashMap<PaymentHash, Receiver<Result<PaymentResult, LightningError>>>,
     /// A read-only graph used for pathfinding.
     pathfinding_graph: Arc<NetworkGraph<&'a WrappedLog>>,
     /// Probabilistic scorer used to rank paths through the network for routing. This is reused across
@@ -523,7 +523,7 @@ impl<'a, T: SimNetwork> SimNode<'a, T> {
         SimNode {
             info,
             network: payment_network,
-            in_flight: HashMap::new(),
+            in_flight: HashMap::new().into(),
             pathfinding_graph,
             scorer,
         }
@@ -541,7 +541,8 @@ impl<'a, T: SimNetwork> SimNode<'a, T> {
         let (sender, receiver) = channel();
 
         // Check for payment hash collision, failing the payment if we happen to repeat one.
-        match self.in_flight.entry(payment_hash) {
+        let mut in_flight = self.in_flight.lock().await;
+        match in_flight.entry(payment_hash) {
             Entry::Occupied(_) => {
                 return Err(LightningError::SendPaymentError(
                     "payment hash exists".to_string(),
@@ -611,14 +612,14 @@ impl<T: SimNetwork> LightningNode for SimNode<'_, T> {
         &self.info
     }
 
-    async fn get_network(&mut self) -> Result<Network, LightningError> {
+    async fn get_network(&self) -> Result<Network, LightningError> {
         Ok(Network::Regtest)
     }
 
     /// send_payment picks a random preimage for a payment, dispatches it in the network and adds a tracking channel
     /// to our node state to be used for subsequent track_payment calls.
     async fn send_payment(
-        &mut self,
+        &self,
         dest: PublicKey,
         amount_msat: u64,
     ) -> Result<PaymentHash, LightningError> {
@@ -629,7 +630,8 @@ impl<T: SimNetwork> LightningNode for SimNode<'_, T> {
         let payment_hash = preimage.into();
 
         // Check for payment hash collision, failing the payment if we happen to repeat one.
-        match self.in_flight.entry(payment_hash) {
+        let mut in_flight = self.in_flight.lock().await;
+        match in_flight.entry(payment_hash) {
             Entry::Occupied(_) => {
                 return Err(LightningError::SendPaymentError(
                     "payment hash exists".to_string(),
@@ -678,11 +680,12 @@ impl<T: SimNetwork> LightningNode for SimNode<'_, T> {
     /// provided is triggered. This call will fail if the hash provided was not obtained from send_payment or passed
     /// into send_to_route first.
     async fn track_payment(
-        &mut self,
+        &self,
         hash: &PaymentHash,
         listener: Listener,
     ) -> Result<PaymentResult, LightningError> {
-        match self.in_flight.remove(hash) {
+        let mut in_flight = self.in_flight.lock().await;
+        match in_flight.remove(hash) {
             Some(receiver) => {
                 select! {
                     biased;
@@ -703,7 +706,7 @@ impl<T: SimNetwork> LightningNode for SimNode<'_, T> {
         }
     }
 
-    async fn get_node_info(&mut self, node_id: &PublicKey) -> Result<NodeInfo, LightningError> {
+    async fn get_node_info(&self, node_id: &PublicKey) -> Result<NodeInfo, LightningError> {
         Ok(self.network.lock().await.lookup_node(node_id)?.0)
     }
 
@@ -711,7 +714,7 @@ impl<T: SimNetwork> LightningNode for SimNode<'_, T> {
         Ok(self.network.lock().await.lookup_node(&self.info.pubkey)?.1)
     }
 
-    async fn get_graph(&mut self) -> Result<Graph, LightningError> {
+    async fn get_graph(&self) -> Result<Graph, LightningError> {
         let nodes = self.network.lock().await.list_nodes();
 
         let mut nodes_by_pk = HashMap::new();

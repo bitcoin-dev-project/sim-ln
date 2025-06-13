@@ -76,20 +76,20 @@ mock! {
     #[async_trait]
     impl crate::LightningNode for LightningNode {
         fn get_info(&self) -> &NodeInfo;
-        async fn get_network(&mut self) -> Result<bitcoin::Network, LightningError>;
+        async fn get_network(&self) -> Result<bitcoin::Network, LightningError>;
         async fn send_payment(
-                &mut self,
+                &self,
                 dest: bitcoin::secp256k1::PublicKey,
                 amount_msat: u64,
             ) -> Result<lightning::ln::PaymentHash, LightningError>;
         async fn track_payment(
-                &mut self,
+                &self,
                 hash: &lightning::ln::PaymentHash,
                 shutdown: triggered::Listener,
             ) -> Result<crate::PaymentResult, LightningError>;
-        async fn get_node_info(&mut self, node_id: &PublicKey) -> Result<NodeInfo, LightningError>;
+        async fn get_node_info(&self, node_id: &PublicKey) -> Result<NodeInfo, LightningError>;
         async fn list_channels(&mut self) -> Result<Vec<u64>, LightningError>;
-        async fn get_graph(&mut self) -> Result<Graph, LightningError>;
+        async fn get_graph(&self) -> Result<Graph, LightningError>;
     }
 }
 
