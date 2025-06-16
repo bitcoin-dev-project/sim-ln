@@ -495,7 +495,7 @@ pub struct SimNode<'a, T: SimNetwork> {
     /// The underlying execution network that will be responsible for dispatching payments.
     network: Arc<Mutex<T>>,
     /// Tracks the channel that will provide updates for payments by hash.
-    in_flight: Mutex<HashMap<PaymentHash, Receiver<Result<PaymentResult, LightningError>>>>, // HashMap<PaymentHash, Receiver<Result<PaymentResult, LightningError>>>,
+    in_flight: Mutex<HashMap<PaymentHash, Receiver<Result<PaymentResult, LightningError>>>>,
     /// A read-only graph used for pathfinding.
     pathfinding_graph: Arc<NetworkGraph<&'a WrappedLog>>,
     /// Probabilistic scorer used to rank paths through the network for routing. This is reused across
@@ -523,7 +523,7 @@ impl<'a, T: SimNetwork> SimNode<'a, T> {
         SimNode {
             info,
             network: payment_network,
-            in_flight: HashMap::new().into(),
+            in_flight: Mutex::new(HashMap::new()),
             pathfinding_graph,
             scorer,
         }
@@ -630,8 +630,7 @@ impl<T: SimNetwork> LightningNode for SimNode<'_, T> {
         let payment_hash = preimage.into();
 
         // Check for payment hash collision, failing the payment if we happen to repeat one.
-        let mut in_flight = self.in_flight.lock().await;
-        match in_flight.entry(payment_hash) {
+        match self.in_flight.lock().await.entry(payment_hash) {
             Entry::Occupied(_) => {
                 return Err(LightningError::SendPaymentError(
                     "payment hash exists".to_string(),
