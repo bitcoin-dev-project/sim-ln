@@ -29,7 +29,7 @@ use triggered::{Listener, Trigger};
 use self::defined_activity::DefinedPaymentActivity;
 use self::random_activity::{NetworkGraphView, RandomPaymentActivity};
 
-mod batched_writer;
+pub mod batched_writer;
 pub mod cln;
 pub mod clock;
 mod defined_activity;
