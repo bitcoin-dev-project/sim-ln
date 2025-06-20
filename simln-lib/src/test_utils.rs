@@ -3,16 +3,17 @@ use async_trait::async_trait;
 use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 use bitcoin::Network;
 use lightning::ln::features::Features;
+use lightning::ln::PaymentHash;
 use mockall::mock;
 use rand::distributions::Uniform;
 use rand::Rng;
+use triggered::Listener;
 use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 use tokio_util::task::TaskTracker;
 
 use crate::{
-    ActivityDefinition, LightningError, LightningNode, NodeInfo, PaymentGenerationError,
-    PaymentGenerator, Simulation, SimulationCfg, ValueOrRange,
+    ActivityDefinition, LightningError, LightningNode, NodeInfo, PaymentGenerationError, PaymentGenerator, PaymentResult, Simulation, SimulationCfg, ValueOrRange
 };
 
 /// Utility function to create a vector of pseudo random bytes.
@@ -218,5 +219,62 @@ pub fn create_activity(
         count: None,
         interval_secs: ValueOrRange::Value(5),
         amount_msat: ValueOrRange::Value(amount_msat),
+    }
+}
+
+pub struct TestLnNode {
+    node: NodeInfo,
+}
+
+impl TestLnNode {
+    pub fn new(node: NodeInfo) -> Self {
+        TestLnNode { node }
+    }
+}
+
+#[async_trait]
+impl LightningNode for TestLnNode {
+    async fn track_payment(
+        &mut self,
+        _hash: &PaymentHash,
+        shutdown: Listener,
+    ) -> Result<PaymentResult, LightningError> {
+        tokio::select! {
+                biased;
+                _ = shutdown => {
+                    Err(LightningError::TrackPaymentError("Shutdown before tracking results".to_string()))
+                },
+                _ = tokio::time::sleep(tokio::time::Duration::from_millis(3000)) => {
+                    Ok(crate::PaymentResult {
+                        htlc_count: 1,
+                        payment_outcome: crate::PaymentOutcome::Success,
+                    })
+                }
+
+        }
+    }
+
+    async fn get_network(&mut self) -> Result<Network, LightningError> {
+        Ok(Network::Regtest)
+    }
+
+    fn get_info(&self) -> &NodeInfo {
+        &self.node
+    }
+
+    async fn send_payment(
+        &mut self,
+        _dest: PublicKey,
+        _amount_msat: u64,
+    ) -> Result<PaymentHash, LightningError> {
+        Ok(lightning::ln::PaymentHash([0; 32]))
+    }
+
+    async fn get_node_info(&mut self, _node_id: &PublicKey) -> Result<NodeInfo, LightningError> {
+        Ok(self.node.clone())
+    }
+
+    async fn list_channels(&mut self) -> Result<Vec<u64>, LightningError> {
+        Ok(vec![1, 2, 3, 4])
     }
 }

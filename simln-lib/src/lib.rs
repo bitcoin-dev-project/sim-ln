@@ -1481,7 +1481,7 @@ async fn conditional_sleeper(t: Option<Sleep>) -> Option<()> {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::MockLightningNode;
+    use crate::test_utils::{MockLightningNode, TestLnNode};
     use crate::TaskTracker;
     use crate::{
         get_payment_delay, test_utils, test_utils::LightningTestNodeBuilder, LightningError,
@@ -2244,6 +2244,75 @@ mod tests {
             total_payments, 0,
             "Expected no payments to be recorded, got {}",
             total_payments
+        );
+    }
+
+    #[tokio::test]
+    async fn test_track_paymnent_shutdown() {
+        let ((node_1, node_2), mut clients) = setup_test_nodes();
+        let test_ln_node = TestLnNode::new(node_1.clone());
+        let node_1_mutex = Arc::new(Mutex::new(test_ln_node));
+        clients.insert(node_1.pubkey, node_1_mutex);
+
+        // Define an activity that would make payments (but we will shut down early)
+        let activity_definition = crate::ActivityDefinition {
+            source: node_1,
+            destination: node_2,
+            start_secs: None,
+            count: Some(10),
+            interval_secs: crate::ValueOrRange::Value(1),
+            amount_msat: crate::ValueOrRange::Value(2000),
+        };
+
+        // Create simulation with no timeout
+        let simulation = Simulation::new(
+            SimulationCfg::new(
+                None,     // No timeout
+                1000,     // Expected payment size
+                0.1,      // Activity multiplier
+                None,     // No result writing
+                Some(42), // Seed for determinism
+            ),
+            clients,
+            vec![activity_definition], // Use defined activity with many payments
+            TaskTracker::new(),
+        );
+
+        // Create a cloned reference for the shutdown task
+        let sim_clone = simulation.clone();
+
+        // Start a task that will manually shut down the simulation after a short delay
+        tokio::spawn(async move {
+            // Wait a little bit to allow one payment to complete
+            tokio::time::sleep(Duration::from_secs(3)).await;
+
+            // Manually trigger shutdown
+            log::info!("Manually triggering simulation shutdown");
+            sim_clone.shutdown();
+        });
+
+        // Run the simulation (should be interrupted by our manual shutdown)
+        let result = simulation.run().await;
+
+        // Verify the simulation shut down correctly
+        assert!(result.is_ok(), "Simulation should end without error");
+
+        // We expect just 2 payments in total:
+        // - first payment with a delay of 3 seconds before firing the trigger manually
+        // - second payment with the same delay but fails because of the shutdown
+        // and the tracking process should return an error
+        let total_payments = simulation.get_total_payments().await;
+        assert!(
+            total_payments == 2,
+            "Expected 1 payment to be attempted, got {}",
+            total_payments
+        );
+
+        let rate = simulation.get_success_rate().await;
+        assert!(
+            rate == 50.0,
+            "Only one payment is successful, got rate of {}",
+            rate
         );
     }
 }
