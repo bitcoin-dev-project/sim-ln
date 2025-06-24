@@ -47,16 +47,19 @@ impl ClnNode {
         let tls = ClientTlsConfig::new()
             .domain_name("cln")
             .identity(Identity::from_pem(
-                reader(&connection.client_cert).await.map_err(|_| {
-                    LightningError::ConnectionError("Cannot loads client certificate".to_string())
+                reader(&connection.client_cert).await.map_err(|err| {
+                    LightningError::ConnectionError(format!(
+                        "Cannot loads client certificate: {}",
+                        err
+                    ))
                 })?,
-                reader(&connection.client_key).await.map_err(|_| {
-                    LightningError::ConnectionError("Cannot loads client key".to_string())
+                reader(&connection.client_key).await.map_err(|err| {
+                    LightningError::ConnectionError(format!("Cannot loads client key: {}", err))
                 })?,
             ))
             .ca_certificate(Certificate::from_pem(
-                reader(&connection.ca_cert).await.map_err(|_| {
-                    LightningError::ConnectionError("Cannot loads CA certificate".to_string())
+                reader(&connection.ca_cert).await.map_err(|err| {
+                    LightningError::ConnectionError(format!("Cannot loads CA certificate: {}", err))
                 })?,
             ));
 
@@ -64,13 +67,19 @@ impl ClnNode {
             Channel::from_shared(connection.address)
                 .map_err(|err| LightningError::ConnectionError(err.to_string()))?
                 .tls_config(tls)
-                .map_err(|_| {
-                    LightningError::ConnectionError("Cannot establish tls connection".to_string())
+                .map_err(|err| {
+                    LightningError::ConnectionError(format!(
+                        "Cannot establish tls connection: {}",
+                        err
+                    ))
                 })?
                 .connect()
                 .await
-                .map_err(|_| {
-                    LightningError::ConnectionError("Cannot connect to gRPC server".to_string())
+                .map_err(|err| {
+                    LightningError::ConnectionError(format!(
+                        "Cannot connect to gRPC server: {}",
+                        err
+                    ))
                 })?,
         );
 
