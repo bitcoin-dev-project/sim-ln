@@ -49,17 +49,17 @@ impl ClnNode {
             .identity(Identity::from_pem(
                 reader(&connection.client_cert).await.map_err(|err| {
                     LightningError::ConnectionError(format!(
-                        "Cannot loads client certificate: {}",
+                        "Cannot load client certificate: {}",
                         err
                     ))
                 })?,
                 reader(&connection.client_key).await.map_err(|err| {
-                    LightningError::ConnectionError(format!("Cannot loads client key: {}", err))
+                    LightningError::ConnectionError(format!("Cannot load client key: {}", err))
                 })?,
             ))
             .ca_certificate(Certificate::from_pem(
                 reader(&connection.ca_cert).await.map_err(|err| {
-                    LightningError::ConnectionError(format!("Cannot loads CA certificate: {}", err))
+                    LightningError::ConnectionError(format!("Cannot load CA certificate: {}", err))
                 })?,
             ));
 
