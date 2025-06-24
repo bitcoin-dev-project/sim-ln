@@ -709,7 +709,7 @@ impl<T: SimNetwork> LightningNode for SimNode<'_, T> {
         Ok(self.network.lock().await.lookup_node(node_id)?.0)
     }
 
-    async fn list_channels(&mut self) -> Result<Vec<u64>, LightningError> {
+    async fn list_channels(&self) -> Result<Vec<u64>, LightningError> {
         Ok(self.network.lock().await.lookup_node(&self.info.pubkey)?.1)
     }
 
@@ -1897,7 +1897,7 @@ mod tests {
 
         // Create a simulated node for the first channel in our network.
         let pk = channels[0].node_1.policy.pubkey;
-        let mut node = SimNode::new(
+        let node = SimNode::new(
             node_info(pk, String::default()),
             sim_network.clone(),
             Arc::new(graph),

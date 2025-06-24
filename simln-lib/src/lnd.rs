@@ -260,7 +260,7 @@ impl LightningNode for LndNode {
         }
     }
 
-    async fn list_channels(&mut self) -> Result<Vec<u64>, LightningError> {
+    async fn list_channels(&self) -> Result<Vec<u64>, LightningError> {
         let mut client = self.client.lock().await;
         let channels = client
             .lightning()

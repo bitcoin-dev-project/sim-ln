@@ -222,7 +222,7 @@ impl LightningNode for EclairNode {
         })
     }
 
-    async fn list_channels(&mut self) -> Result<Vec<u64>, LightningError> {
+    async fn list_channels(&self) -> Result<Vec<u64>, LightningError> {
         let client = self.client.lock().await;
         let channels: ChannelsResponse = client
             .request("channels", None)

@@ -341,7 +341,7 @@ pub trait LightningNode: Send {
     async fn get_node_info(&self, node_id: &PublicKey) -> Result<NodeInfo, LightningError>;
     /// Lists all channels, at present only returns a vector of channel capacities in msat because no further
     /// information is required.
-    async fn list_channels(&mut self) -> Result<Vec<u64>, LightningError>;
+    async fn list_channels(&self) -> Result<Vec<u64>, LightningError>;
     /// Get the network graph from the point of view of a given node.
     async fn get_graph(&self) -> Result<Graph, LightningError>;
 }

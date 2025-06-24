@@ -112,7 +112,7 @@ impl ClnNode {
     /// Fetch channels belonging to the local node, initiated locally if is_source is true, and initiated remotely if
     /// is_source is false. Introduced as a helper function because CLN doesn't have a single API to list all of our
     /// node's channels.
-    async fn node_channels(&mut self, is_source: bool) -> Result<Vec<u64>, LightningError> {
+    async fn node_channels(&self, is_source: bool) -> Result<Vec<u64>, LightningError> {
         let req = if is_source {
             ListchannelsRequest {
                 source: Some(self.info.pubkey.serialize().to_vec()),
@@ -265,7 +265,7 @@ impl LightningNode for ClnNode {
         }
     }
 
-    async fn list_channels(&mut self) -> Result<Vec<u64>, LightningError> {
+    async fn list_channels(&self) -> Result<Vec<u64>, LightningError> {
         let mut node_channels = self.node_channels(true).await?;
         node_channels.extend(self.node_channels(false).await?);
         Ok(node_channels)
