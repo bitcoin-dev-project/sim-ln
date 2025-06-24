@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use simln_lib::clock::SimulationClock;
 use simln_lib::sim_node::{
     ln_node_from_graph, populate_network_graph, ChannelPolicy, CustomRecords, Interceptor,
-    SimGraph, SimulatedChannel,
+    SimGraph, SimNode, SimulatedChannel,
 };
 use simln_lib::{
     cln, cln::ClnNode, eclair, eclair::EclairNode, lnd, lnd::LndNode, serializers,
@@ -248,7 +248,14 @@ pub async fn create_simulation_with_network(
     tasks: TaskTracker,
     interceptors: Vec<Arc<dyn Interceptor>>,
     custom_records: CustomRecords,
-) -> Result<(Simulation<SimulationClock>, Vec<ActivityDefinition>), anyhow::Error> {
+) -> Result<
+    (
+        Simulation<SimulationClock>,
+        Vec<ActivityDefinition>,
+        HashMap<PublicKey, Arc<Mutex<SimNode<SimGraph>>>>,
+    ),
+    anyhow::Error,
+> {
     let SimParams {
         nodes: _,
         sim_network,
@@ -299,19 +306,25 @@ pub async fn create_simulation_with_network(
         nodes.remove(pk);
     }
 
+    let nodes_dyn: HashMap<_, Arc<Mutex<dyn LightningNode>>> = nodes
+        .iter()
+        .map(|(pk, node)| (*pk, Arc::clone(node) as Arc<Mutex<dyn LightningNode>>))
+        .collect();
+
     let validated_activities =
-        get_validated_activities(&nodes, nodes_info, sim_params.activity.clone()).await?;
+        get_validated_activities(&nodes_dyn, nodes_info, sim_params.activity.clone()).await?;
 
     Ok((
         Simulation::new(
             cfg,
-            nodes,
+            nodes_dyn,
             tasks,
             clock,
             shutdown_trigger,
             shutdown_listener,
         ),
         validated_activities,
+        nodes,
     ))
 }
 

@@ -43,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
             vec![]
         };
         let sim_cfg: SimulationCfg = SimulationCfg::try_from(&cli)?;
-        create_simulation_with_network(
+        let (sim, validated_activities, _) = create_simulation_with_network(
             sim_cfg,
             &sim_params,
             cli.speedup_clock.unwrap_or(1),
@@ -51,7 +51,8 @@ async fn main() -> anyhow::Result<()> {
             interceptors,
             CustomRecords::default(),
         )
-        .await?
+        .await?;
+        (sim, validated_activities)
     };
     let sim2 = sim.clone();
 
