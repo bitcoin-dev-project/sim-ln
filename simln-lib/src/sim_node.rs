@@ -476,6 +476,7 @@ pub trait SimNetwork: Send + Sync {
         &mut self,
         source: PublicKey,
         route: Route,
+        custom_records: Option<CustomRecords>,
         payment_hash: PaymentHash,
         sender: Sender<Result<PaymentResult, LightningError>>,
     );
@@ -529,7 +530,10 @@ impl<'a, T: SimNetwork> SimNode<'a, T> {
         }
     }
 
-    /// Dispatches a payment to a specified route.
+    /// Dispatches a payment to a specified route. If `custom_records` is `Some`, they will be attached to the outgoing
+    /// update_add_htlc, otherwise [`SimGraph::default_custom_records`] will be used if `None`. If default custom records
+    /// are configured, but you want to send a payment without them specify `Some(CustomRecords::default())`.
+    ///
     /// The [`lightning::routing::router::build_route_from_hops`] function can be used to build the route to be passed here.
     ///
     /// **Note:** The payment hash passed in here should be used in track_payment to track the payment outcome.
@@ -537,6 +541,7 @@ impl<'a, T: SimNetwork> SimNode<'a, T> {
         &mut self,
         route: Route,
         payment_hash: PaymentHash,
+        custom_records: Option<CustomRecords>,
     ) -> Result<(), LightningError> {
         let (sender, receiver) = channel();
 
@@ -552,10 +557,13 @@ impl<'a, T: SimNetwork> SimNode<'a, T> {
             },
         }
 
-        self.network
-            .lock()
-            .await
-            .dispatch_payment(self.info.pubkey, route, payment_hash, sender);
+        self.network.lock().await.dispatch_payment(
+            self.info.pubkey,
+            route,
+            custom_records,
+            payment_hash,
+            sender,
+        );
 
         Ok(())
     }
@@ -666,10 +674,13 @@ impl<T: SimNetwork> LightningNode for SimNode<'_, T> {
         };
 
         // If we did successfully obtain a route, dispatch the payment through the network and then report success.
-        self.network
-            .lock()
-            .await
-            .dispatch_payment(self.info.pubkey, route, payment_hash, sender);
+        self.network.lock().await.dispatch_payment(
+            self.info.pubkey,
+            route,
+            None, // Default custom records.
+            payment_hash,
+            sender,
+        );
 
         Ok(payment_hash)
     }
@@ -1092,11 +1103,13 @@ impl SimNetwork for SimGraph {
     /// dispatch_payment asynchronously propagates a payment through the simulated network, returning a tracking
     /// channel that can be used to obtain the result of the payment. At present, MPP payments are not supported.
     /// In future, we'll allow multiple paths for a single payment, so we allow the trait to accept a route with
-    /// multiple paths to avoid future refactoring.
+    /// multiple paths to avoid future refactoring. If custom records are not provided,
+    /// [`SimGraph::default_custom_records`] will be sent with the payment.
     fn dispatch_payment(
         &mut self,
         source: PublicKey,
         route: Route,
+        custom_records: Option<CustomRecords>,
         payment_hash: PaymentHash,
         sender: Sender<Result<PaymentResult, LightningError>>,
     ) {
@@ -1124,7 +1137,7 @@ impl SimNetwork for SimGraph {
             payment_hash,
             sender,
             interceptors: self.interceptors.clone(),
-            custom_records: self.default_custom_records.clone(),
+            custom_records: custom_records.unwrap_or(self.default_custom_records.clone()),
             shutdown_signal: self.shutdown_signal.clone(),
         }));
     }
@@ -1874,6 +1887,7 @@ mod tests {
                 &mut self,
                 source: PublicKey,
                 route: Route,
+                custom_records: Option<CustomRecords>,
                 payment_hash: PaymentHash,
                 sender: Sender<Result<PaymentResult, LightningError>>,
             );
@@ -1924,7 +1938,11 @@ mod tests {
             .await
             .expect_dispatch_payment()
             .returning(
-                move |_, route: Route, _, sender: Sender<Result<PaymentResult, LightningError>>| {
+                move |_,
+                      route: Route,
+                      _: Option<CustomRecords>,
+                      _,
+                      sender: Sender<Result<PaymentResult, LightningError>>| {
                     // If we've reached dispatch, we must have at least one path, grab the last hop to match the
                     // receiver.
                     let receiver = route.paths[0].hops.last().unwrap().pubkey;
@@ -2085,7 +2103,7 @@ mod tests {
 
             let (sender, receiver) = oneshot::channel();
             self.graph
-                .dispatch_payment(source, route.clone(), PaymentHash([1; 32]), sender);
+                .dispatch_payment(source, route.clone(), None, PaymentHash([1; 32]), sender);
 
             let payment_result = timeout(Duration::from_millis(10), receiver).await;
             // Assert that we receive from the channel or fail.
@@ -2312,7 +2330,7 @@ mod tests {
 
         let preimage = PaymentPreimage(rand::random());
         let payment_hash = preimage.into();
-        node.send_to_route(route, payment_hash).await.unwrap();
+        node.send_to_route(route, payment_hash, None).await.unwrap();
 
         let (_, shutdown_listener) = triggered::trigger();
         let result = node
