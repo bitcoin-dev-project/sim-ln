@@ -487,30 +487,32 @@ pub trait SimNetwork: Send + Sync {
     fn list_nodes(&self) -> Vec<NodeInfo>;
 }
 
+type LdkNetworkGraph = NetworkGraph<Arc<WrappedLog>>;
+
 /// A wrapper struct used to implement the LightningNode trait (can be thought of as "the" lightning node). Passes
 /// all functionality through to a coordinating simulation network. This implementation contains both the [`SimNetwork`]
 /// implementation that will allow us to dispatch payments and a read-only NetworkGraph that is used for pathfinding.
 /// While these two could be combined, we re-use the LDK-native struct to allow re-use of their pathfinding logic.
-pub struct SimNode<'a, T: SimNetwork> {
+pub struct SimNode<T: SimNetwork> {
     info: NodeInfo,
     /// The underlying execution network that will be responsible for dispatching payments.
     network: Arc<Mutex<T>>,
     /// Tracks the channel that will provide updates for payments by hash.
     in_flight: HashMap<PaymentHash, Receiver<Result<PaymentResult, LightningError>>>,
     /// A read-only graph used for pathfinding.
-    pathfinding_graph: Arc<NetworkGraph<&'a WrappedLog>>,
+    pathfinding_graph: Arc<LdkNetworkGraph>,
     /// Probabilistic scorer used to rank paths through the network for routing. This is reused across
     /// multiple payments to maintain scoring state.
-    scorer: ProbabilisticScorer<Arc<NetworkGraph<&'a WrappedLog>>, &'a WrappedLog>,
+    scorer: ProbabilisticScorer<Arc<LdkNetworkGraph>, Arc<WrappedLog>>,
 }
 
-impl<'a, T: SimNetwork> SimNode<'a, T> {
+impl<T: SimNetwork> SimNode<T> {
     /// Creates a new simulation node that refers to the high level network coordinator provided to process payments
     /// on its behalf. The pathfinding graph is provided separately so that each node can handle its own pathfinding.
     pub fn new(
         info: NodeInfo,
         payment_network: Arc<Mutex<T>>,
-        pathfinding_graph: Arc<NetworkGraph<&'a WrappedLog>>,
+        pathfinding_graph: Arc<LdkNetworkGraph>,
     ) -> Self {
         // Initialize the probabilistic scorer with default parameters for learning from payment
         // history. These parameters control how much successful/failed payments affect routing
@@ -518,7 +520,7 @@ impl<'a, T: SimNetwork> SimNode<'a, T> {
         let scorer = ProbabilisticScorer::new(
             ProbabilisticScoringDecayParameters::default(),
             pathfinding_graph.clone(),
-            &WrappedLog {},
+            Arc::new(WrappedLog {}),
         );
 
         SimNode {
@@ -584,12 +586,12 @@ fn node_info(pubkey: PublicKey, alias: String) -> NodeInfo {
 
 /// Uses LDK's pathfinding algorithm with default parameters to find a path from source to destination, with no
 /// restrictions on fee budget.
-fn find_payment_route<'a>(
+fn find_payment_route(
     source: &PublicKey,
     dest: PublicKey,
     amount_msat: u64,
-    pathfinding_graph: &NetworkGraph<&'a WrappedLog>,
-    scorer: &ProbabilisticScorer<Arc<NetworkGraph<&'a WrappedLog>>, &'a WrappedLog>,
+    pathfinding_graph: &LdkNetworkGraph,
+    scorer: &ProbabilisticScorer<Arc<LdkNetworkGraph>, Arc<WrappedLog>>,
 ) -> Result<Route, SimulationError> {
     find_route(
         source,
@@ -606,7 +608,7 @@ fn find_payment_route<'a>(
         pathfinding_graph,
         None,
         &WrappedLog {},
-        scorer,
+        &scorer,
         &Default::default(),
         &[0; 32],
     )
@@ -614,7 +616,7 @@ fn find_payment_route<'a>(
 }
 
 #[async_trait]
-impl<T: SimNetwork> LightningNode for SimNode<'_, T> {
+impl<T: SimNetwork> LightningNode for SimNode<T> {
     fn get_info(&self) -> &NodeInfo {
         &self.info
     }
@@ -1017,9 +1019,9 @@ impl SimGraph {
 /// Produces a map of node public key to lightning node implementation to be used for simulations.
 pub async fn ln_node_from_graph(
     graph: Arc<Mutex<SimGraph>>,
-    routing_graph: Arc<NetworkGraph<&'_ WrappedLog>>,
-) -> HashMap<PublicKey, Arc<Mutex<dyn LightningNode + '_>>> {
-    let mut nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
+    routing_graph: Arc<LdkNetworkGraph>,
+) -> HashMap<PublicKey, Arc<Mutex<SimNode<SimGraph>>>> {
+    let mut nodes: HashMap<PublicKey, Arc<Mutex<SimNode<SimGraph>>>> = HashMap::new();
 
     for node in graph.lock().await.nodes.iter() {
         nodes.insert(
@@ -1039,11 +1041,11 @@ pub async fn ln_node_from_graph(
 /// announcements, which has the effect of adding the nodes in each channel to the graph, because LDK does not export
 /// all of the fields required to apply node announcements. This means that we will not have node-level information
 /// (such as features) available in the routing graph.
-pub fn populate_network_graph<'a, C: Clock>(
+pub fn populate_network_graph<C: Clock>(
     channels: Vec<SimulatedChannel>,
     clock: Arc<C>,
-) -> Result<NetworkGraph<&'a WrappedLog>, LdkError> {
-    let graph = NetworkGraph::new(Network::Regtest, &WrappedLog {});
+) -> Result<LdkNetworkGraph, LdkError> {
+    let graph = NetworkGraph::new(Network::Regtest, Arc::new(WrappedLog {}));
 
     let chain_hash = ChainHash::using_genesis_block(Network::Regtest);
 
@@ -2002,15 +2004,15 @@ mod tests {
     }
 
     /// Contains elements required to test dispatch_payment functionality.
-    struct DispatchPaymentTestKit<'a> {
+    struct DispatchPaymentTestKit {
         graph: SimGraph,
         nodes: Vec<PublicKey>,
-        routing_graph: Arc<NetworkGraph<&'a WrappedLog>>,
-        scorer: ProbabilisticScorer<Arc<NetworkGraph<&'a WrappedLog>>, &'a WrappedLog>,
+        routing_graph: Arc<LdkNetworkGraph>,
+        scorer: ProbabilisticScorer<Arc<LdkNetworkGraph>, Arc<WrappedLog>>,
         shutdown: (Trigger, Listener),
     }
 
-    impl DispatchPaymentTestKit<'_> {
+    impl DispatchPaymentTestKit {
         /// Creates a test graph with a set of nodes connected by three channels, with all the capacity of the channel
         /// on the side of the first node. For example, if called with capacity = 100 it will set up the following
         /// network:
@@ -2031,7 +2033,7 @@ mod tests {
             let scorer = ProbabilisticScorer::new(
                 ProbabilisticScoringDecayParameters::default(),
                 routing_graph.clone(),
-                &WrappedLog {},
+                Arc::new(WrappedLog {}),
             );
 
             // Collect pubkeys in-order, pushing the last node on separately because they don't have an outgoing
