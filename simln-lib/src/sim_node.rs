@@ -8,6 +8,7 @@ use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Network, ScriptBuf, TxOut};
 use lightning::ln::chan_utils::make_funding_redeemscript;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::collections::{hash_map::Entry, HashMap};
 use std::fmt::Display;
 use std::sync::Arc;
@@ -1018,8 +1019,8 @@ impl SimGraph {
 pub async fn ln_node_from_graph(
     graph: Arc<Mutex<SimGraph>>,
     routing_graph: Arc<NetworkGraph<&'_ WrappedLog>>,
-) -> HashMap<PublicKey, Arc<Mutex<dyn LightningNode + '_>>> {
-    let mut nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
+) -> BTreeMap<PublicKey, Arc<Mutex<dyn LightningNode + '_>>> {
+    let mut nodes: BTreeMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = BTreeMap::new();
 
     for node in graph.lock().await.nodes.iter() {
         nodes.insert(
