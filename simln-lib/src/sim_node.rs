@@ -502,7 +502,7 @@ struct InFlightPayment {
 /// all functionality through to a coordinating simulation network. This implementation contains both the [`SimNetwork`]
 /// implementation that will allow us to dispatch payments and a read-only NetworkGraph that is used for pathfinding.
 /// While these two could be combined, we re-use the LDK-native struct to allow re-use of their pathfinding logic.
-pub struct SimNode<T: SimNetwork> {
+pub struct SimNode<T: SimNetwork, C: Clock> {
     info: NodeInfo,
     /// The underlying execution network that will be responsible for dispatching payments.
     network: Arc<Mutex<T>>,
@@ -513,16 +513,19 @@ pub struct SimNode<T: SimNetwork> {
     /// Probabilistic scorer used to rank paths through the network for routing. This is reused across
     /// multiple payments to maintain scoring state.
     scorer: ProbabilisticScorer<Arc<LdkNetworkGraph>, Arc<WrappedLog>>,
+    /// Clock for tracking simulation time.
+    clock: Arc<C>,
 }
 
-impl<T: SimNetwork> SimNode<T> {
+impl<T: SimNetwork, C: Clock> SimNode<T, C> {
     /// Creates a new simulation node that refers to the high level network coordinator provided to process payments
     /// on its behalf. The pathfinding graph is provided separately so that each node can handle its own pathfinding.
     pub fn new(
         info: NodeInfo,
         payment_network: Arc<Mutex<T>>,
         pathfinding_graph: Arc<LdkNetworkGraph>,
-    ) -> Self {
+        clock: Arc<C>,
+    ) -> Result<Self, LightningError> {
         // Initialize the probabilistic scorer with default parameters for learning from payment
         // history. These parameters control how much successful/failed payments affect routing
         // scores and how quickly these scores decay over time.
@@ -532,13 +535,14 @@ impl<T: SimNetwork> SimNode<T> {
             Arc::new(WrappedLog {}),
         );
 
-        SimNode {
+        Ok(SimNode {
             info,
             network: payment_network,
             in_flight: Mutex::new(HashMap::new()),
             pathfinding_graph,
             scorer,
-        }
+            clock,
+        })
     }
 
     /// Dispatches a payment to a specified route. If `custom_records` is `Some`, they will be attached to the outgoing
@@ -627,7 +631,7 @@ fn find_payment_route(
 }
 
 #[async_trait]
-impl<T: SimNetwork> LightningNode for SimNode<T> {
+impl<T: SimNetwork, C: Clock> LightningNode for SimNode<T, C> {
     fn get_info(&self) -> &NodeInfo {
         &self.info
     }
@@ -1039,11 +1043,12 @@ impl SimGraph {
 }
 
 /// Produces a map of node public key to lightning node implementation to be used for simulations.
-pub async fn ln_node_from_graph(
+pub async fn ln_node_from_graph<C: Clock>(
     graph: Arc<Mutex<SimGraph>>,
     routing_graph: Arc<LdkNetworkGraph>,
-) -> HashMap<PublicKey, Arc<Mutex<SimNode<SimGraph>>>> {
-    let mut nodes: HashMap<PublicKey, Arc<Mutex<SimNode<SimGraph>>>> = HashMap::new();
+    clock: Arc<C>,
+) -> Result<HashMap<PublicKey, Arc<Mutex<SimNode<SimGraph, C>>>>, LightningError> {
+    let mut nodes: HashMap<PublicKey, Arc<Mutex<SimNode<SimGraph, C>>>> = HashMap::new();
 
     for node in graph.lock().await.nodes.iter() {
         nodes.insert(
@@ -1052,11 +1057,12 @@ pub async fn ln_node_from_graph(
                 node.1 .0.clone(),
                 graph.clone(),
                 routing_graph.clone(),
-            ))),
+                clock.clone(),
+            )?)),
         );
     }
 
-    nodes
+    Ok(nodes)
 }
 
 /// Populates a network graph based on the set of simulated channels provided. This function *only* applies channel
@@ -1937,7 +1943,9 @@ mod tests {
             node_info(pk, String::default()),
             sim_network.clone(),
             Arc::new(graph),
-        );
+            Arc::new(SystemClock {}),
+        )
+        .unwrap();
 
         // Prime mock to return node info from lookup and assert that we get the pubkey we're expecting.
         let lookup_pk = channels[3].node_1.policy.pubkey;
@@ -2331,7 +2339,9 @@ mod tests {
             node_info(test_kit.nodes[0], String::default()),
             Arc::new(Mutex::new(test_kit.graph)),
             test_kit.routing_graph.clone(),
-        );
+            Arc::new(SystemClock {}),
+        )
+        .unwrap();
 
         let route = build_route_from_hops(
             &test_kit.nodes[0],
