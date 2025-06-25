@@ -4,6 +4,7 @@ use clap::Parser;
 use log::LevelFilter;
 use sim_cli::parsing::{create_simulation, create_simulation_with_network, parse_sim_params, Cli};
 use simln_lib::{
+    clock::SimulationClock,
     latency_interceptor::LatencyIntercepor,
     sim_node::{CustomRecords, Interceptor},
     SimulationCfg,
@@ -43,10 +44,11 @@ async fn main() -> anyhow::Result<()> {
             vec![]
         };
         let sim_cfg: SimulationCfg = SimulationCfg::try_from(&cli)?;
+        let clock = Arc::new(SimulationClock::new(cli.speedup_clock.unwrap_or(1))?);
         let (sim, validated_activities, _) = create_simulation_with_network(
             sim_cfg,
             &sim_params,
-            cli.speedup_clock.unwrap_or(1),
+            clock,
             tasks.clone(),
             interceptors,
             CustomRecords::default(),
