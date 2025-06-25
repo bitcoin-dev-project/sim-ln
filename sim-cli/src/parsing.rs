@@ -244,7 +244,7 @@ struct NodeMapping {
 pub async fn create_simulation_with_network(
     cfg: SimulationCfg,
     sim_params: &SimParams,
-    clock_speedup: u16,
+    clock: Arc<SimulationClock>,
     tasks: TaskTracker,
     interceptors: Vec<Arc<dyn Interceptor>>,
     custom_records: CustomRecords,
@@ -290,8 +290,6 @@ pub async fn create_simulation_with_network(
         )
         .map_err(|e| SimulationError::SimulatedNetworkError(format!("{:?}", e)))?,
     ));
-
-    let clock = Arc::new(SimulationClock::new(clock_speedup)?);
 
     // Copy all simulated channels into a read-only routing graph, allowing to pathfind for
     // individual payments without locking th simulation graph (this is a duplication of the channels,
