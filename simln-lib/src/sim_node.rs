@@ -498,7 +498,7 @@ pub struct SimNode<T: SimNetwork> {
     /// The underlying execution network that will be responsible for dispatching payments.
     network: Arc<Mutex<T>>,
     /// Tracks the channel that will provide updates for payments by hash.
-    in_flight: HashMap<PaymentHash, Receiver<Result<PaymentResult, LightningError>>>,
+    in_flight: Mutex<HashMap<PaymentHash, Receiver<Result<PaymentResult, LightningError>>>>,
     /// A read-only graph used for pathfinding.
     pathfinding_graph: Arc<LdkNetworkGraph>,
     /// Probabilistic scorer used to rank paths through the network for routing. This is reused across
@@ -526,7 +526,7 @@ impl<T: SimNetwork> SimNode<T> {
         SimNode {
             info,
             network: payment_network,
-            in_flight: HashMap::new(),
+            in_flight: Mutex::new(HashMap::new()),
             pathfinding_graph,
             scorer,
         }
@@ -548,7 +548,8 @@ impl<T: SimNetwork> SimNode<T> {
         let (sender, receiver) = channel();
 
         // Check for payment hash collision, failing the payment if we happen to repeat one.
-        match self.in_flight.entry(payment_hash) {
+        let mut in_flight = self.in_flight.lock().await;
+        match in_flight.entry(payment_hash) {
             Entry::Occupied(_) => {
                 return Err(LightningError::SendPaymentError(
                     "payment hash exists".to_string(),
@@ -621,14 +622,14 @@ impl<T: SimNetwork> LightningNode for SimNode<T> {
         &self.info
     }
 
-    async fn get_network(&mut self) -> Result<Network, LightningError> {
+    async fn get_network(&self) -> Result<Network, LightningError> {
         Ok(Network::Regtest)
     }
 
     /// send_payment picks a random preimage for a payment, dispatches it in the network and adds a tracking channel
     /// to our node state to be used for subsequent track_payment calls.
     async fn send_payment(
-        &mut self,
+        &self,
         dest: PublicKey,
         amount_msat: u64,
     ) -> Result<PaymentHash, LightningError> {
@@ -639,7 +640,7 @@ impl<T: SimNetwork> LightningNode for SimNode<T> {
         let payment_hash = preimage.into();
 
         // Check for payment hash collision, failing the payment if we happen to repeat one.
-        match self.in_flight.entry(payment_hash) {
+        match self.in_flight.lock().await.entry(payment_hash) {
             Entry::Occupied(_) => {
                 return Err(LightningError::SendPaymentError(
                     "payment hash exists".to_string(),
@@ -691,11 +692,12 @@ impl<T: SimNetwork> LightningNode for SimNode<T> {
     /// provided is triggered. This call will fail if the hash provided was not obtained from send_payment or passed
     /// into send_to_route first.
     async fn track_payment(
-        &mut self,
+        &self,
         hash: &PaymentHash,
         listener: Listener,
     ) -> Result<PaymentResult, LightningError> {
-        match self.in_flight.remove(hash) {
+        let mut in_flight = self.in_flight.lock().await;
+        match in_flight.remove(hash) {
             Some(receiver) => {
                 select! {
                     biased;
@@ -716,15 +718,15 @@ impl<T: SimNetwork> LightningNode for SimNode<T> {
         }
     }
 
-    async fn get_node_info(&mut self, node_id: &PublicKey) -> Result<NodeInfo, LightningError> {
+    async fn get_node_info(&self, node_id: &PublicKey) -> Result<NodeInfo, LightningError> {
         Ok(self.network.lock().await.lookup_node(node_id)?.0)
     }
 
-    async fn list_channels(&mut self) -> Result<Vec<u64>, LightningError> {
+    async fn list_channels(&self) -> Result<Vec<u64>, LightningError> {
         Ok(self.network.lock().await.lookup_node(&self.info.pubkey)?.1)
     }
 
-    async fn get_graph(&mut self) -> Result<Graph, LightningError> {
+    async fn get_graph(&self) -> Result<Graph, LightningError> {
         let nodes = self.network.lock().await.list_nodes();
 
         let mut nodes_by_pk = HashMap::new();
@@ -1911,7 +1913,7 @@ mod tests {
 
         // Create a simulated node for the first channel in our network.
         let pk = channels[0].node_1.policy.pubkey;
-        let mut node = SimNode::new(
+        let node = SimNode::new(
             node_info(pk, String::default()),
             sim_network.clone(),
             Arc::new(graph),

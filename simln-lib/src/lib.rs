@@ -324,26 +324,26 @@ pub trait LightningNode: Send {
     /// Get information about the node.
     fn get_info(&self) -> &NodeInfo;
     /// Get the network this node is running at.
-    async fn get_network(&mut self) -> Result<Network, LightningError>;
+    async fn get_network(&self) -> Result<Network, LightningError>;
     /// Keysend payment worth `amount_msat` from a source node to the destination node.
     async fn send_payment(
-        &mut self,
+        &self,
         dest: PublicKey,
         amount_msat: u64,
     ) -> Result<PaymentHash, LightningError>;
     /// Track a payment with the specified hash.
     async fn track_payment(
-        &mut self,
+        &self,
         hash: &PaymentHash,
         shutdown: Listener,
     ) -> Result<PaymentResult, LightningError>;
     /// Gets information on a specific node.
-    async fn get_node_info(&mut self, node_id: &PublicKey) -> Result<NodeInfo, LightningError>;
+    async fn get_node_info(&self, node_id: &PublicKey) -> Result<NodeInfo, LightningError>;
     /// Lists all channels, at present only returns a vector of channel capacities in msat because no further
     /// information is required.
-    async fn list_channels(&mut self) -> Result<Vec<u64>, LightningError>;
+    async fn list_channels(&self) -> Result<Vec<u64>, LightningError>;
     /// Get the network graph from the point of view of a given node.
-    async fn get_graph(&mut self) -> Result<Graph, LightningError>;
+    async fn get_graph(&self) -> Result<Graph, LightningError>;
 }
 
 /// Represents an error that occurs when generating a destination for a payment.
@@ -1149,7 +1149,7 @@ async fn consume_events(
                 if let Some(event) = simulation_event {
                     match event {
                         SimulationEvent::SendPayment(dest, amt_msat) => {
-                            let mut node = node.lock().await;
+                            let node = node.lock().await;
 
                             let mut payment = Payment {
                                 source: node.get_info().pubkey,
@@ -1501,7 +1501,7 @@ async fn track_payment_result(
 ) -> Result<(), SimulationError> {
     log::trace!("Payment result tracker starting.");
 
-    let mut node = node.lock().await;
+    let node = node.lock().await;
 
     let res = match payment.hash {
         Some(hash) => {

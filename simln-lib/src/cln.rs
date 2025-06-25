@@ -10,10 +10,10 @@ use cln_grpc::pb::{
 };
 use lightning::ln::features::NodeFeatures;
 use lightning::ln::PaymentHash;
-
 use serde::{Deserialize, Serialize};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, Error};
+use tokio::sync::Mutex;
 use tokio::time::{self, Duration};
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 use triggered::Listener;
@@ -38,7 +38,7 @@ pub struct ClnConnection {
 }
 
 pub struct ClnNode {
-    pub client: NodeClient<Channel>,
+    pub client: Mutex<NodeClient<Channel>>,
     info: NodeInfo,
 }
 
@@ -63,7 +63,7 @@ impl ClnNode {
                 })?,
             ));
 
-        let mut client = NodeClient::new(
+        let client = Mutex::new(NodeClient::new(
             Channel::from_shared(connection.address)
                 .map_err(|err| LightningError::ConnectionError(err.to_string()))?
                 .tls_config(tls)
@@ -81,9 +81,11 @@ impl ClnNode {
                         err
                     ))
                 })?,
-        );
+        ));
 
         let (id, mut alias, our_features) = client
+            .lock()
+            .await
             .getinfo(GetinfoRequest {})
             .await
             .map(|r| {
@@ -119,7 +121,7 @@ impl ClnNode {
     /// Fetch channels belonging to the local node, initiated locally if is_source is true, and initiated remotely if
     /// is_source is false. Introduced as a helper function because CLN doesn't have a single API to list all of our
     /// node's channels.
-    async fn node_channels(&mut self, is_source: bool) -> Result<Vec<u64>, LightningError> {
+    async fn node_channels(&self, is_source: bool) -> Result<Vec<u64>, LightningError> {
         let req = if is_source {
             ListchannelsRequest {
                 source: Some(self.info.pubkey.serialize().to_vec()),
@@ -134,6 +136,8 @@ impl ClnNode {
 
         let resp = self
             .client
+            .lock()
+            .await
             .list_channels(req)
             .await
             .map_err(|err| LightningError::ListChannelsError(err.to_string()))?
@@ -153,9 +157,9 @@ impl LightningNode for ClnNode {
         &self.info
     }
 
-    async fn get_network(&mut self) -> Result<Network, LightningError> {
-        let info = self
-            .client
+    async fn get_network(&self) -> Result<Network, LightningError> {
+        let mut client = self.client.lock().await;
+        let info = client
             .getinfo(GetinfoRequest {})
             .await
             .map_err(|err| LightningError::GetInfoError(err.to_string()))?
@@ -166,12 +170,12 @@ impl LightningNode for ClnNode {
     }
 
     async fn send_payment(
-        &mut self,
+        &self,
         dest: PublicKey,
         amount_msat: u64,
     ) -> Result<PaymentHash, LightningError> {
-        let KeysendResponse { payment_hash, .. } = self
-            .client
+        let mut client = self.client.lock().await;
+        let KeysendResponse { payment_hash, .. } = client
             .key_send(KeysendRequest {
                 destination: dest.serialize().to_vec(),
                 amount_msat: Some(Amount { msat: amount_msat }),
@@ -200,7 +204,7 @@ impl LightningNode for ClnNode {
     }
 
     async fn track_payment(
-        &mut self,
+        &self,
         hash: &PaymentHash,
         shutdown: Listener,
     ) -> Result<PaymentResult, LightningError> {
@@ -211,8 +215,8 @@ impl LightningNode for ClnNode {
                     return Err(LightningError::TrackPaymentError("Shutdown before tracking results".to_string()));
                 },
                 _ = time::sleep(Duration::from_millis(500)) => {
-                    let ListpaysResponse { pays } = self
-                        .client
+                    let mut client = self.client.lock().await;
+                    let ListpaysResponse { pays } = client
                         .list_pays(ListpaysRequest {
                             payment_hash: Some(hash.0.to_vec()),
                             ..Default::default()
@@ -242,9 +246,9 @@ impl LightningNode for ClnNode {
         }
     }
 
-    async fn get_node_info(&mut self, node_id: &PublicKey) -> Result<NodeInfo, LightningError> {
-        let mut nodes: Vec<cln_grpc::pb::ListnodesNodes> = self
-            .client
+    async fn get_node_info(&self, node_id: &PublicKey) -> Result<NodeInfo, LightningError> {
+        let mut client = self.client.lock().await;
+        let mut nodes: Vec<cln_grpc::pb::ListnodesNodes> = client
             .list_nodes(ListnodesRequest {
                 id: Some(node_id.serialize().to_vec()),
             })
@@ -270,15 +274,15 @@ impl LightningNode for ClnNode {
         }
     }
 
-    async fn list_channels(&mut self) -> Result<Vec<u64>, LightningError> {
+    async fn list_channels(&self) -> Result<Vec<u64>, LightningError> {
         let mut node_channels = self.node_channels(true).await?;
         node_channels.extend(self.node_channels(false).await?);
         Ok(node_channels)
     }
 
-    async fn get_graph(&mut self) -> Result<Graph, LightningError> {
-        let nodes: Vec<cln_grpc::pb::ListnodesNodes> = self
-            .client
+    async fn get_graph(&self) -> Result<Graph, LightningError> {
+        let mut client = self.client.lock().await;
+        let nodes: Vec<cln_grpc::pb::ListnodesNodes> = client
             .list_nodes(ListnodesRequest { id: None })
             .await
             .map_err(|err| LightningError::GetNodeInfoError(err.to_string()))?

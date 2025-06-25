@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::str::FromStr;
 use std::time::Duration;
+use tokio::sync::Mutex;
 use tokio::time;
 use triggered::Listener;
 
@@ -83,7 +84,7 @@ impl TryInto<EclairClient> for EclairConnection {
 }
 
 pub struct EclairNode {
-    client: EclairClient,
+    client: Mutex<EclairClient>,
     info: NodeInfo,
     network: Network,
 }
@@ -110,7 +111,7 @@ impl EclairNode {
         let features = parse_json_to_node_features(&info.features);
 
         Ok(Self {
-            client,
+            client: Mutex::new(client),
             info: NodeInfo {
                 pubkey,
                 alias: info.alias,
@@ -127,22 +128,22 @@ impl LightningNode for EclairNode {
         &self.info
     }
 
-    async fn get_network(&mut self) -> Result<Network, LightningError> {
+    async fn get_network(&self) -> Result<Network, LightningError> {
         Ok(self.network)
     }
 
     async fn send_payment(
-        &mut self,
+        &self,
         dest: PublicKey,
         amount_msat: u64,
     ) -> Result<PaymentHash, LightningError> {
+        let client = self.client.lock().await;
         let preimage = PaymentPreimage(rand::random()).0;
         let mut params = HashMap::new();
         params.insert("nodeId".to_string(), hex::encode(dest.serialize()));
         params.insert("amountMsat".to_string(), amount_msat.to_string());
         params.insert("paymentHash".to_string(), hex::encode(preimage));
-        let uuid: String = self
-            .client
+        let uuid: String = client
             .request("sendtonode", Some(params))
             .await
             .map_err(|err| LightningError::SendPaymentError(err.to_string()))?;
@@ -150,8 +151,7 @@ impl LightningNode for EclairNode {
         let mut params = HashMap::new();
         params.insert("paymentHash".to_string(), hex::encode(preimage));
         params.insert("id".to_string(), uuid);
-        let payment_parts: PaymentInfoResponse = self
-            .client
+        let payment_parts: PaymentInfoResponse = client
             .request("getsentinfo", Some(params))
             .await
             .map_err(|_| LightningError::InvalidPaymentHash)?;
@@ -164,7 +164,7 @@ impl LightningNode for EclairNode {
     }
 
     async fn track_payment(
-        &mut self,
+        &self,
         hash: &PaymentHash,
         shutdown: Listener,
     ) -> Result<PaymentResult, LightningError> {
@@ -175,11 +175,11 @@ impl LightningNode for EclairNode {
                     return Err(LightningError::TrackPaymentError("Shutdown before tracking results".to_string()));
                 },
                 _ = time::sleep(Duration::from_millis(500)) => {
+                    let client = self.client.lock().await;
                     let mut params = HashMap::new();
                     params.insert("paymentHash".to_string(), hex::encode(hash.0));
 
-                    let payment_parts: PaymentInfoResponse = self
-                    .client
+                    let payment_parts: PaymentInfoResponse = client
                     .request("getsentinfo", Some(params))
                     .await
                     .map_err(|err| LightningError::TrackPaymentError(err.to_string()))?;
@@ -204,12 +204,12 @@ impl LightningNode for EclairNode {
         }
     }
 
-    async fn get_node_info(&mut self, node_id: &PublicKey) -> Result<NodeInfo, LightningError> {
+    async fn get_node_info(&self, node_id: &PublicKey) -> Result<NodeInfo, LightningError> {
         let mut params = HashMap::new();
         params.insert("nodeId".to_string(), hex::encode(node_id.serialize()));
 
-        let node_info: NodeResponse = self
-            .client
+        let client = self.client.lock().await;
+        let node_info: NodeResponse = client
             .request("node", Some(params))
             .await
             .map_err(|err| LightningError::GetNodeInfoError(err.to_string()))?;
@@ -222,9 +222,9 @@ impl LightningNode for EclairNode {
         })
     }
 
-    async fn list_channels(&mut self) -> Result<Vec<u64>, LightningError> {
-        let channels: ChannelsResponse = self
-            .client
+    async fn list_channels(&self) -> Result<Vec<u64>, LightningError> {
+        let client = self.client.lock().await;
+        let channels: ChannelsResponse = client
             .request("channels", None)
             .await
             .map_err(|err| LightningError::ListChannelsError(err.to_string()))?;
@@ -245,9 +245,9 @@ impl LightningNode for EclairNode {
         Ok(capacities_msat)
     }
 
-    async fn get_graph(&mut self) -> Result<Graph, LightningError> {
-        let nodes: NodesResponse = self
-            .client
+    async fn get_graph(&self) -> Result<Graph, LightningError> {
+        let client = self.client.lock().await;
+        let nodes: NodesResponse = client
             .request("nodes", None)
             .await
             .map_err(|err| LightningError::GetNodeInfoError(err.to_string()))?;
