@@ -301,7 +301,7 @@ pub async fn create_simulation_with_network(
             .map_err(|e| SimulationError::SimulatedNetworkError(format!("{:?}", e)))?,
     );
 
-    let mut nodes = ln_node_from_graph(simulation_graph.clone(), routing_graph).await;
+    let mut nodes = ln_node_from_graph(simulation_graph.clone(), routing_graph).await?;
     for pk in exclude {
         nodes.remove(pk);
     }
