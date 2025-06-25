@@ -1,4 +1,4 @@
-use crate::clock::Clock;
+use crate::clock::{Clock, SimulationClock};
 use crate::{
     Graph, LightningError, LightningNode, NodeInfo, PaymentOutcome, PaymentResult, SimulationError,
 };
@@ -513,6 +513,8 @@ pub struct SimNode<T: SimNetwork> {
     /// Probabilistic scorer used to rank paths through the network for routing. This is reused across
     /// multiple payments to maintain scoring state.
     scorer: ProbabilisticScorer<Arc<LdkNetworkGraph>, Arc<WrappedLog>>,
+    /// Clock for tracking simulation time.
+    clock: SimulationClock,
 }
 
 impl<T: SimNetwork> SimNode<T> {
@@ -522,7 +524,7 @@ impl<T: SimNetwork> SimNode<T> {
         info: NodeInfo,
         payment_network: Arc<Mutex<T>>,
         pathfinding_graph: Arc<LdkNetworkGraph>,
-    ) -> Self {
+    ) -> Result<Self, LightningError> {
         // Initialize the probabilistic scorer with default parameters for learning from payment
         // history. These parameters control how much successful/failed payments affect routing
         // scores and how quickly these scores decay over time.
@@ -532,13 +534,24 @@ impl<T: SimNetwork> SimNode<T> {
             Arc::new(WrappedLog {}),
         );
 
-        SimNode {
+        let clock = match SimulationClock::new(1) {
+            Ok(c) => c,
+            Err(e) => {
+                return Err(LightningError::SendPaymentError(format!(
+                    "Error creating simulation clock: {}",
+                    e
+                )));
+            },
+        };
+
+        Ok(SimNode {
             info,
             network: payment_network,
             in_flight: HashMap::new(),
             pathfinding_graph,
             scorer,
-        }
+            clock,
+        })
     }
 
     /// Dispatches a payment to a specified route. If `custom_records` is `Some`, they will be attached to the outgoing
@@ -1044,7 +1057,7 @@ impl SimGraph {
 pub async fn ln_node_from_graph(
     graph: Arc<Mutex<SimGraph>>,
     routing_graph: Arc<LdkNetworkGraph>,
-) -> HashMap<PublicKey, Arc<Mutex<SimNode<SimGraph>>>> {
+) -> Result<HashMap<PublicKey, Arc<Mutex<SimNode<SimGraph>>>>, LightningError> {
     let mut nodes: HashMap<PublicKey, Arc<Mutex<SimNode<SimGraph>>>> = HashMap::new();
 
     for node in graph.lock().await.nodes.iter() {
@@ -1054,11 +1067,11 @@ pub async fn ln_node_from_graph(
                 node.1 .0.clone(),
                 graph.clone(),
                 routing_graph.clone(),
-            ))),
+            )?)),
         );
     }
 
-    nodes
+    Ok(nodes)
 }
 
 /// Populates a network graph based on the set of simulated channels provided. This function *only* applies channel
@@ -1939,7 +1952,8 @@ mod tests {
             node_info(pk, String::default()),
             sim_network.clone(),
             Arc::new(graph),
-        );
+        )
+        .unwrap();
 
         // Prime mock to return node info from lookup and assert that we get the pubkey we're expecting.
         let lookup_pk = channels[3].node_1.policy.pubkey;
@@ -2333,7 +2347,8 @@ mod tests {
             node_info(test_kit.nodes[0], String::default()),
             Arc::new(Mutex::new(test_kit.graph)),
             test_kit.routing_graph.clone(),
-        );
+        )
+        .unwrap();
 
         let route = build_route_from_hops(
             &test_kit.nodes[0],

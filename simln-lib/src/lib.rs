@@ -263,6 +263,9 @@ pub enum LightningError {
     /// Error that occurred while getting graph.
     #[error("Get graph error: {0}")]
     GetGraphError(String),
+    /// Error that occured when getting clock info.
+    #[error("SystemTime conversion error: {0}")]
+    SystemTimeConversionError(#[from] SystemTimeError),
 }
 
 /// Information about a Lightning Network node.
