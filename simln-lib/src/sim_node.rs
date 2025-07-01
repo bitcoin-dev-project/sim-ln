@@ -880,6 +880,8 @@ async fn handle_intercepted_htlc(
     // the HTLC. If any of the interceptors did return an error, we send a shutdown signal
     // to the other interceptors that may have not returned yet.
     let mut interceptor_failure = None;
+    let mut critical_error = None;
+
     'get_resp: loop {
         tokio::select! {
             res = intercepts.join_next() => {
@@ -917,8 +919,11 @@ async fn handle_intercepted_htlc(
                         interceptor_failure = Some(fwd_error);
                         interceptor_trigger.trigger();
                     },
+                    // Interceptor returned a CriticalError, Trigger a shutdown and store the error
+                    // to return after all interceptors have finished.
                     Err(e) => {
-                        return Err(e);
+                        critical_error = Some(e);
+                        interceptor_trigger.trigger();
                     },
                 }
             }
@@ -931,6 +936,11 @@ async fn handle_intercepted_htlc(
                 break 'get_resp
             }
         }
+    }
+
+    // if we have a critical error, returned it after all interceptors have finished.
+    if let Some(e) = critical_error {
+        return Err(e);
     }
 
     if let Some(e) = interceptor_failure {
