@@ -241,6 +241,16 @@ struct NodeMapping {
     alias_node_map: HashMap<String, NodeInfo>,
 }
 
+/// Creates a simulation that will run on an entirely-simulated network defined in `sim_params`,
+/// returning the simulation, a validated vector of any defined activities that were specified and
+/// a map of all the simulated nodes in the network. Note that if `sim_params::exclude` was set,
+/// the nodes will be excluded from the set of nodes actively sending/receiving random payments,
+/// but they will be included in the map so that they are available for use outside of the
+/// simulation.
+///
+/// This network can be customized by providing `interceptors` that will act on every HTLC that is
+/// forwarded by the network, and setting `custom_records` which will be set as the default TLV
+/// records set by the original sender of payments in their simulated `update_add_htlc`.
 pub async fn create_simulation_with_network(
     cfg: SimulationCfg,
     sim_params: &SimParams,
@@ -299,15 +309,18 @@ pub async fn create_simulation_with_network(
             .map_err(|e| SimulationError::SimulatedNetworkError(format!("{:?}", e)))?,
     );
 
-    let mut nodes = ln_node_from_graph(simulation_graph.clone(), routing_graph).await;
-    for pk in exclude {
-        nodes.remove(pk);
-    }
-
-    let nodes_dyn: HashMap<_, Arc<Mutex<dyn LightningNode>>> = nodes
+    // We want the full set of nodes in our graph to return to the caller so that they can take
+    // custom actions on the simulated network. For the nodes we'll pass our simulation, cast them
+    // to a dyn trait and exclude any nodes that shouldn't be included in random activity
+    // generation.
+    let nodes = ln_node_from_graph(simulation_graph.clone(), routing_graph).await;
+    let mut nodes_dyn: HashMap<_, Arc<Mutex<dyn LightningNode>>> = nodes
         .iter()
         .map(|(pk, node)| (*pk, Arc::clone(node) as Arc<Mutex<dyn LightningNode>>))
         .collect();
+    for pk in exclude {
+        nodes_dyn.remove(pk);
+    }
 
     let validated_activities =
         get_validated_activities(&nodes_dyn, nodes_info, sim_params.activity.clone()).await?;
