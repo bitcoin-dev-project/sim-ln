@@ -845,7 +845,8 @@ pub struct HtlcRef {
 /// If any interceptor returns a `ForwardingError`, it triggers a shutdown signal to all other
 /// interceptors and waits for them to shutdown. The forwarding error is then returned.
 /// If any interceptor returns a `CriticalError`, it is immediately returned to trigger a
-/// simulation shutdown. TODO: If a critical error happens, we could instead trigger the shutdown
+/// simulation shutdown.
+// If a critical error happens, we could instead trigger the shutdown
 /// for the interceptors and let them finish before returning.
 /// While waiting on the interceptors, it listens on the shutdown_listener for any signals from
 /// upstream and trigger shutdowns to the interceptors if needed.
