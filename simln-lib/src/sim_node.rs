@@ -2480,6 +2480,38 @@ mod tests {
         assert!(response.unwrap().unwrap() == CustomRecords::from([(1000, vec![1])]));
     }
 
+    /// Tests intercepted htlc with a critical error from one interceptor.
+    #[tokio::test]
+    async fn test_intercepted_htlc_critical_error() {
+        // Interceptor that will return a critical error.
+        let mut mock_interceptor = MockTestInterceptor::new();
+        mock_interceptor
+            .expect_intercept_htlc()
+            .returning(|_| Err(CriticalError::InterceptorError("critical failure".into())));
+        mock_interceptor
+            .expect_notify_resolution()
+            .returning(|_| Ok(()));
+
+        let (interceptor_trigger, interceptor_listener) = triggered::trigger();
+        let mock_request = create_intercept_request(interceptor_listener);
+
+        let mock_interceptor: Arc<dyn Interceptor> = Arc::new(mock_interceptor);
+        let interceptors = vec![mock_interceptor];
+        let (_, shutdown_listener) = triggered::trigger();
+
+        let result = handle_intercepted_htlc(
+            mock_request,
+            &interceptors,
+            interceptor_trigger,
+            shutdown_listener,
+        )
+        .await;
+
+        assert!(result.is_err());
+        let err_string = format!("{:?}", result.unwrap_err());
+        assert!(err_string.contains("critical failure"));
+    }
+
     /// Tests a long resolving interceptor gets correctly interrupted during a shutdown.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_shutdown_intercepted_htlc() {
