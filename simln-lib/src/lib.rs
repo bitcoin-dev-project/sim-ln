@@ -588,7 +588,7 @@ impl SimulationCfg {
 /// The simulator can execute both predefined payment patterns and generate random payment activity
 /// based on configuration parameters.
 #[derive(Clone)]
-pub struct Simulation<C: Clock + 'static> {
+pub struct Simulation<C: Clock> {
     /// Config for the simulation itself.
     cfg: SimulationCfg,
     /// The lightning node that is being simulated.
