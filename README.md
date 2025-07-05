@@ -35,7 +35,7 @@ have permission to execute commands on. Note that the current version
 of the simulator uses keysend to execute payments, which must be enabled as follows:
 * LND: `--accept-keysend`
 * CLN: enabled by default
-* Eclair: `--features.keysend=optional`
+* Eclair: `-Declair.features.keysend=optional` (or `--features.keysend=optional` if you're using Polar)
 
 ## Getting Started
 
