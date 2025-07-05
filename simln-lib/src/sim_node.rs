@@ -622,8 +622,8 @@ impl<T: SimNetwork> LightningNode for SimNode<T> {
         &self.info
     }
 
-    async fn get_network(&self) -> Result<Network, LightningError> {
-        Ok(Network::Regtest)
+    fn get_network(&self) -> Network {
+        Network::Regtest
     }
 
     /// send_payment picks a random preimage for a payment, dispatches it in the network and adds a tracking channel

@@ -40,6 +40,7 @@ pub struct ClnConnection {
 pub struct ClnNode {
     pub client: Mutex<NodeClient<Channel>>,
     info: NodeInfo,
+    network: Network,
 }
 
 impl ClnNode {
@@ -83,30 +84,26 @@ impl ClnNode {
                 })?,
         ));
 
-        let (id, mut alias, our_features) = client
+        let info = client
             .lock()
             .await
             .getinfo(GetinfoRequest {})
             .await
-            .map(|r| {
-                let inner = r.into_inner();
-                (
-                    inner.id,
-                    inner.alias.unwrap_or_default(),
-                    inner.our_features,
-                )
-            })
-            .map_err(|err| LightningError::GetInfoError(err.to_string()))?;
+            .map_err(|err| LightningError::GetInfoError(err.to_string()))?
+            .into_inner();
 
-        let pubkey = PublicKey::from_slice(&id)
+        let pubkey = PublicKey::from_slice(&info.id)
             .map_err(|err| LightningError::GetInfoError(err.to_string()))?;
+        let mut alias = info.alias.unwrap_or_default();
         connection.id.validate(&pubkey, &mut alias)?;
 
-        let features = if let Some(features) = our_features {
-            NodeFeatures::from_be_bytes(features.node)
-        } else {
-            NodeFeatures::empty()
+        let features = match info.our_features {
+            Some(features) => NodeFeatures::from_be_bytes(features.node),
+            None => NodeFeatures::empty(),
         };
+
+        let network = Network::from_core_arg(&info.network)
+            .map_err(|err| LightningError::GetInfoError(err.to_string()))?;
 
         Ok(Self {
             client,
@@ -115,6 +112,7 @@ impl ClnNode {
                 features,
                 alias,
             },
+            network,
         })
     }
 
@@ -157,16 +155,8 @@ impl LightningNode for ClnNode {
         &self.info
     }
 
-    async fn get_network(&self) -> Result<Network, LightningError> {
-        let mut client = self.client.lock().await;
-        let info = client
-            .getinfo(GetinfoRequest {})
-            .await
-            .map_err(|err| LightningError::GetInfoError(err.to_string()))?
-            .into_inner();
-
-        Ok(Network::from_core_arg(&info.network)
-            .map_err(|err| LightningError::ValidationError(err.to_string()))?)
+    fn get_network(&self) -> Network {
+        self.network
     }
 
     async fn send_payment(
