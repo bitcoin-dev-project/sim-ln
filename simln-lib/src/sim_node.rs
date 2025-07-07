@@ -552,7 +552,7 @@ impl<T: SimNetwork, C: Clock> SimNode<T, C> {
     /// The [`lightning::routing::router::build_route_from_hops`] function can be used to build the route to be passed here.
     ///
     /// **Note:** The payment hash passed in here should be used in track_payment to track the payment outcome.
-    /// 
+    ///
     /// **Note:** The route passed in here must contain only one path.
     pub async fn send_to_route(
         &mut self,
