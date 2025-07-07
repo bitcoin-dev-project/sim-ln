@@ -2068,6 +2068,65 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn test_payment_failure_returns_correct_hop_index_of_failure() {
+        let chan_capacity = 500_000_000;
+        let test_kit =
+            DispatchPaymentTestKit::new(chan_capacity, vec![], CustomRecords::default()).await;
+
+        let mut node = SimNode::new(
+            node_info(test_kit.nodes[0], String::default()),
+            Arc::new(Mutex::new(test_kit.graph)),
+            test_kit.routing_graph.clone(),
+            Arc::new(SystemClock {}),
+        )
+        .unwrap();
+
+        let route = build_route_from_hops(
+            &test_kit.nodes[0],
+            &[test_kit.nodes[1], test_kit.nodes[2], test_kit.nodes[3]],
+            &RouteParameters {
+                payment_params: PaymentParameters::from_node_id(*test_kit.nodes.last().unwrap(), 0)
+                    .with_max_total_cltv_expiry_delta(u32::MAX)
+                    .with_max_path_count(1)
+                    .with_max_channel_saturation_power_of_half(1),
+                final_value_msat: 20_000,
+                max_total_routing_fee_msat: None,
+            },
+            &test_kit.routing_graph,
+            &WrappedLog {},
+            &[0; 32],
+        )
+        .unwrap();
+
+        // We are altering the route to make sure that we fail at each hop in turn.
+        // We will assert that the failure index returned is the index of the hop that we altered.
+        // This is done by setting the CLTV expiry delta to a value that will cause the payment to fail at that hop.
+        // The last hop will always succeed, so we only test the first n-1 hops.
+        for i in 0..route.paths[0].hops.len() - 1 {
+            let mut route_clone = route.clone();
+            // Alter route_clone to make payment fail on this hop.
+            route_clone.paths[0].hops[i].cltv_expiry_delta = 39;
+
+            let preimage = PaymentPreimage(rand::random());
+            let payment_hash = preimage.into();
+            let send_result = node.send_to_route(route_clone, payment_hash, None).await;
+
+            assert!(send_result.is_ok());
+
+            let (_, shutdown_listener) = triggered::trigger();
+            let result = node
+                .track_payment(&payment_hash, shutdown_listener)
+                .await
+                .unwrap();
+
+            assert!(matches!(
+                result.payment_outcome,
+                PaymentOutcome::IndexFailure(idx) if idx == i
+            ));
+        }
+    }
+
     mock! {
         #[derive(Debug)]
         TestInterceptor{}
