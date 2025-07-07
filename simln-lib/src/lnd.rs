@@ -13,7 +13,7 @@ use lightning::ln::features::NodeFeatures;
 use lightning::ln::{PaymentHash, PaymentPreimage};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
-use tonic_lnd::lnrpc::{payment::PaymentStatus, GetInfoRequest, GetInfoResponse};
+use tonic_lnd::lnrpc::{payment::PaymentStatus, GetInfoRequest};
 use tonic_lnd::lnrpc::{
     ChannelGraphRequest, ListChannelsRequest, NodeInfoRequest, PaymentFailureReason,
 };
@@ -41,6 +41,7 @@ pub struct LndConnection {
 pub struct LndNode {
     client: Mutex<Client>,
     info: NodeInfo,
+    network: Network,
 }
 
 // TODO: We could even generalize this to parse any type of Features
@@ -68,29 +69,50 @@ impl LndNode {
                 .await
                 .map_err(|err| LightningError::ConnectionError(err.to_string()))?;
 
-        let GetInfoResponse {
-            identity_pubkey,
-            features,
-            mut alias,
-            ..
-        } = client
+        let info = client
             .lightning()
             .get_info(GetInfoRequest {})
             .await
             .map_err(|err| LightningError::GetInfoError(err.to_string()))?
             .into_inner();
 
-        let pubkey = PublicKey::from_str(&identity_pubkey)
+        let mut alias = info.alias;
+        let pubkey = PublicKey::from_str(&info.identity_pubkey)
             .map_err(|err| LightningError::GetInfoError(err.to_string()))?;
         connection.id.validate(&pubkey, &mut alias)?;
+
+        let network = {
+            if info.chains.is_empty() {
+                return Err(LightningError::GetInfoError(
+                    "node is not connected any chain".to_string(),
+                ));
+            } else if info.chains.len() > 1 {
+                return Err(LightningError::GetInfoError(format!(
+                    "node is connected to more than one chain: {:?}",
+                    info.chains.iter().map(|c| c.chain.to_string())
+                )));
+            }
+
+            Network::from_str(match info.chains[0].network.as_str() {
+                "mainnet" => "bitcoin",
+                "simnet" => {
+                    return Err(LightningError::ValidationError(
+                        "simnet is not supported".to_string(),
+                    ))
+                },
+                x => x,
+            })
+            .map_err(|e| LightningError::GetInfoError(e.to_string()))?
+        };
 
         Ok(Self {
             client: Mutex::new(client),
             info: NodeInfo {
                 pubkey,
-                features: parse_node_features(features.keys().cloned().collect()),
+                features: parse_node_features(info.features.keys().cloned().collect()),
                 alias,
             },
+            network,
         })
     }
 }
@@ -104,38 +126,8 @@ impl LightningNode for LndNode {
         &self.info
     }
 
-    async fn get_network(&self) -> Result<Network, LightningError> {
-        let mut client = self.client.lock().await;
-        let info = client
-            .lightning()
-            .get_info(GetInfoRequest {})
-            .await
-            .map_err(|err| LightningError::GetInfoError(err.to_string()))?
-            .into_inner();
-
-        if info.chains.is_empty() {
-            return Err(LightningError::ValidationError(format!(
-                "{} is not connected any chain",
-                self.get_info()
-            )));
-        } else if info.chains.len() > 1 {
-            return Err(LightningError::ValidationError(format!(
-                "{} is connected to more than one chain: {:?}",
-                self.get_info(),
-                info.chains.iter().map(|c| c.chain.to_string())
-            )));
-        }
-
-        Ok(Network::from_str(match info.chains[0].network.as_str() {
-            "mainnet" => "bitcoin",
-            "simnet" => {
-                return Err(LightningError::ValidationError(
-                    "simnet is not supported".to_string(),
-                ))
-            },
-            x => x,
-        })
-        .map_err(|err| LightningError::ValidationError(err.to_string()))?)
+    fn get_network(&self) -> Network {
+        self.network
     }
 
     async fn send_payment(

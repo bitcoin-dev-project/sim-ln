@@ -76,7 +76,7 @@ mock! {
     #[async_trait]
     impl crate::LightningNode for LightningNode {
         fn get_info(&self) -> &NodeInfo;
-        async fn get_network(&self) -> Result<bitcoin::Network, LightningError>;
+        fn get_network(&self) -> bitcoin::Network;
         async fn send_payment(
                 &self,
                 dest: bitcoin::secp256k1::PublicKey,
@@ -182,9 +182,7 @@ impl LightningTestNodeBuilder {
 
             if let Some(networks) = &self.networks {
                 let network = networks[idx];
-                mock_node
-                    .expect_get_network()
-                    .returning(move || Ok(network));
+                mock_node.expect_get_network().return_const(network);
             }
 
             clients.insert(node_info.pubkey, Arc::new(Mutex::new(mock_node)));

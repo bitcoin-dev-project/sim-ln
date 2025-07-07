@@ -324,7 +324,7 @@ pub trait LightningNode: Send {
     /// Get information about the node.
     fn get_info(&self) -> &NodeInfo;
     /// Get the network this node is running at.
-    async fn get_network(&self) -> Result<Network, LightningError>;
+    fn get_network(&self) -> Network;
     /// Keysend payment worth `amount_msat` from a source node to the destination node.
     async fn send_payment(
         &self,
@@ -588,7 +588,7 @@ impl SimulationCfg {
 /// The simulator can execute both predefined payment patterns and generate random payment activity
 /// based on configuration parameters.
 #[derive(Clone)]
-pub struct Simulation<C: Clock + 'static> {
+pub struct Simulation<C: Clock> {
     /// Config for the simulation itself.
     cfg: SimulationCfg,
     /// The lightning node that is being simulated.
@@ -709,7 +709,7 @@ impl<C: Clock + 'static> Simulation<C> {
         let mut running_network = Option::None;
 
         for node in self.nodes.values() {
-            let network = node.lock().await.get_network().await?;
+            let network = node.lock().await.get_network();
             if network == Network::Bitcoin {
                 return Err(LightningError::ValidationError(
                     "mainnet is not supported".to_string(),

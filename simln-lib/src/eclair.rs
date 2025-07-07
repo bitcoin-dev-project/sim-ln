@@ -128,8 +128,8 @@ impl LightningNode for EclairNode {
         &self.info
     }
 
-    async fn get_network(&self) -> Result<Network, LightningError> {
-        Ok(self.network)
+    fn get_network(&self) -> Network {
+        self.network
     }
 
     async fn send_payment(
