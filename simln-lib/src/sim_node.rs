@@ -554,6 +554,8 @@ impl<T: SimNetwork, C: Clock> SimNode<T, C> {
     /// The [`lightning::routing::router::build_route_from_hops`] function can be used to build the route to be passed here.
     ///
     /// **Note:** The payment hash passed in here should be used in track_payment to track the payment outcome.
+    ///
+    /// **Note:** The route passed in here must contain only one path.
     pub async fn send_to_route(
         &mut self,
         route: Route,
@@ -561,6 +563,12 @@ impl<T: SimNetwork, C: Clock> SimNode<T, C> {
         custom_records: Option<CustomRecords>,
     ) -> Result<(), LightningError> {
         let (sender, receiver) = channel();
+
+        if route.paths.len() != 1 {
+            return Err(LightningError::SendPaymentError(
+                "Route must contain exactly one path for this operation.".to_string(),
+            ));
+        }
 
         // Check for payment hash collision, failing the payment if we happen to repeat one.
         match self.in_flight.lock().await.entry(payment_hash) {
@@ -699,6 +707,12 @@ impl<T: SimNetwork, C: Clock> LightningNode for SimNode<T, C> {
                 return Ok(payment_hash);
             },
         };
+
+        if route.paths.len() != 1 {
+            return Err(LightningError::SendPaymentError(
+                "Route must contain exactly one path for this operation.".to_string(),
+            ));
+        }
 
         entry.insert(InFlightPayment {
             track_payment_receiver: receiver,
@@ -1174,7 +1188,12 @@ impl SimNetwork for SimGraph {
         payment_hash: PaymentHash,
         sender: Sender<Result<PaymentResult, LightningError>>,
     ) {
-        // Expect at least one path (right now), with the intention to support multiple in future.
+        // Expect only one path (right now), with the intention to support multiple in future.
+        if route.paths.len() != 1 {
+            log::error!("Route must contain exactly one path for this operation.");
+            return;
+        }
+
         let path = match route.paths.first() {
             Some(p) => p,
             None => {
