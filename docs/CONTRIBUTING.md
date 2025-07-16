@@ -39,6 +39,11 @@ This project strictly adheres to an [atomic commit structure](https://en.wikiped
 When your PR is in review, changes should be made using [fixup commits](https://andrewlock.net/smoother-rebases-with-auto-squashing-git-commits/) to maintain the structure of your commits.
 When your PR is complete, reviewers will give the instruction to `squash` the fixup commits before merge.
 
+Some tips for using fixup commits:
+- Ordering: put fixup commits directly after the commit they're fixing up. This allows reviewers to use "shift + select" on github to review the full commit, and can easily squash them themselves.
+- Use your discretion: if your PR has not had much review yet, or is a single commit then fixups add less value. 
+- Communication: one set procedure isn't going to fit every PR - if you feel that squashing your fixups would be helpful, ask your reviewer! If you don't think they're worth using at all, motivate why!
+
 For historical reasons, commit titles in the project are formatted as `<scope>/<type>: commit message`. A list of different commit types is available [here](https://graphite.dev/guides/git-commit-message-best-practices#2-types-of-commits).
 
 For example, a commit that refactors the `sim-cli` package will be titled: `sim-cli/refactor: {message about refactor}`.
