@@ -262,7 +262,7 @@ pub async fn create_simulation_with_network(
     (
         Simulation<SimulationClock>,
         Vec<ActivityDefinition>,
-        HashMap<PublicKey, Arc<Mutex<SimNode<SimGraph>>>>,
+        HashMap<PublicKey, Arc<Mutex<SimNode<SimGraph, SimulationClock>>>>,
     ),
     anyhow::Error,
 > {
@@ -313,7 +313,7 @@ pub async fn create_simulation_with_network(
     // custom actions on the simulated network. For the nodes we'll pass our simulation, cast them
     // to a dyn trait and exclude any nodes that shouldn't be included in random activity
     // generation.
-    let nodes = ln_node_from_graph(simulation_graph.clone(), routing_graph).await;
+    let nodes = ln_node_from_graph(simulation_graph.clone(), routing_graph, clock.clone()).await?;
     let mut nodes_dyn: HashMap<_, Arc<Mutex<dyn LightningNode>>> = nodes
         .iter()
         .map(|(pk, node)| (*pk, Arc::clone(node) as Arc<Mutex<dyn LightningNode>>))
