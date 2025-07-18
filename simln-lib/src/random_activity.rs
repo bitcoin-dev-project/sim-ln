@@ -27,6 +27,7 @@ pub enum RandomActivityError {
 /// that allows it to deterministically pick nodes. Tracking nodes in the network is memory-expensive, so we
 /// use a single tracker for the whole network (in an unbounded environment, we'd make one _per_ node generating
 /// random activity, which has a view of the full network except for itself).
+/// In order to preserve deterministic events using the same seed, it is necessary to sort the nodes by its pubkey keys.
 pub struct NetworkGraphView {
     node_picker: WeightedIndex<u64>,
     nodes: Vec<(NodeInfo, u64)>,
@@ -50,16 +51,25 @@ impl NetworkGraphView {
             ));
         }
 
+        // In order to choose a deterministic destination is necessary to sort the nodes by its public key.
+        let mut sorted_actives_nodes: Vec<(NodeInfo, u64)> = nodes;
+        sorted_actives_nodes.sort_by(|n1, n2| n1.0.pubkey.cmp(&n2.0.pubkey));
+
         // To create a weighted index we're going to need a vector of nodes that we index and weights that are set
         // by their deployed capacity. To efficiently store our view of nodes capacity, we're also going to store
         // capacity along with the node info because we query the two at the same time. Zero capacity nodes are
         // filtered out because they have no chance of being selected (and wont' be able to receive payments).
-        let node_picker = WeightedIndex::new(nodes.iter().map(|(_, v)| *v).collect::<Vec<u64>>())
-            .map_err(|e| RandomActivityError::ValueError(e.to_string()))?;
+        let node_picker = WeightedIndex::new(
+            sorted_actives_nodes
+                .iter()
+                .map(|(_, v)| *v)
+                .collect::<Vec<u64>>(),
+        )
+        .map_err(|e| RandomActivityError::ValueError(e.to_string()))?;
 
         Ok(NetworkGraphView {
             node_picker,
-            nodes,
+            nodes: sorted_actives_nodes,
             rng,
         })
     }

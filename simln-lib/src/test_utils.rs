@@ -6,7 +6,8 @@ use lightning::ln::features::Features;
 use mockall::mock;
 use rand::distributions::Uniform;
 use rand::Rng;
-use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
+use std::collections::HashMap;
+use std::{fmt, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 use tokio_util::task::TaskTracker;
 
