@@ -1068,8 +1068,7 @@ impl<C: Clock + 'static> Simulation<C> {
         }
 
         // ppe: produce payment events
-        let ppe_shutdown = self.shutdown_trigger.clone();
-
+        let shutdown = self.shutdown_trigger.clone();
         let listener = self.shutdown_listener.clone();
         let clock = self.clock.clone();
         let task_clone = tasks.clone();
@@ -1078,7 +1077,7 @@ impl<C: Clock + 'static> Simulation<C> {
         tasks.spawn(async move {
             let trackers = ProducePaymentEventsTrackers {
                 listener,
-                shutdown: ppe_shutdown.clone(),
+                shutdown: shutdown.clone(),
                 tasks: task_clone,
             };
             if let Err(e) = produce_payment_events(
@@ -1091,12 +1090,11 @@ impl<C: Clock + 'static> Simulation<C> {
             )
             .await
             {
-                ppe_shutdown.trigger();
                 log::error!("Produce payment events exited with error: {e:?}.");
             } else {
-                ppe_shutdown.trigger();
                 log::debug!("Produce payment events completed successfully.");
             }
+            shutdown.trigger();
         });
         Ok(())
     }
