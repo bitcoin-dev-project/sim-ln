@@ -2138,15 +2138,9 @@ mod tests {
 
         let (shutdown_trigger, shutdown_listener) = triggered::trigger();
 
-        // Create simulation without a timeout
+        // Create simulation without a timeout.
         let simulation = Simulation::new(
-            SimulationCfg::new(
-                None, // without timeout
-                100,  // Expected payment size
-                2.0,  // Activity multiplier
-                None, // No result writing
-                None, // Seed for determinism
-            ),
+            SimulationCfg::new(None, 100, 2.0, None, None),
             clients,
             TaskTracker::new(),
             Arc::new(SystemClock {}),
@@ -2212,15 +2206,9 @@ mod tests {
 
         let (shutdown_trigger, shutdown_listener) = triggered::trigger();
 
-        // Create simulation with a defined seed
+        // Create simulation with a defined seed.
         let simulation = Simulation::new(
-            SimulationCfg::new(
-                Some(25), // 25 second timeout (shouldn't matter)
-                100,      // Expected payment size
-                2.0,      // Activity multiplier
-                None,     // No result writing
-                Some(42), // Seed for determinism
-            ),
+            SimulationCfg::new(Some(25), 100, 2.0, None, Some(42)),
             clients.clone(),
             TaskTracker::new(),
             Arc::new(SystemClock {}),
@@ -2252,15 +2240,9 @@ mod tests {
 
         let (shutdown_trigger, shutdown_listener) = triggered::trigger();
 
-        // Create the same simulation as before but with different seed
+        // Create the same simulation as before but with different seed.
         let simulation2 = Simulation::new(
-            SimulationCfg::new(
-                Some(25),  // 25 second timeout
-                100,       // Expected payment size
-                2.0,       // Activity multiplier
-                None,      // No result writing
-                Some(500), // different seed
-            ),
+            SimulationCfg::new(Some(25), 100, 2.0, None, Some(500)),
             clients,
             TaskTracker::new(),
             Arc::new(SystemClock {}),
