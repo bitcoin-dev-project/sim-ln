@@ -1312,12 +1312,11 @@ async fn send_payment(
                 },
             };
 
-            let send_result = sender.send(outcome.clone()).await;
-            if send_result.is_err() {
-                return Err(SimulationError::MpscChannelError(format!(
-                    "Error sending simulation output {outcome:?}."
-                )));
-            }
+            sender.send(outcome.clone()).await.map_err(|e| {
+                SimulationError::MpscChannelError(format!(
+                    "Error sending simulation output {outcome:?}: {e}."
+                ))
+            })?;
         },
     };
     Ok(())
