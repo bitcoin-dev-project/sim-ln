@@ -139,6 +139,9 @@ pub struct LightningTestNodeBuilder {
     keysend_indices: Vec<usize>,
     // The networks that that each node supports, length must equal node_count.
     networks: Option<Vec<Network>>,
+    // An optional set of fixed pubkey values for the network, used when tests required
+    // deterministic values.
+    fixed_pubkeys: Vec<PublicKey>,
 }
 
 impl LightningTestNodeBuilder {
@@ -152,12 +155,24 @@ impl LightningTestNodeBuilder {
             // Turn keysend on by default.
             keysend_indices: (0..node_count).collect(),
             networks: Some(vec![Network::Regtest; node_count]),
+            fixed_pubkeys: vec![],
         }
     }
 
     /// Specifies which nodes should have the keysend feature enabled.
     pub fn with_keysend_nodes(mut self, indices: Vec<usize>) -> Self {
         self.keysend_indices = indices;
+        self
+    }
+
+    /// Specifies the public keys for each node in the test network.
+    pub fn with_fixed_pubkeys(mut self, pubkeys: Vec<PublicKey>) -> Self {
+        assert_eq!(
+            pubkeys.len(),
+            self.node_count,
+            "Must specify a fixed pubkey for each node",
+        );
+        self.fixed_pubkeys = pubkeys;
         self
     }
 
@@ -184,6 +199,10 @@ impl LightningTestNodeBuilder {
         for (idx, (mut node_info, _)) in node_info_list.into_iter().enumerate() {
             if self.keysend_indices.contains(&idx) {
                 node_info.features.set_keysend_optional();
+            }
+
+            if !self.fixed_pubkeys.is_empty() {
+                node_info.pubkey = self.fixed_pubkeys[idx]
             }
 
             let mut mock_node = MockLightningNode::new();
