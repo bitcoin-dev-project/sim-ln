@@ -1066,7 +1066,7 @@ impl<C: Clock + 'static> Simulation<C> {
                 payments_completed: 0,
             };
             payments_tracker.insert(source, payment_tracker);
-            generate_payment(&mut heap, source, 0, &mut payments_tracker, now).await?;
+            generate_payment(&mut heap, source, &mut payments_tracker, now).await?;
         }
 
         // ppe: produce payment events
@@ -1165,14 +1165,13 @@ async fn produce_payment_events<C: Clock>(
                             log::debug!(
                                 "Skipping zero amount payment for {source} -> {}.", destination
                             );
-                            generate_payment(&mut heap, source, payment_tracker.payments_completed, &mut payments_tracker, clock.now()).await?;
+                            generate_payment(&mut heap, source, &mut payments_tracker, clock.now()).await?;
                             continue;
                         }
 
-                        let next_payment_count = payment_tracker.payments_completed + 1;
                         payments_tracker
                             .entry(source)
-                            .and_modify(|p| p.payments_completed = next_payment_count);
+                            .and_modify(|p| p.payments_completed = p.payments_completed + 1);
 
                         select! {
                             biased;
@@ -1182,7 +1181,7 @@ async fn produce_payment_events<C: Clock>(
                             // Wait until our time to next payment has elapsed then execute a random amount payment to a random
                             // destination.
                             _ = pe_clock.sleep(wait_time) => {
-                                generate_payment(&mut heap, source, next_payment_count, &mut payments_tracker, clock.now()).await?;
+                                generate_payment(&mut heap, source, &mut payments_tracker, clock.now()).await?;
 
                                 tasks.spawn(async move {
                                     log::debug!("Generated payment: {source} -> {}: {amount} msat.", destination);
@@ -1214,7 +1213,6 @@ async fn produce_payment_events<C: Clock>(
 async fn generate_payment(
     heap: &mut BinaryHeap<Reverse<PaymentEvent>>,
     pubkey: PublicKey,
-    current_count: u64,
     payments_tracker: &mut HashMap<PublicKey, ExecutorPaymentTracker>,
     base_time: SystemTime,
 ) -> Result<(), SimulationError> {
@@ -1225,7 +1223,7 @@ async fn generate_payment(
                 PaymentGenerationError(format!("executor {} not found", pubkey)),
             ))?;
     let wait_time = get_payment_delay(
-        current_count,
+        payment_tracker.payments_completed,
         &payment_tracker.executor.source_info,
         payment_tracker.executor.payment_generator.as_ref(),
     )?;
