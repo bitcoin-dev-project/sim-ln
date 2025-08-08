@@ -118,10 +118,14 @@ type TestNodesResult = (
 ///     .with_networks(vec![Network::Bitcoin, Network::Testnet, Network::Regtest])
 ///     .build_clients_only();
 pub struct LightningTestNodeBuilder {
-    node_count: usize,              // Required - must be provided at creation.
-    initial_balance: u64,           // Always has a value (default: 100,000).
-    keysend_indices: Vec<usize>,    // Always a vector (default: Vec filled with 0..node_count).
-    networks: Option<Vec<Network>>, // Can be None (default) or Some(networks).
+    // The number of nodes in the network.
+    node_count: usize,
+    // The balance to fund channels with, default: 100_000.
+    initial_balance: u64,
+    // The indexes of nodes that support keysend in the network.
+    keysend_indices: Vec<usize>,
+    // The networks that that each node supports, length must equal node_count.
+    networks: Option<Vec<Network>>,
 }
 
 impl LightningTestNodeBuilder {
@@ -131,9 +135,10 @@ impl LightningTestNodeBuilder {
     pub fn new(node_count: usize) -> Self {
         Self {
             node_count,
-            initial_balance: 100_000,                   // Default 100k sats.
-            keysend_indices: (0..node_count).collect(), // Keysend for all nodes ON by default.
-            networks: Some(vec![Network::Regtest; node_count]), // Regtest network for all nodes by default.
+            initial_balance: 100_000,
+            // Turn keysend on by default.
+            keysend_indices: (0..node_count).collect(),
+            networks: Some(vec![Network::Regtest; node_count]),
         }
     }
 
@@ -143,9 +148,8 @@ impl LightningTestNodeBuilder {
         self
     }
 
-    /// Sets specific networks for each node.
-    /// Checks whether the number of networks matches node_count.
-    /// Returns self for method chaining.
+    /// Sets specific networks for each node, asserting that the correct number of networks for
+    /// was provided.
     pub fn with_networks(mut self, networks: Vec<Network>) -> Self {
         // Validate that we have the correct number of networks
         assert_eq!(
@@ -157,17 +161,15 @@ impl LightningTestNodeBuilder {
         self
     }
 
-    /// Builds only the client map, omitting node info.
-    /// Useful for network-specific testing. Returns a map of public keys to mocked
-    /// Lightning node clients.
+    /// Builds only the client map, omitting node info. Useful for network-specific testing.
+    /// Returns a map of public keys to mocked Lightning node clients.
     pub fn build_clients_only(self) -> HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> {
         let (_, clients) = self.build_full();
         clients
     }
 
-    /// Builds the full test setup, including node info and clients.
-    /// Returns a tuple of node information and a map of public keys to mocked
-    /// Lightning node clients.
+    /// Builds the full test setup, including node info and clients. Returns a tuple of node
+    /// information and a map of public keys to mocked Lightning node clients.
     pub fn build_full(self) -> TestNodesResult {
         let nodes = create_nodes(self.node_count, self.initial_balance);
         let mut node_infos = Vec::new();
