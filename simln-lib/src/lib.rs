@@ -1141,17 +1141,18 @@ async fn produce_payment_events<C: Clock>(
                                 Duration::from_secs(0)
                             }
                         };
-                        let payment_tracker = payments_tracker.get(&source).ok_or(SimulationError::PaymentGenerationError(
+                        let payment_tracker = payments_tracker.get_mut(&source).ok_or(SimulationError::PaymentGenerationError(
                                 PaymentGenerationError(format!("executor {} not found", source)),
                         ))?;
 
                         if let Some(c) = payment_tracker.executor.payment_generator.payment_count() {
                             if c == payment_tracker.payments_completed {
-                                log::info!( "Payment count has been met for {}: {c} payments. Stopping the activity.", payment_tracker.executor.source_info);
+                                log::info!( "Payment count has been met for {}: {c} payments. Stopping the activity.", source);
                                 continue
                             }
                         }
-                        let node = nodes.get(&payment_tracker.executor.source_info.pubkey).ok_or(SimulationError::MissingNodeError(format!("Source node not found, {}", payment_tracker.executor.source_info.pubkey)))?.clone();
+                        let node = nodes.get(&source).ok_or(
+                            SimulationError::MissingNodeError(format!("Source node not found, {}", source)))?.clone();
 
                         // pe: produce events
                         let pe_shutdown = shutdown.clone();
@@ -1169,9 +1170,7 @@ async fn produce_payment_events<C: Clock>(
                             continue;
                         }
 
-                        payments_tracker
-                            .entry(source)
-                            .and_modify(|p| p.payments_completed = p.payments_completed + 1);
+                        payment_tracker.payments_completed +=1;
 
                         select! {
                             biased;
@@ -1192,7 +1191,6 @@ async fn produce_payment_events<C: Clock>(
                                         pe_shutdown.trigger();
                                         log::debug!("Not able to send event payment for {amount}: {source} -> {}. Exited with error {e}.", destination);
                                     } else {
-
                                         log::debug!("Send event payment for {source} completed successfully.");
                                     }
                                 });
