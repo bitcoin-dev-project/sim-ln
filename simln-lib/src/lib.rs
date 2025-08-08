@@ -1022,6 +1022,8 @@ impl<C: Clock + 'static> Simulation<C> {
             .map_err(SimulationError::RandomActivityError)?,
         );
 
+        log::info!("Created network generator: {}.", network_generator);
+
         for (node_info, capacity) in active_nodes.values() {
             // Create a salted RNG for this node based on its pubkey.
             let seed_opt = self.cfg.seed.map(|seed| (seed, Some(&node_info.pubkey)));
