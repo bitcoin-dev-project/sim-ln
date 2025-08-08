@@ -1485,44 +1485,42 @@ async fn produce_simulation_results(
     tasks: &TaskTracker,
 ) -> Result<(), SimulationError> {
     let result = loop {
-        tokio::select! {
-            biased;
-            _ = listener.clone() => {
-                break Ok(())
-            },
-            output = output_receiver.recv() => {
-                match output {
-                    Some(simulation_output) => {
-                        match simulation_output{
-                            SimulationOutput::SendPaymentSuccess(payment) => {
-                                if let Some(source_node) = nodes.get(&payment.source) {
-                                    tasks.spawn(track_payment_result(
-                                        source_node.clone(), results.clone(), payment, listener.clone()
+        match output_receiver.recv().await {
+            Some(simulation_output) => {
+                match simulation_output {
+                    SimulationOutput::SendPaymentSuccess(payment) => {
+                        if let Some(source_node) = nodes.get(&payment.source) {
+                            tasks.spawn(track_payment_result(
+                                source_node.clone(),
+                                results.clone(),
+                                payment,
+                                listener.clone(),
+                            ));
+                        } else {
+                            break Err(SimulationError::MissingNodeError(format!(
+                                "Source node with public key: {} unavailable.",
+                                payment.source
+                            )));
+                        }
+                    },
+                    SimulationOutput::SendPaymentFailure(payment, result) => {
+                        select! {
+                            _ = listener.clone() => {
+                                return Ok(());
+                            },
+                            send_result = results.send((payment, result.clone())) => {
+                                if send_result.is_err(){
+                                    break Err(SimulationError::MpscChannelError(
+                                        format!("Failed to send payment result: {result} for payment {:?} dispatched at {:?}.",
+                                                payment.hash, payment.dispatch_time),
                                     ));
-                                } else {
-                                    break Err(SimulationError::MissingNodeError(format!("Source node with public key: {} unavailable.", payment.source)));
                                 }
                             },
-                            SimulationOutput::SendPaymentFailure(payment, result) => {
-                                select!{
-                                    _ = listener.clone() => {
-                                        return Ok(());
-                                    },
-                                    send_result = results.send((payment, result.clone())) => {
-                                        if send_result.is_err(){
-                                            break Err(SimulationError::MpscChannelError(
-                                                format!("Failed to send payment result: {result} for payment {:?} dispatched at {:?}.",
-                                                        payment.hash, payment.dispatch_time),
-                                            ));
-                                        }
-                                    },
-                                }
-                            }
-                        };
+                        }
                     },
-                    None => break Ok(())
-                }
-            }
+                };
+            },
+            None => break Ok(()),
         }
     };
 
