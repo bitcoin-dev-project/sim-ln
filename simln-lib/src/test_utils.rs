@@ -95,10 +95,23 @@ mock! {
 }
 
 /// Type alias for the result of setup_test_nodes.
-type TestNodesResult = (
-    Vec<NodeInfo>,
-    HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
-);
+pub struct TestNodesResult {
+    pub nodes: Vec<NodeInfo>,
+    pub clients: Vec<Arc<Mutex<MockLightningNode>>>,
+}
+
+impl TestNodesResult {
+    // Returns a hashmap of the mocked lightning clients, cast to dyn LightningNode.
+    pub fn get_client_hashmap(&self) -> HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> {
+        let mut client_map: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> =
+            HashMap::with_capacity(self.nodes.len());
+
+        for (idx, node) in self.nodes.iter().enumerate() {
+            client_map.insert(node.pubkey, self.clients[idx].clone());
+        }
+        client_map
+    }
+}
 
 /// A builder for creating mock Lightning nodes for testing purposes.
 ///
@@ -161,21 +174,14 @@ impl LightningTestNodeBuilder {
         self
     }
 
-    /// Builds only the client map, omitting node info. Useful for network-specific testing.
-    /// Returns a map of public keys to mocked Lightning node clients.
-    pub fn build_clients_only(self) -> HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> {
-        let (_, clients) = self.build_full();
-        clients
-    }
-
     /// Builds the full test setup, including node info and clients. Returns a tuple of node
     /// information and a map of public keys to mocked Lightning node clients.
     pub fn build_full(self) -> TestNodesResult {
-        let nodes = create_nodes(self.node_count, self.initial_balance);
-        let mut node_infos = Vec::new();
-        let mut clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
+        let node_info_list = create_nodes(self.node_count, self.initial_balance);
+        let mut nodes = Vec::with_capacity(node_info_list.len());
+        let mut clients = Vec::with_capacity(node_info_list.len());
 
-        for (idx, (mut node_info, _)) in nodes.into_iter().enumerate() {
+        for (idx, (mut node_info, _)) in node_info_list.into_iter().enumerate() {
             if self.keysend_indices.contains(&idx) {
                 node_info.features.set_keysend_optional();
             }
@@ -188,11 +194,11 @@ impl LightningTestNodeBuilder {
                 mock_node.expect_get_network().return_const(network);
             }
 
-            clients.insert(node_info.pubkey, Arc::new(Mutex::new(mock_node)));
-            node_infos.push(node_info);
+            clients.push(Arc::new(Mutex::new(mock_node)));
+            nodes.push(node_info);
         }
 
-        (node_infos, clients)
+        TestNodesResult { nodes, clients }
     }
 }
 
