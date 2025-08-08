@@ -627,7 +627,7 @@ struct ExecutorKit {
 
 struct PaymentEvent {
     source: PublicKey,
-    absolute_time: SystemTime,
+    execution_time: SystemTime,
     destination: NodeInfo,
     amount: u64,
 }
@@ -639,7 +639,7 @@ struct ExecutorPaymentTracker {
 
 impl Ord for PaymentEvent {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.absolute_time.cmp(&other.absolute_time)
+        self.execution_time.cmp(&other.execution_time)
     }
 }
 
@@ -651,7 +651,7 @@ impl PartialOrd for PaymentEvent {
 
 impl PartialEq for PaymentEvent {
     fn eq(&self, other: &Self) -> bool {
-        self.absolute_time == other.absolute_time
+        self.execution_time == other.execution_time
     }
 }
 
@@ -1123,12 +1123,12 @@ async fn produce_payment_events<C: Clock>(
                 match heap.pop() {
                     Some(Reverse(PaymentEvent {
                         source,
-                        absolute_time,
+                        execution_time,
                         destination,
                         amount
                     })) => {
                         let internal_now = clock.now();
-                        let wait_time = match absolute_time.duration_since(internal_now) {
+                        let wait_time = match execution_time.duration_since(internal_now) {
                             Ok(elapsed) => {
                                 // The output of duration_since is not perfectly round affecting the waiting time
                                 // and as consequence the results are not deterministic; for this reason
@@ -1250,7 +1250,7 @@ async fn generate_payment(
 
     let payment_event = PaymentEvent {
         source: pubkey,
-        absolute_time,
+        execution_time: absolute_time,
         destination,
         amount,
     };
