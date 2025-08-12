@@ -627,7 +627,7 @@ struct ExecutorKit {
 
 struct PaymentEvent {
     source: PublicKey,
-    absolute_time: SystemTime,
+    execution_time: SystemTime,
     destination: NodeInfo,
     amount: u64,
 }
@@ -639,7 +639,7 @@ struct ExecutorPaymentTracker {
 
 impl Ord for PaymentEvent {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.absolute_time.cmp(&other.absolute_time)
+        self.execution_time.cmp(&other.execution_time)
     }
 }
 
@@ -651,7 +651,7 @@ impl PartialOrd for PaymentEvent {
 
 impl PartialEq for PaymentEvent {
     fn eq(&self, other: &Self) -> bool {
-        self.absolute_time == other.absolute_time
+        self.execution_time == other.execution_time
     }
 }
 
@@ -820,7 +820,8 @@ impl<C: Clock + 'static> Simulation<C> {
             },
         };
 
-        // Next, it is necessary to generate all defined activities in a central place.
+        // Setup a task that will populate a single events queue with payments to dispatch, and
+        // report their outcome to our data collection.
         match self
             .setup_payment_events(activities, event_sender, &self.tasks)
             .await
@@ -1022,6 +1023,8 @@ impl<C: Clock + 'static> Simulation<C> {
             .map_err(SimulationError::RandomActivityError)?,
         );
 
+        log::info!("Created network generator: {}.", network_generator);
+
         for (node_info, capacity) in active_nodes.values() {
             // Create a salted RNG for this node based on its pubkey.
             let seed_opt = self.cfg.seed.map(|seed| (seed, Some(&node_info.pubkey)));
@@ -1044,7 +1047,8 @@ impl<C: Clock + 'static> Simulation<C> {
         Ok(generators)
     }
 
-    /// It is the central place responsible for create payment events.
+    /// Populates a queue of payment events with one event per executing node, then spawns a task
+    /// that will be responsible for reading, dispatching and replenishing them.
     async fn setup_payment_events(
         &self,
         mut executors: Vec<ExecutorKit>,
@@ -1064,12 +1068,10 @@ impl<C: Clock + 'static> Simulation<C> {
                 payments_completed: 0,
             };
             payments_tracker.insert(source, payment_tracker);
-            generate_payment(&mut heap, source, 0, &mut payments_tracker, now).await?;
+            generate_payment(&mut heap, source, &mut payments_tracker, now).await?;
         }
 
-        // ppe: produce payment events
-        let ppe_shutdown = self.shutdown_trigger.clone();
-
+        let shutdown = self.shutdown_trigger.clone();
         let listener = self.shutdown_listener.clone();
         let clock = self.clock.clone();
         let task_clone = tasks.clone();
@@ -1078,7 +1080,7 @@ impl<C: Clock + 'static> Simulation<C> {
         tasks.spawn(async move {
             let trackers = ProducePaymentEventsTrackers {
                 listener,
-                shutdown: ppe_shutdown.clone(),
+                shutdown: shutdown.clone(),
                 tasks: task_clone,
             };
             if let Err(e) = produce_payment_events(
@@ -1091,17 +1093,18 @@ impl<C: Clock + 'static> Simulation<C> {
             )
             .await
             {
-                ppe_shutdown.trigger();
                 log::error!("Produce payment events exited with error: {e:?}.");
             } else {
-                ppe_shutdown.trigger();
                 log::debug!("Produce payment events completed successfully.");
             }
+            shutdown.trigger();
         });
         Ok(())
     }
 }
 
+/// Reads and dispatches events from the heap provided, pushing more events to the queue where
+/// appropriate for the defined activity.
 async fn produce_payment_events<C: Clock>(
     mut heap: BinaryHeap<Reverse<PaymentEvent>>,
     mut payments_tracker: HashMap<PublicKey, ExecutorPaymentTracker>,
@@ -1125,12 +1128,12 @@ async fn produce_payment_events<C: Clock>(
                 match heap.pop() {
                     Some(Reverse(PaymentEvent {
                         source,
-                        absolute_time,
+                        execution_time,
                         destination,
                         amount
                     })) => {
                         let internal_now = clock.now();
-                        let wait_time = match absolute_time.duration_since(internal_now) {
+                        let wait_time = match execution_time.duration_since(internal_now) {
                             Ok(elapsed) => {
                                 // The output of duration_since is not perfectly round affecting the waiting time
                                 // and as consequence the results are not deterministic; for this reason
@@ -1141,17 +1144,18 @@ async fn produce_payment_events<C: Clock>(
                                 Duration::from_secs(0)
                             }
                         };
-                        let payment_tracker = payments_tracker.get(&source).ok_or(SimulationError::PaymentGenerationError(
+                        let payment_tracker = payments_tracker.get_mut(&source).ok_or(SimulationError::PaymentGenerationError(
                                 PaymentGenerationError(format!("executor {} not found", source)),
                         ))?;
 
                         if let Some(c) = payment_tracker.executor.payment_generator.payment_count() {
                             if c == payment_tracker.payments_completed {
-                                log::info!( "Payment count has been met for {}: {c} payments. Stopping the activity.", payment_tracker.executor.source_info);
+                                log::info!( "Payment count has been met for {}: {c} payments. Stopping the activity.", source);
                                 continue
                             }
                         }
-                        let node = nodes.get(&payment_tracker.executor.source_info.pubkey).ok_or(SimulationError::MissingNodeError(format!("Source node not found, {}", payment_tracker.executor.source_info.pubkey)))?.clone();
+                        let node = nodes.get(&source).ok_or(
+                            SimulationError::MissingNodeError(format!("Source node not found, {}", source)))?.clone();
 
                         // pe: produce events
                         let pe_shutdown = shutdown.clone();
@@ -1165,14 +1169,11 @@ async fn produce_payment_events<C: Clock>(
                             log::debug!(
                                 "Skipping zero amount payment for {source} -> {}.", destination
                             );
-                            generate_payment(&mut heap, source, payment_tracker.payments_completed, &mut payments_tracker, clock.now()).await?;
+                            generate_payment(&mut heap, source, &mut payments_tracker, clock.now()).await?;
                             continue;
                         }
 
-                        let next_payment_count = payment_tracker.payments_completed + 1;
-                        payments_tracker
-                            .entry(source)
-                            .and_modify(|p| p.payments_completed = next_payment_count);
+                        payment_tracker.payments_completed +=1;
 
                         select! {
                             biased;
@@ -1182,7 +1183,7 @@ async fn produce_payment_events<C: Clock>(
                             // Wait until our time to next payment has elapsed then execute a random amount payment to a random
                             // destination.
                             _ = pe_clock.sleep(wait_time) => {
-                                generate_payment(&mut heap, source, next_payment_count, &mut payments_tracker, clock.now()).await?;
+                                generate_payment(&mut heap, source, &mut payments_tracker, clock.now()).await?;
 
                                 tasks.spawn(async move {
                                     log::debug!("Generated payment: {source} -> {}: {amount} msat.", destination);
@@ -1193,7 +1194,6 @@ async fn produce_payment_events<C: Clock>(
                                         pe_shutdown.trigger();
                                         log::debug!("Not able to send event payment for {amount}: {source} -> {}. Exited with error {e}.", destination);
                                     } else {
-
                                         log::debug!("Send event payment for {source} completed successfully.");
                                     }
                                 });
@@ -1214,7 +1214,6 @@ async fn produce_payment_events<C: Clock>(
 async fn generate_payment(
     heap: &mut BinaryHeap<Reverse<PaymentEvent>>,
     pubkey: PublicKey,
-    current_count: u64,
     payments_tracker: &mut HashMap<PublicKey, ExecutorPaymentTracker>,
     base_time: SystemTime,
 ) -> Result<(), SimulationError> {
@@ -1225,7 +1224,7 @@ async fn generate_payment(
                 PaymentGenerationError(format!("executor {} not found", pubkey)),
             ))?;
     let wait_time = get_payment_delay(
-        current_count,
+        payment_tracker.payments_completed,
         &payment_tracker.executor.source_info,
         payment_tracker.executor.payment_generator.as_ref(),
     )?;
@@ -1252,7 +1251,7 @@ async fn generate_payment(
 
     let payment_event = PaymentEvent {
         source: pubkey,
-        absolute_time,
+        execution_time: absolute_time,
         destination,
         amount,
     };
@@ -1312,12 +1311,11 @@ async fn send_payment(
                 },
             };
 
-            let send_result = sender.send(outcome.clone()).await;
-            if send_result.is_err() {
-                return Err(SimulationError::MpscChannelError(format!(
-                    "Error sending simulation output {outcome:?}."
-                )));
-            }
+            sender.send(outcome.clone()).await.map_err(|e| {
+                SimulationError::MpscChannelError(format!(
+                    "Error sending simulation output {outcome:?}: {e}."
+                ))
+            })?;
         },
     };
     Ok(())
@@ -1486,44 +1484,42 @@ async fn produce_simulation_results(
     tasks: &TaskTracker,
 ) -> Result<(), SimulationError> {
     let result = loop {
-        tokio::select! {
-            biased;
-            _ = listener.clone() => {
-                break Ok(())
-            },
-            output = output_receiver.recv() => {
-                match output {
-                    Some(simulation_output) => {
-                        match simulation_output{
-                            SimulationOutput::SendPaymentSuccess(payment) => {
-                                if let Some(source_node) = nodes.get(&payment.source) {
-                                    tasks.spawn(track_payment_result(
-                                        source_node.clone(), results.clone(), payment, listener.clone()
+        match output_receiver.recv().await {
+            Some(simulation_output) => {
+                match simulation_output {
+                    SimulationOutput::SendPaymentSuccess(payment) => {
+                        if let Some(source_node) = nodes.get(&payment.source) {
+                            tasks.spawn(track_payment_result(
+                                source_node.clone(),
+                                results.clone(),
+                                payment,
+                                listener.clone(),
+                            ));
+                        } else {
+                            break Err(SimulationError::MissingNodeError(format!(
+                                "Source node with public key: {} unavailable.",
+                                payment.source
+                            )));
+                        }
+                    },
+                    SimulationOutput::SendPaymentFailure(payment, result) => {
+                        select! {
+                            _ = listener.clone() => {
+                                return Ok(());
+                            },
+                            send_result = results.send((payment, result.clone())) => {
+                                if send_result.is_err(){
+                                    break Err(SimulationError::MpscChannelError(
+                                        format!("Failed to send payment result: {result} for payment {:?} dispatched at {:?}.",
+                                                payment.hash, payment.dispatch_time),
                                     ));
-                                } else {
-                                    break Err(SimulationError::MissingNodeError(format!("Source node with public key: {} unavailable.", payment.source)));
                                 }
                             },
-                            SimulationOutput::SendPaymentFailure(payment, result) => {
-                                select!{
-                                    _ = listener.clone() => {
-                                        return Ok(());
-                                    },
-                                    send_result = results.send((payment, result.clone())) => {
-                                        if send_result.is_err(){
-                                            break Err(SimulationError::MpscChannelError(
-                                                format!("Failed to send payment result: {result} for payment {:?} dispatched at {:?}.",
-                                                        payment.hash, payment.dispatch_time),
-                                            ));
-                                        }
-                                    },
-                                }
-                            }
-                        };
+                        }
                     },
-                    None => break Ok(())
-                }
-            }
+                };
+            },
+            None => break Ok(()),
         }
     };
 
@@ -1592,12 +1588,12 @@ async fn track_payment_result(
 #[cfg(test)]
 mod tests {
     use crate::clock::SystemClock;
-    use crate::test_utils::MockLightningNode;
+    use crate::test_utils::{MockLightningNode, TestNodesResult};
     use crate::{
         get_payment_delay, test_utils, test_utils::LightningTestNodeBuilder, LightningError,
         LightningNode, MutRng, PaymentGenerationError, PaymentGenerator,
     };
-    use crate::{Simulation, SimulationCfg};
+    use crate::{NodeInfo, Simulation, SimulationCfg};
     use bitcoin::secp256k1::PublicKey;
     use bitcoin::Network;
     use mockall::mock;
@@ -1742,8 +1738,8 @@ mod tests {
     /// support are present, expecting an `Ok` result.
     #[tokio::test]
     async fn test_validate_activity_empty_with_sufficient_nodes() {
-        let (_, clients) = LightningTestNodeBuilder::new(3).build_full();
-        let simulation = test_utils::create_simulation(clients);
+        let network = LightningTestNodeBuilder::new(3).build_full();
+        let simulation = test_utils::create_simulation(network.get_client_hashmap());
         let result = simulation.validate_activity(&[]).await;
         assert!(result.is_ok());
     }
@@ -1752,8 +1748,8 @@ mod tests {
     /// expecting a `ValidationError` with "At least two nodes required".
     #[tokio::test]
     async fn test_validate_activity_empty_with_insufficient_nodes() {
-        let (_, clients) = LightningTestNodeBuilder::new(1).build_full();
-        let simulation = test_utils::create_simulation(clients);
+        let network = LightningTestNodeBuilder::new(1).build_full();
+        let simulation = test_utils::create_simulation(network.get_client_hashmap());
         let result = simulation.validate_activity(&[]).await;
 
         assert!(result.is_err());
@@ -1766,10 +1762,10 @@ mod tests {
     /// expecting a `ValidationError` with "must support keysend".
     #[tokio::test]
     async fn test_validate_activity_empty_with_non_keysend_node() {
-        let (_, clients) = LightningTestNodeBuilder::new(2)
+        let network = LightningTestNodeBuilder::new(2)
             .with_keysend_nodes(vec![0])
             .build_full();
-        let simulation = test_utils::create_simulation(clients);
+        let simulation = test_utils::create_simulation(network.get_client_hashmap());
         let result = simulation.validate_activity(&[]).await;
 
         assert!(result.is_err());
@@ -1782,13 +1778,13 @@ mod tests {
     /// expecting a `ValidationError` with "Source node not found".
     #[tokio::test]
     async fn test_validate_activity_with_missing_source_node() {
-        let (nodes, clients) = LightningTestNodeBuilder::new(1).build_full();
+        let network = LightningTestNodeBuilder::new(1).build_full();
         let missing_nodes = test_utils::create_nodes(1, 100_000);
         let missing_node = missing_nodes.first().unwrap().0.clone();
-        let dest_node = nodes[0].clone();
+        let dest_node = network.nodes[0].clone();
 
         let activity = test_utils::create_activity(missing_node, dest_node, 1000);
-        let simulation = test_utils::create_simulation(clients);
+        let simulation = test_utils::create_simulation(network.get_client_hashmap());
         let result = simulation.validate_activity(&vec![activity]).await;
 
         assert!(result.is_err());
@@ -1801,12 +1797,12 @@ mod tests {
     /// expecting a `ValidationError` with "does not support keysend".
     #[tokio::test]
     async fn test_validate_activity_with_non_keysend_destination() {
-        let (nodes, clients) = LightningTestNodeBuilder::new(1).build_full();
+        let network = LightningTestNodeBuilder::new(1).build_full();
         let dest_nodes = test_utils::create_nodes(1, 100_000);
         let dest_node = dest_nodes.first().unwrap().0.clone();
 
-        let activity = test_utils::create_activity(nodes[0].clone(), dest_node, 1000);
-        let simulation = test_utils::create_simulation(clients);
+        let activity = test_utils::create_activity(network.nodes[0].clone(), dest_node, 1000);
+        let simulation = test_utils::create_simulation(network.get_client_hashmap());
         let result = simulation.validate_activity(&vec![activity]).await;
 
         assert!(result.is_err());
@@ -1819,13 +1815,13 @@ mod tests {
     /// passes validation, expecting an `Ok` result.
     #[tokio::test]
     async fn test_validate_activity_valid_payment_flow() {
-        let (nodes, clients) = LightningTestNodeBuilder::new(1).build_full();
+        let network = LightningTestNodeBuilder::new(1).build_full();
         let dest_nodes = test_utils::create_nodes(1, 100_000);
         let mut dest_node = dest_nodes.first().unwrap().0.clone();
         dest_node.features.set_keysend_optional();
 
-        let activity = test_utils::create_activity(nodes[0].clone(), dest_node, 1000);
-        let simulation = test_utils::create_simulation(clients);
+        let activity = test_utils::create_activity(network.nodes[0].clone(), dest_node, 1000);
+        let simulation = test_utils::create_simulation(network.get_client_hashmap());
         let result = simulation.validate_activity(&vec![activity]).await;
 
         assert!(result.is_ok());
@@ -1835,10 +1831,11 @@ mod tests {
     /// expecting a `ValidationError` with "zero values".
     #[tokio::test]
     async fn test_validate_zero_amount_no_valid() {
-        let (nodes, clients) = LightningTestNodeBuilder::new(2).build_full();
+        let network = LightningTestNodeBuilder::new(2).build_full();
 
-        let activity = test_utils::create_activity(nodes[0].clone(), nodes[1].clone(), 0);
-        let simulation = test_utils::create_simulation(clients);
+        let activity =
+            test_utils::create_activity(network.nodes[0].clone(), network.nodes[1].clone(), 0);
+        let simulation = test_utils::create_simulation(network.get_client_hashmap());
         let result = simulation.validate_activity(&vec![activity]).await;
 
         assert!(result.is_err());
@@ -1866,11 +1863,11 @@ mod tests {
     /// with "mainnet is not supported".
     #[tokio::test]
     async fn test_validate_node_network_mainnet_not_supported() {
-        let clients = LightningTestNodeBuilder::new(1)
+        let network = LightningTestNodeBuilder::new(1)
             .with_networks(vec![Network::Bitcoin])
-            .build_clients_only();
+            .build_full();
 
-        let simulation = test_utils::create_simulation(clients);
+        let simulation = test_utils::create_simulation(network.get_client_hashmap());
         let result = simulation.validate_node_network().await;
 
         assert!(result.is_err());
@@ -1883,11 +1880,11 @@ mod tests {
     /// `ValidationError` with "nodes are not on the same network".
     #[tokio::test]
     async fn test_validate_node_network_mixed_networks() {
-        let clients = LightningTestNodeBuilder::new(2)
+        let network = LightningTestNodeBuilder::new(2)
             .with_networks(vec![Network::Testnet, Network::Regtest])
-            .build_clients_only();
+            .build_full();
 
-        let simulation = test_utils::create_simulation(clients);
+        let simulation = test_utils::create_simulation(network.get_client_hashmap());
         let result = simulation.validate_node_network().await;
 
         assert!(result.is_err());
@@ -1899,11 +1896,11 @@ mod tests {
     /// Verifies that three Testnet nodes pass validation, expecting an `Ok` result.
     #[tokio::test]
     async fn test_validate_node_network_multiple_nodes_same_network() {
-        let clients = LightningTestNodeBuilder::new(3)
+        let network = LightningTestNodeBuilder::new(3)
             .with_networks(vec![Network::Testnet, Network::Testnet, Network::Testnet])
-            .build_clients_only();
+            .build_full();
 
-        let simulation = test_utils::create_simulation(clients);
+        let simulation = test_utils::create_simulation(network.get_client_hashmap());
         let result = simulation.validate_node_network().await;
 
         assert!(result.is_ok());
@@ -1911,222 +1908,105 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_node_network_single_node_valid_network() {
-        let clients = LightningTestNodeBuilder::new(1)
+        let network = LightningTestNodeBuilder::new(1)
             .with_networks(vec![Network::Testnet])
-            .build_clients_only();
+            .build_full();
 
-        let simulation = test_utils::create_simulation(clients);
+        let simulation = test_utils::create_simulation(network.get_client_hashmap());
         let result = simulation.validate_node_network().await;
 
         assert!(result.is_ok());
     }
 
+    async fn mock_send_payment(
+        mock_node: &mut Arc<Mutex<MockLightningNode>>,
+        node_info: NodeInfo,
+        payments_list: Arc<StdMutex<Vec<PublicKey>>>,
+        payment_hash: [u8; 32],
+    ) {
+        let mut mock_node = mock_node.lock().await;
+        mock_node.expect_get_info().return_const(node_info.clone());
+        mock_node
+            .expect_get_network()
+            .returning(|| Network::Regtest);
+        mock_node
+            .expect_list_channels()
+            .returning(|| Ok(vec![100_000_000]));
+        mock_node
+            .expect_get_node_info()
+            .returning(move |_| Ok(node_info.clone()));
+        mock_node.expect_track_payment().returning(|_, _| {
+            Ok(crate::PaymentResult {
+                htlc_count: 1,
+                payment_outcome: crate::PaymentOutcome::Success,
+            })
+        });
+
+        let pl = payments_list.clone();
+        mock_node.expect_send_payment().returning(move |a, _| {
+            pl.lock().unwrap().push(a);
+            Ok(lightning::ln::PaymentHash(payment_hash))
+        });
+    }
+
     #[allow(clippy::type_complexity)]
     /// Helper to create and configure mock nodes for testing
-    fn setup_test_nodes_for_testing_deterministic_events(
+    async fn setup_test_nodes_for_testing_deterministic_events(
         fixed_pubkeys: Option<Vec<PublicKey>>,
-    ) -> (
-        (
-            crate::NodeInfo,
-            crate::NodeInfo,
-            crate::NodeInfo,
-            crate::NodeInfo,
-        ),
-        HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
-        Arc<StdMutex<Vec<PublicKey>>>,
-    ) {
-        let (nodes, mut clients) = LightningTestNodeBuilder::new(4)
-            .with_networks(vec![
-                Network::Regtest,
-                Network::Regtest,
-                Network::Regtest,
-                Network::Regtest,
-            ])
-            .build_full();
-
-        let node_1 = &nodes[0];
-        let mut mock_node_1 = MockLightningNode::new();
+    ) -> (TestNodesResult, Arc<StdMutex<Vec<PublicKey>>>) {
+        let mut builder = LightningTestNodeBuilder::new(4);
+        if let Some(fixed_pubkeys) = fixed_pubkeys {
+            builder = builder.with_fixed_pubkeys(fixed_pubkeys)
+        }
+        let mut network = builder.build_full();
 
         let payments_list = Arc::new(StdMutex::new(Vec::new()));
 
-        if fixed_pubkeys.is_some() {
-            clients = HashMap::new();
-        }
-
-        // Set up node 1 expectations
-        let mut node_1_clone = node_1.clone();
-        if let Some(ref pubkeys) = fixed_pubkeys {
-            node_1_clone.pubkey = pubkeys[0]
-        }
-        mock_node_1
-            .expect_get_info()
-            .return_const(node_1_clone.clone());
-        mock_node_1
-            .expect_get_network()
-            .returning(|| Network::Regtest);
-        mock_node_1
-            .expect_list_channels()
-            .returning(|| Ok(vec![100_000_000]));
-        mock_node_1
-            .expect_get_node_info()
-            .returning(move |_| Ok(node_1_clone.clone()));
-        mock_node_1.expect_track_payment().returning(|_, _| {
-            Ok(crate::PaymentResult {
-                htlc_count: 1,
-                payment_outcome: crate::PaymentOutcome::Success,
-            })
-        });
-        let pl1 = payments_list.clone();
-        mock_node_1.expect_send_payment().returning(move |a, _| {
-            pl1.lock().unwrap().push(a);
-            Ok(lightning::ln::PaymentHash([0; 32]))
-        });
-
-        if let Some(ref pubkeys) = fixed_pubkeys {
-            clients.insert(pubkeys[0], Arc::new(Mutex::new(mock_node_1)));
-        } else {
-            clients.insert(node_1.pubkey, Arc::new(Mutex::new(mock_node_1)));
-        }
-
-        let node_2 = &nodes[1];
-
-        let mut mock_node_2 = MockLightningNode::new();
-
-        // Set up node 2 expectations
-        let mut node_2_clone = node_2.clone();
-        if let Some(ref pubkeys) = fixed_pubkeys {
-            node_2_clone.pubkey = pubkeys[1]
-        }
-        mock_node_2
-            .expect_get_info()
-            .return_const(node_2_clone.clone());
-        mock_node_2
-            .expect_get_network()
-            .returning(|| Network::Regtest);
-        mock_node_2
-            .expect_list_channels()
-            .returning(|| Ok(vec![100_000_000]));
-        mock_node_2
-            .expect_get_node_info()
-            .returning(move |_| Ok(node_2_clone.clone()));
-        mock_node_2.expect_track_payment().returning(|_, _| {
-            Ok(crate::PaymentResult {
-                htlc_count: 1,
-                payment_outcome: crate::PaymentOutcome::Success,
-            })
-        });
-        let pl2 = payments_list.clone();
-        mock_node_2.expect_send_payment().returning(move |a, _| {
-            pl2.lock().unwrap().push(a);
-            Ok(lightning::ln::PaymentHash([1; 32]))
-        });
-
-        if let Some(ref pubkeys) = fixed_pubkeys {
-            clients.insert(pubkeys[1], Arc::new(Mutex::new(mock_node_2)));
-        } else {
-            clients.insert(node_2.pubkey, Arc::new(Mutex::new(mock_node_2)));
-        }
-
-        let node_3 = &nodes[2];
-
-        let mut mock_node_3 = MockLightningNode::new();
-
-        // Set up node 3 expectations
-        let mut node_3_clone = node_3.clone();
-        if let Some(ref pubkeys) = fixed_pubkeys {
-            node_3_clone.pubkey = pubkeys[2]
-        }
-        mock_node_3
-            .expect_get_info()
-            .return_const(node_3_clone.clone());
-        mock_node_3
-            .expect_get_network()
-            .returning(|| Network::Regtest);
-        mock_node_3
-            .expect_list_channels()
-            .returning(|| Ok(vec![100_000_000]));
-        mock_node_3
-            .expect_get_node_info()
-            .returning(move |_| Ok(node_3_clone.clone()));
-        mock_node_3.expect_track_payment().returning(|_, _| {
-            Ok(crate::PaymentResult {
-                htlc_count: 1,
-                payment_outcome: crate::PaymentOutcome::Success,
-            })
-        });
-        let pl3 = payments_list.clone();
-        mock_node_3.expect_send_payment().returning(move |a, _| {
-            pl3.lock().unwrap().push(a);
-            Ok(lightning::ln::PaymentHash([2; 32]))
-        });
-
-        if let Some(ref pubkeys) = fixed_pubkeys {
-            clients.insert(pubkeys[2], Arc::new(Mutex::new(mock_node_3)));
-        } else {
-            clients.insert(node_3.pubkey, Arc::new(Mutex::new(mock_node_3)));
-        }
-
-        let node_4 = &nodes[3];
-
-        let mut mock_node_4 = MockLightningNode::new();
-
-        // Set up node 4 expectations
-        let mut node_4_clone = node_4.clone();
-        if let Some(ref pubkeys) = fixed_pubkeys {
-            node_4_clone.pubkey = pubkeys[3]
-        }
-        mock_node_4
-            .expect_get_info()
-            .return_const(node_4_clone.clone());
-        mock_node_4
-            .expect_get_network()
-            .returning(|| Network::Regtest);
-        mock_node_4
-            .expect_list_channels()
-            .returning(|| Ok(vec![100_000_000]));
-        mock_node_4
-            .expect_get_node_info()
-            .returning(move |_| Ok(node_4_clone.clone()));
-        mock_node_4.expect_track_payment().returning(|_, _| {
-            Ok(crate::PaymentResult {
-                htlc_count: 1,
-                payment_outcome: crate::PaymentOutcome::Success,
-            })
-        });
-        let pl4 = payments_list.clone();
-        mock_node_4.expect_send_payment().returning(move |a, _| {
-            pl4.lock().unwrap().push(a);
-            Ok(lightning::ln::PaymentHash([3; 32]))
-        });
-
-        if let Some(ref pubkeys) = fixed_pubkeys {
-            clients.insert(pubkeys[3], Arc::new(Mutex::new(mock_node_4)));
-        } else {
-            clients.insert(node_4.pubkey, Arc::new(Mutex::new(mock_node_4)));
-        }
-
-        (
-            (
-                node_1.clone(),
-                node_2.clone(),
-                node_3.clone(),
-                node_4.clone(),
-            ),
-            clients,
-            payments_list,
+        mock_send_payment(
+            &mut network.clients[0],
+            network.nodes[0].clone(),
+            payments_list.clone(),
+            [0; 32],
         )
+        .await;
+
+        mock_send_payment(
+            &mut network.clients[1],
+            network.nodes[1].clone(),
+            payments_list.clone(),
+            [0; 32],
+        )
+        .await;
+
+        mock_send_payment(
+            &mut network.clients[2],
+            network.nodes[2].clone(),
+            payments_list.clone(),
+            [0; 32],
+        )
+        .await;
+
+        mock_send_payment(
+            &mut network.clients[3],
+            network.nodes[3].clone(),
+            payments_list.clone(),
+            [0; 32],
+        )
+        .await;
+
+        (network, payments_list)
     }
 
     #[tokio::test]
     async fn test_deterministic_payments_events_defined_activities() {
-        let ((node_1, node_2, node_3, node_4), clients, payments_list) =
-            setup_test_nodes_for_testing_deterministic_events(None);
+        let (network, payments_list) =
+            setup_test_nodes_for_testing_deterministic_events(None).await;
 
         // Define two activities
         // Activity 1: From node_1 to node_2
         let activity_1 = crate::ActivityDefinition {
-            source: node_1.clone(),
-            destination: node_2.clone(),
+            source: network.nodes[0].clone(),
+            destination: network.nodes[1].clone(),
             start_secs: None,
             count: Some(5),
             interval_secs: crate::ValueOrRange::Value(2),
@@ -2135,8 +2015,8 @@ mod tests {
 
         // Activity 2: From node_3 to node_4
         let activity_2 = crate::ActivityDefinition {
-            source: node_3.clone(),
-            destination: node_4.clone(),
+            source: network.nodes[2].clone(),
+            destination: network.nodes[3].clone(),
             start_secs: None,
             count: Some(5),
             interval_secs: crate::ValueOrRange::Value(4),
@@ -2145,16 +2025,10 @@ mod tests {
 
         let (shutdown_trigger, shutdown_listener) = triggered::trigger();
 
-        // Create simulation without a timeout
+        // Create simulation without a timeout.
         let simulation = Simulation::new(
-            SimulationCfg::new(
-                None, // without timeout
-                100,  // Expected payment size
-                2.0,  // Activity multiplier
-                None, // No result writing
-                None, // Seed for determinism
-            ),
-            clients,
+            SimulationCfg::new(None, 100, 2.0, None, None),
+            network.get_client_hashmap(),
             TaskTracker::new(),
             Arc::new(SystemClock {}),
             shutdown_trigger,
@@ -2167,16 +2041,16 @@ mod tests {
         let elapsed = start.elapsed();
 
         let expected_payment_list = vec![
-            node_2.pubkey,
-            node_4.pubkey,
-            node_2.pubkey,
-            node_2.pubkey,
-            node_4.pubkey,
-            node_2.pubkey,
-            node_2.pubkey,
-            node_4.pubkey,
-            node_4.pubkey,
-            node_4.pubkey,
+            network.nodes[1].pubkey,
+            network.nodes[3].pubkey,
+            network.nodes[1].pubkey,
+            network.nodes[1].pubkey,
+            network.nodes[3].pubkey,
+            network.nodes[1].pubkey,
+            network.nodes[1].pubkey,
+            network.nodes[3].pubkey,
+            network.nodes[3].pubkey,
+            network.nodes[3].pubkey,
         ];
 
         // Check that simulation ran 20ish seconds because
@@ -2214,21 +2088,15 @@ mod tests {
         )
         .unwrap();
 
-        let (_, clients, payments_list) =
-            setup_test_nodes_for_testing_deterministic_events(Some(vec![pk1, pk2, pk3, pk4]));
+        let (network, payments_list) =
+            setup_test_nodes_for_testing_deterministic_events(Some(vec![pk1, pk2, pk3, pk4])).await;
 
         let (shutdown_trigger, shutdown_listener) = triggered::trigger();
 
-        // Create simulation with a defined seed
+        // Create simulation with a defined seed.
         let simulation = Simulation::new(
-            SimulationCfg::new(
-                Some(25), // 25 second timeout (shouldn't matter)
-                100,      // Expected payment size
-                2.0,      // Activity multiplier
-                None,     // No result writing
-                Some(42), // Seed for determinism
-            ),
-            clients.clone(),
+            SimulationCfg::new(Some(25), 100, 2.0, None, Some(42)),
+            network.get_client_hashmap(),
             TaskTracker::new(),
             Arc::new(SystemClock {}),
             shutdown_trigger,
@@ -2251,7 +2119,9 @@ mod tests {
 
         assert!(
             payments_list.lock().unwrap().as_ref() == expected_payment_list,
-            "The expected order of payments is not correct"
+            "The expected order of payments is not correct: {:?} vs {:?}",
+            payments_list.lock().unwrap(),
+            expected_payment_list,
         );
 
         // remove all the payments made in the previous execution
@@ -2259,16 +2129,10 @@ mod tests {
 
         let (shutdown_trigger, shutdown_listener) = triggered::trigger();
 
-        // Create the same simulation as before but with different seed
+        // Create the same simulation as before but with different seed.
         let simulation2 = Simulation::new(
-            SimulationCfg::new(
-                Some(25),  // 25 second timeout
-                100,       // Expected payment size
-                2.0,       // Activity multiplier
-                None,      // No result writing
-                Some(500), // different seed
-            ),
-            clients,
+            SimulationCfg::new(Some(25), 100, 2.0, None, Some(500)),
+            network.get_client_hashmap(),
             TaskTracker::new(),
             Arc::new(SystemClock {}),
             shutdown_trigger,

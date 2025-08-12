@@ -95,10 +95,23 @@ mock! {
 }
 
 /// Type alias for the result of setup_test_nodes.
-type TestNodesResult = (
-    Vec<NodeInfo>,
-    HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
-);
+pub struct TestNodesResult {
+    pub nodes: Vec<NodeInfo>,
+    pub clients: Vec<Arc<Mutex<MockLightningNode>>>,
+}
+
+impl TestNodesResult {
+    // Returns a hashmap of the mocked lightning clients, cast to dyn LightningNode.
+    pub fn get_client_hashmap(&self) -> HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> {
+        let mut client_map: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> =
+            HashMap::with_capacity(self.nodes.len());
+
+        for (idx, node) in self.nodes.iter().enumerate() {
+            client_map.insert(node.pubkey, self.clients[idx].clone());
+        }
+        client_map
+    }
+}
 
 /// A builder for creating mock Lightning nodes for testing purposes.
 ///
@@ -118,10 +131,17 @@ type TestNodesResult = (
 ///     .with_networks(vec![Network::Bitcoin, Network::Testnet, Network::Regtest])
 ///     .build_clients_only();
 pub struct LightningTestNodeBuilder {
-    node_count: usize,              // Required - must be provided at creation.
-    initial_balance: u64,           // Always has a value (default: 100,000).
-    keysend_indices: Vec<usize>,    // Always a vector (default: Vec filled with 0..node_count).
-    networks: Option<Vec<Network>>, // Can be None (default) or Some(networks).
+    // The number of nodes in the network.
+    node_count: usize,
+    // The balance to fund channels with, default: 100_000.
+    initial_balance: u64,
+    // The indexes of nodes that support keysend in the network.
+    keysend_indices: Vec<usize>,
+    // The networks that that each node supports, length must equal node_count.
+    networks: Option<Vec<Network>>,
+    // An optional set of fixed pubkey values for the network, used when tests required
+    // deterministic values.
+    fixed_pubkeys: Vec<PublicKey>,
 }
 
 impl LightningTestNodeBuilder {
@@ -131,9 +151,11 @@ impl LightningTestNodeBuilder {
     pub fn new(node_count: usize) -> Self {
         Self {
             node_count,
-            initial_balance: 100_000,                   // Default 100k sats.
-            keysend_indices: (0..node_count).collect(), // Keysend for all nodes ON by default.
-            networks: Some(vec![Network::Regtest; node_count]), // Regtest network for all nodes by default.
+            initial_balance: 100_000,
+            // Turn keysend on by default.
+            keysend_indices: (0..node_count).collect(),
+            networks: Some(vec![Network::Regtest; node_count]),
+            fixed_pubkeys: vec![],
         }
     }
 
@@ -143,9 +165,19 @@ impl LightningTestNodeBuilder {
         self
     }
 
-    /// Sets specific networks for each node.
-    /// Checks whether the number of networks matches node_count.
-    /// Returns self for method chaining.
+    /// Specifies the public keys for each node in the test network.
+    pub fn with_fixed_pubkeys(mut self, pubkeys: Vec<PublicKey>) -> Self {
+        assert_eq!(
+            pubkeys.len(),
+            self.node_count,
+            "Must specify a fixed pubkey for each node",
+        );
+        self.fixed_pubkeys = pubkeys;
+        self
+    }
+
+    /// Sets specific networks for each node, asserting that the correct number of networks for
+    /// was provided.
     pub fn with_networks(mut self, networks: Vec<Network>) -> Self {
         // Validate that we have the correct number of networks
         assert_eq!(
@@ -157,25 +189,20 @@ impl LightningTestNodeBuilder {
         self
     }
 
-    /// Builds only the client map, omitting node info.
-    /// Useful for network-specific testing. Returns a map of public keys to mocked
-    /// Lightning node clients.
-    pub fn build_clients_only(self) -> HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> {
-        let (_, clients) = self.build_full();
-        clients
-    }
-
-    /// Builds the full test setup, including node info and clients.
-    /// Returns a tuple of node information and a map of public keys to mocked
-    /// Lightning node clients.
+    /// Builds the full test setup, including node info and clients. Returns a tuple of node
+    /// information and a map of public keys to mocked Lightning node clients.
     pub fn build_full(self) -> TestNodesResult {
-        let nodes = create_nodes(self.node_count, self.initial_balance);
-        let mut node_infos = Vec::new();
-        let mut clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
+        let node_info_list = create_nodes(self.node_count, self.initial_balance);
+        let mut nodes = Vec::with_capacity(node_info_list.len());
+        let mut clients = Vec::with_capacity(node_info_list.len());
 
-        for (idx, (mut node_info, _)) in nodes.into_iter().enumerate() {
+        for (idx, (mut node_info, _)) in node_info_list.into_iter().enumerate() {
             if self.keysend_indices.contains(&idx) {
                 node_info.features.set_keysend_optional();
+            }
+
+            if !self.fixed_pubkeys.is_empty() {
+                node_info.pubkey = self.fixed_pubkeys[idx]
             }
 
             let mut mock_node = MockLightningNode::new();
@@ -186,11 +213,11 @@ impl LightningTestNodeBuilder {
                 mock_node.expect_get_network().return_const(network);
             }
 
-            clients.insert(node_info.pubkey, Arc::new(Mutex::new(mock_node)));
-            node_infos.push(node_info);
+            clients.push(Arc::new(Mutex::new(mock_node)));
+            nodes.push(node_info);
         }
 
-        (node_infos, clients)
+        TestNodesResult { nodes, clients }
     }
 }
 
