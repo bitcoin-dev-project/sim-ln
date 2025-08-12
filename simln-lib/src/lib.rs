@@ -820,7 +820,8 @@ impl<C: Clock + 'static> Simulation<C> {
             },
         };
 
-        // Next, it is necessary to generate all defined activities in a central place.
+        // Setup a task that will populate a single events queue with payments to dispatch, and
+        // report their outcome to our data collection.
         match self
             .setup_payment_events(activities, event_sender, &self.tasks)
             .await
@@ -1046,7 +1047,8 @@ impl<C: Clock + 'static> Simulation<C> {
         Ok(generators)
     }
 
-    /// It is the central place responsible for create payment events.
+    /// Populates a queue of payment events with one event per executing node, then spawns a task
+    /// that will be responsible for reading, dispatching and replenishing them.
     async fn setup_payment_events(
         &self,
         mut executors: Vec<ExecutorKit>,
@@ -1069,7 +1071,6 @@ impl<C: Clock + 'static> Simulation<C> {
             generate_payment(&mut heap, source, &mut payments_tracker, now).await?;
         }
 
-        // ppe: produce payment events
         let shutdown = self.shutdown_trigger.clone();
         let listener = self.shutdown_listener.clone();
         let clock = self.clock.clone();
@@ -1102,6 +1103,8 @@ impl<C: Clock + 'static> Simulation<C> {
     }
 }
 
+/// Reads and dispatches events from the heap provided, pushing more events to the queue where
+/// appropriate for the defined activity.
 async fn produce_payment_events<C: Clock>(
     mut heap: BinaryHeap<Reverse<PaymentEvent>>,
     mut payments_tracker: HashMap<PublicKey, ExecutorPaymentTracker>,
