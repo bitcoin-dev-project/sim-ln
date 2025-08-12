@@ -35,7 +35,14 @@ have permission to execute commands on. Note that the current version
 of the simulator uses keysend to execute payments, which must be enabled as follows:
 * LND: `--accept-keysend`
 * CLN: enabled by default
-* Eclair: `--features.keysend=optional`
+* Eclair: `-Declair.features.keysend=optional` (or `--features.keysend=optional` if you're using Polar)
+
+NOTE: for CLN `keysend` to work with eclair, you need to add additional config to eclair:
+```
+-Declair.channel.min-final-expiry-delta-blocks=N
+-Declair.channel.fulfill-safety-before-timeout-blocks=M
+```
+where N and M are numbers, and N must be larger than M (N must be 22, CLN's default, or more)
 
 ## Getting Started
 
