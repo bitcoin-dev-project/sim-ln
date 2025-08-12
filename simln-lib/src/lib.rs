@@ -264,6 +264,9 @@ pub enum LightningError {
     /// Error that occurred while getting graph.
     #[error("Get graph error: {0}")]
     GetGraphError(String),
+    /// Error that occured when getting clock info.
+    #[error("SystemTime conversion error: {0}")]
+    SystemTimeConversionError(#[from] SystemTimeError),
 }
 
 /// Information about a Lightning Network node.
@@ -431,7 +434,7 @@ impl Display for PaymentResult {
 }
 
 /// Represents all possible outcomes of a Lightning Network payment attempt.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum PaymentOutcome {
     /// Payment completed successfully, reaching its intended recipient.
     Success,
@@ -457,6 +460,8 @@ pub enum PaymentOutcome {
     NotDispatched,
     /// The payment was dispatched but its final status could not be determined.
     TrackPaymentFailed,
+    /// The payment failed at the provided index in the path.
+    IndexFailure(usize),
 }
 
 /// Describes a payment from a source node to a destination node.
