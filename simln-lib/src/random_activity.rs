@@ -205,6 +205,20 @@ impl RandomPaymentActivity {
 
         Ok(())
     }
+
+    /// Returns a log normal distribution with our expected payment size as its mean and variance
+    /// that is scaled by the channel size (larger for larger channels).
+    fn log_normal(&self, channel_size_msat: f64) -> Result<LogNormal<f64>, PaymentGenerationError> {
+        let expected_payment_amt_msat = self.expected_payment_amt as f64;
+        let variance = 1000.0 * channel_size_msat.ln();
+        let sigma_square =
+            ((variance * variance) / (expected_payment_amt_msat * expected_payment_amt_msat) + 1.0)
+                .ln();
+        let sigma = sigma_square.sqrt();
+        let mu = expected_payment_amt_msat.ln() - sigma_square / 2.0;
+
+        LogNormal::new(mu, sigma).map_err(|e| PaymentGenerationError(e.to_string()))
+    }
 }
 
 /// Returns the number of events that the simulation expects the node to process per month based on its capacity, a
@@ -260,29 +274,17 @@ impl PaymentGenerator for RandomPaymentActivity {
             "destination amount required for payment activity generator".to_string(),
         ))?;
 
-        let payment_limit = std::cmp::min(self.source_capacity, destination_capacity) / 2;
-
-        let ln_pmt_amt = (self.expected_payment_amt as f64).ln();
-        let ln_limit = (payment_limit as f64).ln();
-
-        let mu = 2.0 * ln_pmt_amt - ln_limit;
-        let sigma_square = 2.0 * (ln_limit - ln_pmt_amt);
-
-        if sigma_square < 0.0 {
-            return Err(PaymentGenerationError(format!(
-                "payment amount not possible for limit: {payment_limit}, sigma squared: {sigma_square}"
-            )));
-        }
-
-        let log_normal = LogNormal::new(mu, sigma_square.sqrt())
-            .map_err(|e| PaymentGenerationError(e.to_string()))?;
+        let largest_channel_capacity_msat =
+            std::cmp::min(self.source_capacity, destination_capacity) / 2;
 
         let mut rng = self
             .rng
             .0
             .lock()
             .map_err(|e| PaymentGenerationError(e.to_string()))?;
-        let payment_amount = log_normal.sample(&mut *rng) as u64;
+        let payment_amount = self
+            .log_normal(largest_channel_capacity_msat as f64)?
+            .sample(&mut *rng) as u64;
 
         Ok(payment_amount)
     }
@@ -456,39 +458,45 @@ mod tests {
         }
 
         #[test]
-        fn test_payment_amount() {
-            // The special cases for payment_amount are those who may make the internal log normal distribution fail to build, which happens if
-            // sigma squared is either +-INF or NaN. Given that the constructor of the PaymentActivityGenerator already forces its internal values
-            // to be greater than zero, the only values that are left are all values of `destination_capacity` smaller or equal to the `source_capacity`
-            // All of them will yield a sigma squared smaller than 0, which we have a sanity check for.
-            let expected_payment = get_random_int(1, 100);
-            let source_capacity = 2 * expected_payment;
-            let rng = MutRng::new(Some((u64::MAX, None)));
+        fn test_log_normal_distribution_within_one_std_dev() {
+            // Tests that samples from the log normal distribution fall within one standard
+            // deviation of our expected variance. We intentionally use fresh randomness in each
+            // run of this test because this property should hold for any seed.
+            let dest_capacity_msat = 200_000_000_000.0;
             let pag =
-                RandomPaymentActivity::new(source_capacity, expected_payment, 1.0, rng).unwrap();
+                RandomPaymentActivity::new(100_000_000_000, 38_000_000, 1.0, MutRng::new(None))
+                    .unwrap();
 
-            // Wrong cases
-            for i in 0..source_capacity {
-                assert!(matches!(
-                    pag.payment_amount(Some(i)),
-                    Err(PaymentGenerationError(..))
-                ))
+            let dist = pag.log_normal(dest_capacity_msat).unwrap();
+            let mut rng = rand::thread_rng();
+
+            let mut samples = Vec::new();
+            for _ in 0..1000 {
+                let sample = dist.sample(&mut rng);
+                samples.push(sample);
             }
 
-            // All other cases will work. We are not going to exhaustively test for the rest up to u64::MAX, let just pick a bunch
-            for i in source_capacity + 1..100 * source_capacity {
-                assert!(pag.payment_amount(Some(i)).is_ok())
-            }
+            let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+            let variance =
+                samples.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / samples.len() as f64;
+            let std_dev = variance.sqrt();
 
-            // We can even try really high numbers to make sure they are not troublesome
-            for i in u64::MAX - 10000..u64::MAX {
-                assert!(pag.payment_amount(Some(i)).is_ok())
-            }
+            let lower_bound = mean - std_dev;
+            let upper_bound = mean + std_dev;
 
-            assert!(matches!(
-                pag.payment_amount(None),
-                Err(PaymentGenerationError(..))
-            ));
+            let within_one_std_dev = samples
+                .iter()
+                .filter(|&&x| x >= lower_bound && x <= upper_bound)
+                .count();
+
+            // For a normal distribution, approximately 68% of values should be within 1 standard
+            // deviation. We allow some tolerance in the test so that it doesn't flake.
+            let percentage = (within_one_std_dev as f64 / samples.len() as f64) * 100.0;
+            assert!(
+                (60.0..=75.0).contains(&percentage),
+                "Expected 60-75% of values within 1 std dev, got {:.1}%",
+                percentage
+            );
         }
     }
 }

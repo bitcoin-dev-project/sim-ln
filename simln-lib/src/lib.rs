@@ -2119,7 +2119,8 @@ mod tests {
             elapsed
         );
         let expected_payment_list = vec![
-            pk1, pk2, pk1, pk1, pk1, pk3, pk3, pk3, pk4, pk3, pk2, pk1, pk4,
+            pk2, pk1, pk1, pk3, pk2, pk4, pk3, pk2, pk2, pk4, pk3, pk2, pk3, pk2, pk1, pk4, pk2,
+            pk2, pk2, pk2, pk1, pk1, pk4, pk2,
         ];
 
         assert!(
