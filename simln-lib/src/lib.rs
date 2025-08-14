@@ -1592,7 +1592,7 @@ async fn track_payment_result(
 
 #[cfg(test)]
 mod tests {
-    use crate::clock::SystemClock;
+    use crate::clock::{Clock, SimulationClock, SystemClock};
     use crate::test_utils::{MockLightningNode, TestNodesResult};
     use crate::{
         get_payment_delay, test_utils, test_utils::LightningTestNodeBuilder, LightningError,
@@ -2031,20 +2031,20 @@ mod tests {
         let (shutdown_trigger, shutdown_listener) = triggered::trigger();
 
         // Create simulation without a timeout.
+		let clock = Arc::new(SimulationClock::new(10).unwrap());
+		let start = clock.now();
         let simulation = Simulation::new(
             SimulationCfg::new(None, 100, 2.0, None, None),
             network.get_client_hashmap(),
             TaskTracker::new(),
-            Arc::new(SystemClock {}),
+			clock.clone(),
             shutdown_trigger,
             shutdown_listener,
         );
 
         // Run the simulation
-        let start = std::time::Instant::now();
         let _ = simulation.run(&vec![activity_1, activity_2]).await;
-        let elapsed = start.elapsed();
-
+		let elapsed = clock.now().duration_since(start).unwrap();
         let expected_payment_list = vec![
             network.nodes[1].pubkey,
             network.nodes[3].pubkey,
@@ -2058,13 +2058,14 @@ mod tests {
             network.nodes[3].pubkey,
         ];
 
-        // Check that simulation ran 20ish seconds because
-        // from activity_1 there are 5 payments with a wait_time of 2s -> 10s
-        // from activity_2 there are 5 payments with a wait_time of 4s -> 20s
-        // but the wait time is interleave between the payments.
+        // Check that simulation ran 20ish seconds because:
+        // - from activity_1 there are 5 payments with a wait_time of 2s -> 10s
+        // - from activity_2 there are 5 payments with a wait_time of 4s -> 20s
+        // - but the wait time is interleave between the payments.
+		// Since we're running with a sped up clock, we allow a little more leeway.
         assert!(
-            elapsed <= Duration::from_secs(21),
-            "Simulation should have run no more than 21, took {:?}",
+            elapsed <= Duration::from_secs(30),
+            "Simulation should have run no more than 30, took {:?}",
             elapsed
         );
 
