@@ -12,9 +12,6 @@ use simln_lib::{
 use simple_logger::SimpleLogger;
 use tokio_util::task::TaskTracker;
 
-// Import the pathfinder types
-use simln_lib::sim_node::DefaultPathFinder;
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Enable tracing if building in developer mode.
@@ -37,9 +34,6 @@ async fn main() -> anyhow::Result<()> {
 
     let tasks = TaskTracker::new();
 
-    // Create the pathfinder instance
-    let pathfinder = DefaultPathFinder;
-
     let (sim, validated_activities) = if sim_params.sim_network.is_empty() {
         create_simulation(&cli, &sim_params, tasks.clone()).await?
     } else {
@@ -58,7 +52,6 @@ async fn main() -> anyhow::Result<()> {
             tasks.clone(),
             interceptors,
             CustomRecords::default(),
-            pathfinder,
         )
         .await?;
         (sim, validated_activities)

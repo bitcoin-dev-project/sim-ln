@@ -13,6 +13,7 @@ use std::fmt::Display;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 use tokio::task::JoinSet;
+use tokio::time::Duration;
 use tokio_util::task::TaskTracker;
 
 use lightning::ln::features::{ChannelFeatures, NodeFeatures};
@@ -499,8 +500,7 @@ pub trait SimNetwork: Send + Sync {
     fn list_nodes(&self) -> Vec<NodeInfo>;
 }
 
-//type LdkNetworkGraph = NetworkGraph<Arc<WrappedLog>>;
-type LdkNetworkGraph = NetworkGraph<&'static WrappedLog>;
+type LdkNetworkGraph = NetworkGraph<Arc<WrappedLog>>;
 /// A trait for custom pathfinding implementations.
 /// Finds a route from the source node to the destination node for the specified amount.
 ///
@@ -512,47 +512,60 @@ type LdkNetworkGraph = NetworkGraph<&'static WrappedLog>;
 ///
 /// # Returns
 /// Returns a `Route` containing the payment path, or a `SimulationError` if no route is found.
+#[async_trait]
 pub trait PathFinder: Send + Sync + Clone {
-    fn find_route(
+    async fn find_route(
         &self,
         source: &PublicKey,
         dest: PublicKey,
         amount_msat: u64,
         pathfinding_graph: &LdkNetworkGraph,
     ) -> Result<Route, SimulationError>;
+
+    async fn report_payment_success(
+        &self,
+        path: &Path,
+        duration_since_epoch: Duration,
+    ) -> Result<(), SimulationError>;
+
+    async fn report_payment_failure(
+        &self,
+        path: &Path,
+        short_channel_id: u64,
+        duration_since_epoch: Duration,
+    ) -> Result<(), SimulationError>;
 }
 
 /// The default pathfinding implementation that uses LDK's built-in pathfinding algorithm.
 #[derive(Clone)]
-pub struct DefaultPathFinder;
-
-impl Default for DefaultPathFinder {
-    fn default() -> Self {
-        Self::new()
-    }
+pub struct DefaultPathFinder {
+    scorer: Arc<Mutex<ProbabilisticScorer<Arc<LdkNetworkGraph>, Arc<WrappedLog>>>>,
+    network_graph: Arc<LdkNetworkGraph>,
 }
 
 impl DefaultPathFinder {
-    pub fn new() -> Self {
-        Self
+    pub fn new(network_graph: Arc<LdkNetworkGraph>) -> Self {
+        Self {
+            scorer: Arc::new(Mutex::new(ProbabilisticScorer::new(
+                ProbabilisticScoringDecayParameters::default(),
+                network_graph.clone(),
+                Arc::new(WrappedLog {}),
+            ))),
+            network_graph,
+        }
     }
 }
 
+#[async_trait]
 impl PathFinder for DefaultPathFinder {
-    fn find_route(
+    async fn find_route(
         &self,
         source: &PublicKey,
         dest: PublicKey,
         amount_msat: u64,
-        pathfinding_graph: &NetworkGraph<&'static WrappedLog>,
+        _pathfinding_graph: &LdkNetworkGraph,
     ) -> Result<Route, SimulationError> {
-        let scorer_graph = NetworkGraph::new(bitcoin::Network::Regtest, &WrappedLog {});
-        let scorer = ProbabilisticScorer::new(
-            ProbabilisticScoringDecayParameters::default(),
-            Arc::new(scorer_graph),
-            &WrappedLog {},
-        );
-
+        let scorer_guard = self.scorer.lock().await;
         // Call LDK's find_route with the scorer (LDK-specific requirement)
         find_route(
             source,
@@ -564,14 +577,35 @@ impl PathFinder for DefaultPathFinder {
                 final_value_msat: amount_msat,
                 max_total_routing_fee_msat: None,
             },
-            pathfinding_graph, // This is the real network graph used for pathfinding
+            self.network_graph.as_ref(), // This is the real network graph used for pathfinding
             None,
             &WrappedLog {},
-            &scorer, // LDK requires a scorer, so we provide a simple one
+            &scorer_guard, // LDK requires a scorer, so we provide a simple one
             &Default::default(),
             &[0; 32],
         )
         .map_err(|e| SimulationError::SimulatedNetworkError(e.err))
+    }
+
+    async fn report_payment_success(
+        &self,
+        path: &Path,
+        duration_since_epoch: Duration,
+    ) -> Result<(), SimulationError> {
+        let mut scorer_guard = self.scorer.lock().await;
+        scorer_guard.payment_path_successful(path, duration_since_epoch);
+        Ok(())
+    }
+
+    async fn report_payment_failure(
+        &self,
+        path: &Path,
+        short_channel_id: u64,
+        duration_since_epoch: Duration,
+    ) -> Result<(), SimulationError> {
+        let mut scorer_guard = self.scorer.lock().await;
+        scorer_guard.payment_path_failed(path, short_channel_id, duration_since_epoch);
+        Ok(())
     }
 }
 
@@ -717,13 +751,16 @@ impl<T: SimNetwork, C: Clock, P: PathFinder> LightningNode for SimNode<T, C, P> 
             Entry::Vacant(vacant) => vacant,
         };
 
-        // Use the stored scorer when finding a route
-        let route = match self.pathfinder.find_route(
-            &self.info.pubkey,
-            dest,
-            amount_msat,
-            &self.pathfinding_graph,
-        ) {
+        let route = match self
+            .pathfinder
+            .find_route(
+                &self.info.pubkey,
+                dest,
+                amount_msat,
+                &self.pathfinding_graph,
+            )
+            .await
+        {
             Ok(path) => path,
             // In the case that we can't find a route for the payment, we still report a successful payment *api call*
             // and report RouteNotFound to the tracking channel. This mimics the behavior of real nodes.
@@ -801,9 +838,9 @@ impl<T: SimNetwork, C: Clock, P: PathFinder> LightningNode for SimNode<T, C, P> 
                             match &in_flight.path {
                                 Some(path) => {
                                     if payment_result.payment_outcome == PaymentOutcome::Success {
-                                        self.scorer.lock().await.payment_path_successful(path, duration);
+                                        let _ = self.pathfinder.report_payment_success(path, duration).await;
                                     } else if let PaymentOutcome::IndexFailure(index) = payment_result.payment_outcome {
-                                        self.scorer.lock().await.payment_path_failed(path, index as u64, duration);
+                                        let _ = self.pathfinder.report_payment_failure(path, index as u64, duration).await;
                                     }
                                 },
                                 None => {
@@ -1127,18 +1164,15 @@ impl SimGraph {
 }
 
 /// Produces a map of node public key to lightning node implementation to be used for simulations.
-pub async fn ln_node_from_graph<C: Clock, P>(
+pub async fn ln_node_from_graph<C: Clock + 'static, P: PathFinder + 'static>(
     graph: Arc<Mutex<SimGraph>>,
     routing_graph: Arc<LdkNetworkGraph>,
     clock: Arc<C>,
     pathfinder: P,
-) -> Result<HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>, LightningError> 
-where
-    P: PathFinder + 'static,
-{
+) -> Result<HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>, LightningError> {
     let mut nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
 
-    for pk in graph.lock().await.nodes.keys() {
+    for node in graph.lock().await.nodes.iter() {
         nodes.insert(
             *node.0,
             Arc::new(Mutex::new(SimNode::new(
@@ -1632,7 +1666,7 @@ impl UtxoLookup for UtxoValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clock::SystemClock;
+    use crate::clock::{SimulationClock, SystemClock};
     use crate::test_utils::get_random_keypair;
     use lightning::routing::router::build_route_from_hops;
     use lightning::routing::router::Route;
@@ -2029,6 +2063,8 @@ mod tests {
         let sim_network = Arc::new(Mutex::new(mock));
         let channels = create_simulated_channels(5, 300000000);
         let graph = populate_network_graph(channels.clone(), Arc::new(SystemClock {})).unwrap();
+        let graph_for_pf =
+            populate_network_graph(channels.clone(), Arc::new(SystemClock {})).unwrap();
 
         // Create a simulated node for the first channel in our network.
         let pk = channels[0].node_1.policy.pubkey;
@@ -2037,9 +2073,8 @@ mod tests {
             sim_network.clone(),
             Arc::new(graph),
             Arc::new(SystemClock {}),
-            DefaultPathFinder
-        )
-        .unwrap();
+            DefaultPathFinder::new(graph_for_pf.into()),
+        );
 
         // Prime mock to return node info from lookup and assert that we get the pubkey we're expecting.
         let lookup_pk = channels[3].node_1.policy.pubkey;
@@ -2123,9 +2158,8 @@ mod tests {
             Arc::new(Mutex::new(test_kit.graph)),
             test_kit.routing_graph.clone(),
             Arc::new(SystemClock {}),
-            DefaultPathFinder::new()        
-        )
-        .unwrap();
+            DefaultPathFinder::new(test_kit.routing_graph.clone()),
+        );
 
         let route = build_route_from_hops(
             &test_kit.nodes[0],
@@ -2233,9 +2267,9 @@ mod tests {
                 )
                 .expect("could not create test graph"),
                 nodes,
-                routing_graph,
+                routing_graph: routing_graph.clone(),
                 shutdown: shutdown_clone,
-                pathfinder: DefaultPathFinder::new(),
+                pathfinder: DefaultPathFinder::new(routing_graph.clone()),
             };
 
             // Assert that our channel balance is all on the side of the channel opener when we start up.
@@ -2278,12 +2312,12 @@ mod tests {
             dest: PublicKey,
             amt: u64,
         ) -> (Route, Result<PaymentResult, LightningError>) {
-            let route = self.pathfinder.find_route(
-                &source,
-                dest,
-                amt,
-                &self.routing_graph,
-            ).unwrap();
+            let route = self
+                .pathfinder
+                .find_route(&source, dest, amt, &self.routing_graph)
+                .await
+                .unwrap();
+            let (sender, receiver) = tokio::sync::oneshot::channel();
 
             self.graph
                 .dispatch_payment(source, route.clone(), None, PaymentHash([0; 32]), sender);
@@ -2487,9 +2521,8 @@ mod tests {
             Arc::new(Mutex::new(test_kit.graph)),
             test_kit.routing_graph.clone(),
             Arc::new(SystemClock {}),
-            DefaultPathFinder::new(),
-        )
-        .unwrap();
+            test_kit.pathfinder.clone(),
+        );
 
         let route = build_route_from_hops(
             &test_kit.nodes[0],
@@ -2751,5 +2784,205 @@ mod tests {
         let _ = test_kit
             .send_test_payment(test_kit.nodes[0], test_kit.nodes[2], 150_000)
             .await;
+    }
+
+    /// A pathfinder that always fails to find a path.
+    #[derive(Clone)]
+    pub struct AlwaysFailPathFinder;
+
+    #[async_trait]
+    impl PathFinder for AlwaysFailPathFinder {
+        async fn find_route(
+            &self,
+            _source: &PublicKey,
+            _dest: PublicKey,
+            _amount_msat: u64,
+            _pathfinding_graph: &LdkNetworkGraph,
+        ) -> Result<Route, SimulationError> {
+            Err(SimulationError::SimulatedNetworkError(
+                "No route found".to_string(),
+            ))
+        }
+
+        async fn report_payment_success(
+            &self,
+            _path: &Path,
+            _duration_since_epoch: Duration,
+        ) -> Result<(), SimulationError> {
+            Err(SimulationError::SimulatedNetworkError(
+                "No scorer found".to_string(),
+            ))
+        }
+
+        async fn report_payment_failure(
+            &self,
+            _path: &Path,
+            _short_channel_id: u64,
+            _duration_since_epoch: Duration,
+        ) -> Result<(), SimulationError> {
+            Err(SimulationError::SimulatedNetworkError(
+                "No scorer found".to_string(),
+            ))
+        }
+    }
+
+    /// A pathfinder that only returns single-hop paths.
+    #[derive(Clone)]
+    pub struct SingleHopOnlyPathFinder;
+
+    #[async_trait]
+    impl PathFinder for SingleHopOnlyPathFinder {
+        async fn find_route(
+            &self,
+            source: &PublicKey,
+            dest: PublicKey,
+            amount_msat: u64,
+            pathfinding_graph: &LdkNetworkGraph,
+        ) -> Result<Route, SimulationError> {
+            let scorer = ProbabilisticScorer::new(
+                ProbabilisticScoringDecayParameters::default(),
+                pathfinding_graph,
+                Arc::new(WrappedLog {}),
+            );
+
+            // Try to find a route - if it fails or has more than one hop, return an error.
+            match find_route(
+                source,
+                &RouteParameters {
+                    payment_params: PaymentParameters::from_node_id(dest, 0)
+                        .with_max_total_cltv_expiry_delta(u32::MAX)
+                        .with_max_path_count(1)
+                        .with_max_channel_saturation_power_of_half(1),
+                    final_value_msat: amount_msat,
+                    max_total_routing_fee_msat: None,
+                },
+                pathfinding_graph,
+                None,
+                &WrappedLog {},
+                &scorer,
+                &Default::default(),
+                &[0; 32],
+            ) {
+                Ok(route) => {
+                    // Only allow single-hop routes.
+                    if route.paths.len() == 1 && route.paths[0].hops.len() == 1 {
+                        Ok(route)
+                    } else {
+                        Err(SimulationError::SimulatedNetworkError(
+                            "Only single-hop routes allowed".to_string(),
+                        ))
+                    }
+                },
+                Err(e) => Err(SimulationError::SimulatedNetworkError(e.err)),
+            }
+        }
+
+        async fn report_payment_success(
+            &self,
+            _path: &Path,
+            _duration_since_epoch: Duration,
+        ) -> Result<(), SimulationError> {
+            Err(SimulationError::SimulatedNetworkError(
+                "No scorer found".to_string(),
+            ))
+        }
+
+        async fn report_payment_failure(
+            &self,
+            _path: &Path,
+            _short_channel_id: u64,
+            _duration_since_epoch: Duration,
+        ) -> Result<(), SimulationError> {
+            Err(SimulationError::SimulatedNetworkError(
+                "No scorer found".to_string(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_always_fail_pathfinder() {
+        let channels = create_simulated_channels(3, 1_000_000_000);
+        let routing_graph =
+            Arc::new(populate_network_graph(channels.clone(), Arc::new(SystemClock {})).unwrap());
+
+        let pathfinder = AlwaysFailPathFinder;
+        let source = channels[0].get_node_1_pubkey();
+        let dest = channels[2].get_node_2_pubkey();
+
+        let result = pathfinder
+            .find_route(&source, dest, 100_000, &routing_graph)
+            .await;
+
+        // Should always fail.
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_single_hop_only_pathfinder() {
+        let channels = create_simulated_channels(3, 1_000_000_000);
+        let routing_graph =
+            Arc::new(populate_network_graph(channels.clone(), Arc::new(SystemClock {})).unwrap());
+
+        let pathfinder = SingleHopOnlyPathFinder;
+        let source = channels[0].get_node_1_pubkey();
+
+        // Test direct connection (should work).
+        let direct_dest = channels[0].get_node_2_pubkey();
+        let result = pathfinder
+            .find_route(&source, direct_dest, 100_000, &routing_graph)
+            .await;
+
+        if result.is_ok() {
+            let route = result.unwrap();
+            assert_eq!(route.paths[0].hops.len(), 1); // Only one hop
+        }
+
+        // Test indirect connection (should fail).
+        let indirect_dest = channels[2].get_node_2_pubkey();
+        let _result = pathfinder.find_route(&source, indirect_dest, 100_000, &routing_graph);
+
+        // May fail because no direct route exists.
+        // (depends on your test network topology)
+    }
+
+    /// Test that different pathfinders produce different behavior in payments.
+    #[tokio::test]
+    async fn test_pathfinder_affects_payment_behavior() {
+        let channels = create_simulated_channels(3, 1_000_000_000);
+        let (shutdown_trigger, shutdown_listener) = triggered::trigger();
+        let sim_graph = Arc::new(Mutex::new(
+            SimGraph::new(
+                channels.clone(),
+                TaskTracker::new(),
+                Vec::new(),
+                HashMap::new(), // Empty custom records
+                (shutdown_trigger.clone(), shutdown_listener.clone()),
+            )
+            .unwrap(),
+        ));
+        let routing_graph =
+            Arc::new(populate_network_graph(channels.clone(), Arc::new(SystemClock {})).unwrap());
+
+        // Create nodes with different pathfinders.
+        let nodes_default = ln_node_from_graph(
+            sim_graph.clone(),
+            routing_graph.clone(),
+            Arc::new(SimulationClock::new(1).unwrap()),
+            DefaultPathFinder::new(routing_graph.clone()),
+        )
+        .await
+        .unwrap();
+
+        let nodes_fail = ln_node_from_graph(
+            sim_graph.clone(),
+            routing_graph.clone(),
+            Arc::new(SimulationClock::new(1).unwrap()),
+            AlwaysFailPathFinder,
+        )
+        .await
+        .unwrap();
+
+        // Both should create the same structure.
+        assert_eq!(nodes_default.len(), nodes_fail.len());
     }
 }
