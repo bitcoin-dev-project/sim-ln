@@ -2567,6 +2567,7 @@ dependencies = [
  "dialoguer",
  "futures",
  "hex",
+ "lightning",
  "log",
  "openssl",
  "rand",
