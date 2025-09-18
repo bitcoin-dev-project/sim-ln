@@ -172,17 +172,6 @@ pub struct NetworkParser {
     pub node_2: ChannelPolicy,
 }
 
-impl From<NetworkParser> for SimulatedChannel {
-    fn from(network_parser: NetworkParser) -> Self {
-        SimulatedChannel::new(
-            network_parser.capacity_msat,
-            network_parser.scid,
-            network_parser.node_1,
-            network_parser.node_2,
-        )
-    }
-}
-
 /// Data structure used to parse information from the simulation file. It allows source and destination to be
 /// [NodeId], which enables the use of public keys and aliases in the simulation description.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -277,7 +266,17 @@ pub async fn create_simulation_with_network(
     let channels = sim_network
         .clone()
         .into_iter()
-        .map(SimulatedChannel::from)
+        .map(|channel| {
+            let exclude_capacity = exclude.contains(&channel.node_1.pubkey)
+                || exclude.contains(&channel.node_2.pubkey);
+            SimulatedChannel::new(
+                channel.capacity_msat,
+                channel.scid,
+                channel.node_1,
+                channel.node_2,
+                exclude_capacity,
+            )
+        })
         .collect::<Vec<SimulatedChannel>>();
 
     let mut nodes_info = HashMap::new();

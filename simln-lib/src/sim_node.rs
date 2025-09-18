@@ -319,6 +319,10 @@ pub struct SimulatedChannel {
     short_channel_id: ShortChannelID,
     node_1: ChannelState,
     node_2: ChannelState,
+    // When excluding nodes from sending and receiving payments in a simulation (only used for
+    // routing) we use this field to also exclude the capacity of the channel so that it is not
+    // counted towards the capacity of a node that we do want to send payments from.
+    exclude_capacity: bool,
 }
 
 impl SimulatedChannel {
@@ -329,12 +333,14 @@ impl SimulatedChannel {
         short_channel_id: ShortChannelID,
         node_1: ChannelPolicy,
         node_2: ChannelPolicy,
+        exclude_capacity: bool,
     ) -> Self {
         SimulatedChannel {
             capacity_msat,
             short_channel_id,
             node_1: ChannelState::new(node_1, capacity_msat / 2),
             node_2: ChannelState::new(node_2, capacity_msat / 2),
+            exclude_capacity,
         }
     }
 
@@ -1062,16 +1068,18 @@ impl SimGraph {
                 Entry::Vacant(v) => v.insert(channel.clone()),
             };
 
-            // It's okay to have duplicate pubkeys because one node can have many channels.
-            for info in [&channel.node_1.policy, &channel.node_2.policy] {
-                match nodes.entry(info.pubkey) {
-                    Entry::Occupied(o) => o.into_mut().1.push(channel.capacity_msat),
-                    Entry::Vacant(v) => {
-                        v.insert((
-                            node_info(info.pubkey, info.alias.clone()),
-                            vec![channel.capacity_msat],
-                        ));
-                    },
+            if !channel.exclude_capacity {
+                // It's okay to have duplicate pubkeys because one node can have many channels.
+                for info in [&channel.node_1.policy, &channel.node_2.policy] {
+                    match nodes.entry(info.pubkey) {
+                        Entry::Occupied(o) => o.into_mut().1.push(channel.capacity_msat),
+                        Entry::Vacant(v) => {
+                            v.insert((
+                                node_info(info.pubkey, info.alias.clone()),
+                                vec![channel.capacity_msat],
+                            ));
+                        },
+                    }
                 }
             }
         }
@@ -1588,6 +1596,7 @@ impl UtxoLookup for UtxoValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::SimulationClock;
     use crate::clock::SystemClock;
     use crate::test_utils::get_random_keypair;
     use lightning::routing::router::build_route_from_hops;
@@ -1597,6 +1606,7 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::oneshot;
     use tokio::time::{self, timeout};
+    use triggered::trigger;
 
     /// Creates a test channel policy with its maximum HTLC size set to half of the in flight limit of the channel.
     /// The minimum HTLC size is hardcoded to 2 so that we can fall beneath this value with a 1 msat htlc.
@@ -1660,6 +1670,7 @@ mod tests {
                 short_channel_id: ShortChannelID::from(i),
                 node_1: ChannelState::new(node_1_to_2, capacity_msat),
                 node_2: ChannelState::new(node_2_to_1, 0),
+                exclude_capacity: false,
             });
 
             // Progress source ID to create a chain of nodes.
@@ -1896,6 +1907,94 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn test_excluded_channel_balance() {
+        let capacity_1 = 200_000_000;
+        let capacity_2 = 300_000_000;
+
+        let pk1 = get_random_keypair().1;
+        let pk2 = get_random_keypair().1;
+        let pk3 = get_random_keypair().1;
+
+        let create_policy = |max_in_flight_msat: u64, pubkey: PublicKey| -> ChannelPolicy {
+            ChannelPolicy {
+                pubkey,
+                alias: String::default(),
+                max_htlc_count: 10,
+                max_in_flight_msat,
+                min_htlc_size_msat: 2,
+                max_htlc_size_msat: max_in_flight_msat / 2,
+                cltv_expiry_delta: 10,
+                base_fee: 1000,
+                fee_rate_prop: 5000,
+            }
+        };
+
+        let channels = vec![
+            SimulatedChannel::new(
+                capacity_1,
+                ShortChannelID::from(1),
+                create_policy(capacity_1 / 2, pk1),
+                create_policy(capacity_1 / 2, pk2),
+                false,
+            ),
+            SimulatedChannel::new(
+                capacity_2,
+                ShortChannelID::from(2),
+                create_policy(capacity_2 / 2, pk1),
+                create_policy(capacity_2 / 2, pk3),
+                true,
+            ),
+        ];
+
+        let sim_graph = Arc::new(Mutex::new(
+            SimGraph::new(
+                channels.clone(),
+                TaskTracker::new(),
+                Vec::new(),
+                CustomRecords::default(),
+                trigger(),
+            )
+            .unwrap(),
+        ));
+
+        let clock = Arc::new(SimulationClock::new(1).unwrap());
+        let routing_graph = Arc::new(populate_network_graph(channels, Arc::clone(&clock)).unwrap());
+
+        let nodes = ln_node_from_graph(sim_graph, routing_graph, clock)
+            .await
+            .unwrap();
+
+        let node_1_channels = nodes
+            .get(&pk1)
+            .unwrap()
+            .lock()
+            .await
+            .list_channels()
+            .await
+            .unwrap();
+
+        // Node 1 has 2 channels but one was excluded so here we should only have the one that was
+        // not excluded.
+        assert!(node_1_channels.len() == 1);
+        assert!(node_1_channels[0] == capacity_1);
+
+        let node_2_channels = nodes
+            .get(&pk2)
+            .unwrap()
+            .lock()
+            .await
+            .list_channels()
+            .await
+            .unwrap();
+
+        assert!(node_2_channels.len() == 1);
+        assert!(node_2_channels[0] == capacity_1);
+
+        // Node 3's only channel was excluded so it won't be present here.
+        assert!(!nodes.contains_key(&pk3));
+    }
+
     /// Tests basic functionality of a `SimulatedChannel` but does no endeavor to test the underlying
     /// `ChannelState`, as this is covered elsewhere in our tests.
     #[test]
@@ -1911,6 +2010,7 @@ mod tests {
             short_channel_id: ShortChannelID::from(123),
             node_1: node_1.clone(),
             node_2: node_2.clone(),
+            exclude_capacity: false,
         };
 
         // Assert that we're not able to send a htlc over node_2 -> node_1 (no liquidity).
