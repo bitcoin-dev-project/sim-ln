@@ -252,7 +252,7 @@ impl LightningNode for LndNode {
         }
     }
 
-    async fn list_channels(&self) -> Result<Vec<u64>, LightningError> {
+    async fn channel_capacities(&self) -> Result<u64, LightningError> {
         let mut client = self.client.lock().await;
         let channels = client
             .lightning()
@@ -268,7 +268,7 @@ impl LightningNode for LndNode {
             .channels
             .iter()
             .map(|channel| 1000 * channel.capacity as u64)
-            .collect())
+            .sum())
     }
 
     async fn get_graph(&self) -> Result<Graph, LightningError> {

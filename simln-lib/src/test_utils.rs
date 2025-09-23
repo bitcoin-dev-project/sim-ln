@@ -89,7 +89,7 @@ mock! {
                 shutdown: triggered::Listener,
             ) -> Result<crate::PaymentResult, LightningError>;
         async fn get_node_info(&self, node_id: &PublicKey) -> Result<NodeInfo, LightningError>;
-        async fn list_channels(&self) -> Result<Vec<u64>, LightningError>;
+        async fn channel_capacities(&self) -> Result<u64, LightningError>;
         async fn get_graph(&self) -> Result<Graph, LightningError>;
     }
 }

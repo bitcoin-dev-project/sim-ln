@@ -797,8 +797,9 @@ impl<T: SimNetwork, C: Clock> LightningNode for SimNode<T, C> {
         Ok(self.network.lock().await.lookup_node(node_id)?.0)
     }
 
-    async fn list_channels(&self) -> Result<Vec<u64>, LightningError> {
-        Ok(self.network.lock().await.lookup_node(&self.info.pubkey)?.1)
+    async fn channel_capacities(&self) -> Result<u64, LightningError> {
+        let channels = self.network.lock().await.lookup_node(&self.info.pubkey)?;
+        Ok(channels.1.iter().sum())
     }
 
     async fn get_graph(&self) -> Result<Graph, LightningError> {
@@ -1965,31 +1966,16 @@ mod tests {
             .await
             .unwrap();
 
-        let node_1_channels = nodes
-            .get(&pk1)
-            .unwrap()
-            .lock()
-            .await
-            .list_channels()
-            .await
-            .unwrap();
+        let node_1 = nodes.get(&pk1).unwrap().lock().await;
+        let node_1_capacity = node_1.channel_capacities().await.unwrap();
 
         // Node 1 has 2 channels but one was excluded so here we should only have the one that was
         // not excluded.
-        assert!(node_1_channels.len() == 1);
-        assert!(node_1_channels[0] == capacity_1);
+        assert!(node_1_capacity == capacity_1);
 
-        let node_2_channels = nodes
-            .get(&pk2)
-            .unwrap()
-            .lock()
-            .await
-            .list_channels()
-            .await
-            .unwrap();
-
-        assert!(node_2_channels.len() == 1);
-        assert!(node_2_channels[0] == capacity_1);
+        let node_2 = nodes.get(&pk2).unwrap().lock().await;
+        let node_2_capacity = node_2.channel_capacities().await.unwrap();
+        assert!(node_2_capacity == capacity_1);
 
         // Node 3's only channel was excluded so it won't be present here.
         assert!(!nodes.contains_key(&pk3));
@@ -2103,12 +2089,17 @@ mod tests {
             .lock()
             .await
             .expect_lookup_node()
-            .returning(move |_| Ok((node_info(lookup_pk, String::default()), vec![1, 2, 3])));
+            .returning(move |_| {
+                Ok((
+                    node_info(lookup_pk, String::default()),
+                    vec![10_000, 20_000, 10_000],
+                ))
+            });
 
         // Assert that we get three channels from the mock.
         let node_info = node.get_node_info(&lookup_pk).await.unwrap();
         assert_eq!(lookup_pk, node_info.pubkey);
-        assert_eq!(node.list_channels().await.unwrap().len(), 3);
+        assert_eq!(node.channel_capacities().await.unwrap(), 40_000);
 
         // Next, we're going to test handling of in-flight payments. To do this, we'll mock out calls to our dispatch
         // function to send different results depending on the destination.
