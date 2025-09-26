@@ -222,7 +222,7 @@ impl LightningNode for EclairNode {
         })
     }
 
-    async fn list_channels(&self) -> Result<Vec<u64>, LightningError> {
+    async fn channel_capacities(&self) -> Result<u64, LightningError> {
         let client = self.client.lock().await;
         let channels: ChannelsResponse = client
             .request("channels", None)
@@ -242,7 +242,7 @@ impl LightningNode for EclairNode {
             })
             .collect();
 
-        Ok(capacities_msat)
+        Ok(capacities_msat.iter().sum())
     }
 
     async fn get_graph(&self) -> Result<Graph, LightningError> {

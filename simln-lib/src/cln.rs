@@ -264,10 +264,10 @@ impl LightningNode for ClnNode {
         }
     }
 
-    async fn list_channels(&self) -> Result<Vec<u64>, LightningError> {
+    async fn channel_capacities(&self) -> Result<u64, LightningError> {
         let mut node_channels = self.node_channels(true).await?;
         node_channels.extend(self.node_channels(false).await?);
-        Ok(node_channels)
+        Ok(node_channels.iter().sum())
     }
 
     async fn get_graph(&self) -> Result<Graph, LightningError> {

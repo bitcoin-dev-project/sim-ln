@@ -343,9 +343,9 @@ pub trait LightningNode: Send {
     ) -> Result<PaymentResult, LightningError>;
     /// Gets information on a specific node.
     async fn get_node_info(&self, node_id: &PublicKey) -> Result<NodeInfo, LightningError>;
-    /// Lists all channels, at present only returns a vector of channel capacities in msat because no further
-    /// information is required.
-    async fn list_channels(&self) -> Result<Vec<u64>, LightningError>;
+    /// Sum of channel capacities. This is used when running with random activity generation to
+    /// determine how much the node will send per month.
+    async fn channel_capacities(&self) -> Result<u64, LightningError>;
     /// Get the network graph from the point of view of a given node.
     async fn get_graph(&self) -> Result<Graph, LightningError>;
 }
@@ -1003,7 +1003,7 @@ impl<C: Clock + 'static> Simulation<C> {
         // While we're at it, we get the node info and store it with capacity to create activity generators in our
         // second pass.
         for (pk, node) in self.nodes.iter() {
-            let chan_capacity = node.lock().await.list_channels().await?.iter().sum::<u64>();
+            let chan_capacity = node.lock().await.channel_capacities().await?;
 
             if let Err(e) = RandomPaymentActivity::validate_capacity(
                 chan_capacity,
@@ -1935,8 +1935,8 @@ mod tests {
             .expect_get_network()
             .returning(|| Network::Regtest);
         mock_node
-            .expect_list_channels()
-            .returning(|| Ok(vec![100_000_000]));
+            .expect_channel_capacities()
+            .returning(|| Ok(100_000_000));
         mock_node
             .expect_get_node_info()
             .returning(move |_| Ok(node_info.clone()));

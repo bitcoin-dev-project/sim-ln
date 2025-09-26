@@ -301,7 +301,7 @@ pub async fn create_simulation_with_network(
     ));
 
     // Copy all simulated channels into a read-only routing graph, allowing to pathfind for
-    // individual payments without locking th simulation graph (this is a duplication of the channels,
+    // individual payments without locking the simulation graph (this is a duplication of the channels,
     // but the performance tradeoff is worthwhile for concurrent pathfinding).
     let routing_graph = Arc::new(
         populate_network_graph(channels, clock.clone())
@@ -312,7 +312,7 @@ pub async fn create_simulation_with_network(
     // custom actions on the simulated network. For the nodes we'll pass our simulation, cast them
     // to a dyn trait and exclude any nodes that shouldn't be included in random activity
     // generation.
-    let nodes = ln_node_from_graph(simulation_graph.clone(), routing_graph, clock.clone()).await?;
+    let nodes = ln_node_from_graph(simulation_graph, routing_graph, clock.clone()).await?;
     let mut nodes_dyn: HashMap<_, Arc<Mutex<dyn LightningNode>>> = nodes
         .iter()
         .map(|(pk, node)| (*pk, Arc::clone(node) as Arc<Mutex<dyn LightningNode>>))
