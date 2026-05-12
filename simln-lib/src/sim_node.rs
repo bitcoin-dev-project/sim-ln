@@ -537,21 +537,33 @@ pub trait PathFinder: Send + Sync + Clone {
 }
 
 /// The default pathfinding implementation that uses LDK's built-in pathfinding algorithm.
-#[derive(Clone)]
 pub struct DefaultPathFinder {
-    scorer: Arc<Mutex<ProbabilisticScorer<Arc<LdkNetworkGraph>, Arc<WrappedLog>>>>,
+    scorer: Mutex<ProbabilisticScorer<Arc<LdkNetworkGraph>, Arc<WrappedLog>>>,
     network_graph: Arc<LdkNetworkGraph>,
 }
 
 impl DefaultPathFinder {
     pub fn new(network_graph: Arc<LdkNetworkGraph>) -> Self {
         Self {
-            scorer: Arc::new(Mutex::new(ProbabilisticScorer::new(
+            scorer: Mutex::new(ProbabilisticScorer::new(
                 ProbabilisticScoringDecayParameters::default(),
                 network_graph.clone(),
                 Arc::new(WrappedLog {}),
-            ))),
+            )),
             network_graph,
+        }
+    }
+}
+
+impl Clone for DefaultPathFinder {
+    fn clone(&self) -> Self {
+        DefaultPathFinder {
+            scorer: Mutex::new(ProbabilisticScorer::new(
+                ProbabilisticScoringDecayParameters::default(),
+                self.network_graph.clone(),
+                Arc::new(WrappedLog {}),
+            )),
+            network_graph: self.network_graph.clone(),
         }
     }
 }
