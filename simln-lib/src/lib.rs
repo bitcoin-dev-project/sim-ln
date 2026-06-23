@@ -564,7 +564,8 @@ impl MutRng {
 /// Contains the configuration options for our simulation.
 #[derive(Clone)]
 pub struct SimulationCfg {
-    /// Total simulation time. The simulation will run forever if undefined.
+    /// Total simulation time. This value must be set if running with `virtual-time`. If running with a regular wall
+    /// clock, the simulation will run forever if this value is not set.
     total_time: Option<time::Duration>,
     /// The expected payment size for the network.
     expected_payment_msat: u64,
