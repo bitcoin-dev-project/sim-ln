@@ -644,7 +644,12 @@ struct ExecutorPaymentTracker {
 
 impl Ord for PaymentEvent {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.execution_time.cmp(&other.execution_time)
+        // Order primarily by execution time, then break ties on the source node's public key. The heap only ever holds
+        // at most one event per source at a time, so `(execution_time, source)` is a total order. Without the tie-break,
+        // events scheduled for the same instant pop in an unspecified order, which makes runs non-reproducible.
+        self.execution_time
+            .cmp(&other.execution_time)
+            .then_with(|| self.source.cmp(&other.source))
     }
 }
 
@@ -656,7 +661,7 @@ impl PartialOrd for PaymentEvent {
 
 impl PartialEq for PaymentEvent {
     fn eq(&self, other: &Self) -> bool {
-        self.execution_time == other.execution_time
+        self.execution_time == other.execution_time && self.source == other.source
     }
 }
 
@@ -1667,6 +1672,39 @@ mod tests {
         }
 
         assert_eq!(seq1, seq1_again);
+    }
+
+    #[test]
+    fn test_payment_event_orders_ties_by_source() {
+        use crate::PaymentEvent;
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
+        use std::time::{Duration, SystemTime};
+
+        let nodes = test_utils::create_nodes(2, 100_000);
+        let (mut low, mut high) = (nodes[0].0.clone(), nodes[1].0.clone());
+        // Order our two nodes so that `low` has the smaller public key.
+        if low.pubkey > high.pubkey {
+            std::mem::swap(&mut low, &mut high);
+        }
+
+        let when = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
+        let event = |source: &NodeInfo, destination: &NodeInfo| PaymentEvent {
+            source: source.pubkey,
+            execution_time: when,
+            destination: destination.clone(),
+            amount: 1_000,
+        };
+
+        // Push the higher-keyed source first to prove that pop order is decided by the tie-break, not by
+        // insertion order.
+        let mut heap: BinaryHeap<Reverse<PaymentEvent>> = BinaryHeap::new();
+        heap.push(Reverse(event(&high, &low)));
+        heap.push(Reverse(event(&low, &high)));
+
+        // Both events share an execution time, so the min-heap must pop the smaller public key first.
+        assert_eq!(heap.pop().unwrap().0.source, low.pubkey);
+        assert_eq!(heap.pop().unwrap().0.source, high.pubkey);
     }
 
     mock! {
