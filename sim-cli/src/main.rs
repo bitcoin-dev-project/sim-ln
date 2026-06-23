@@ -39,7 +39,10 @@ async fn main() -> anyhow::Result<()> {
     } else {
         let latency = cli.latency_ms.unwrap_or(0);
         let interceptors = if latency > 0 {
-            vec![Arc::new(LatencyIntercepor::new_poisson(latency as f32)?) as Arc<dyn Interceptor>]
+            vec![Arc::new(LatencyIntercepor::new_poisson(
+                latency as f32,
+                cli.fix_seed,
+            )?) as Arc<dyn Interceptor>]
         } else {
             vec![]
         };
