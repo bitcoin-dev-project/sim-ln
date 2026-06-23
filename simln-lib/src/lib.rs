@@ -1195,12 +1195,14 @@ async fn produce_payment_events<C: Clock>(
                             _ = pe_clock.sleep(wait_time) => {
                                 generate_payment(&mut heap, source, &mut payments_tracker, clock.now()).await?;
 
+                                // Stamp the dispatch time from the simulation clock now that the wait has elapsed.
+                                let dispatch_time = pe_clock.now();
                                 tasks.spawn(async move {
                                     log::debug!("Generated payment: {source} -> {}: {amount} msat.", destination);
 
                                     // Send the payment, exiting if we can no longer send to the consumer.
                                     let event = SimulationEvent::SendPayment(destination.clone(), amount);
-                                    if let Err(e) = send_payment(node, pe_output_sender, event.clone()).await {
+                                    if let Err(e) = send_payment(node, pe_output_sender, event.clone(), dispatch_time).await {
                                         pe_shutdown.trigger();
                                         log::debug!("Not able to send event payment for {amount}: {source} -> {}. Exited with error {e}.", destination);
                                     } else {
@@ -1275,6 +1277,7 @@ async fn send_payment(
     node: Arc<Mutex<dyn LightningNode>>,
     sender: Sender<SimulationOutput>,
     simulation_event: SimulationEvent,
+    dispatch_time: SystemTime,
 ) -> Result<(), SimulationError> {
     match simulation_event {
         SimulationEvent::SendPayment(dest, amt_msat) => {
@@ -1285,7 +1288,9 @@ async fn send_payment(
                 hash: None,
                 amount_msat: amt_msat,
                 destination: dest.pubkey,
-                dispatch_time: SystemTime::now(),
+                // Take the dispatch time from the simulation clock rather than the wall clock, so that it advances with
+                // virtual time under discrete-event simulation and stays reproducible across runs.
+                dispatch_time,
             };
 
             let outcome = match node.send_payment(dest.pubkey, amt_msat).await {
