@@ -1514,6 +1514,7 @@ async fn produce_simulation_results(
                     },
                     SimulationOutput::SendPaymentFailure(payment, result) => {
                         select! {
+                            biased;
                             _ = listener.clone() => {
                                 return Ok(());
                             },
