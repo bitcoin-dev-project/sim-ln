@@ -38,6 +38,8 @@ pub mod eclair;
 pub mod latency_interceptor;
 pub mod lnd;
 mod random_activity;
+#[cfg(feature = "virtual-time")]
+pub mod runtime;
 pub mod serializers;
 pub mod sim_node;
 mod test_utils;
@@ -229,6 +231,9 @@ pub enum SimulationError {
     /// Error that occurred while generating destination nodes.
     #[error("Destination Generation Error: {0}")]
     DestinationGenerationError(DestinationGenerationError),
+    /// Error that occurred while building or driving the virtual-time runtime.
+    #[error("Runtime Error: {0}")]
+    RuntimeError(String),
 }
 
 /// Represents errors that can occur during Lightning Network operations.
