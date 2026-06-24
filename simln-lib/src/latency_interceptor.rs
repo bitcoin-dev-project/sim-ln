@@ -3,7 +3,9 @@ use crate::sim_node::{
 };
 use crate::SimulationError;
 use async_trait::async_trait;
+use rand::{rngs::StdRng, SeedableRng};
 use rand_distr::{Distribution, Poisson};
+use std::sync::Mutex;
 use std::time::Duration;
 use tokio::{select, time};
 
@@ -13,17 +15,31 @@ where
     D: Distribution<f32> + Send + Sync,
 {
     latency_dist: D,
+    /// Seedable RNG used to sample the latency distribution. Held behind a mutex because the interceptor is shared
+    /// across concurrent HTLCs, and seeded (rather than `thread_rng`) so that simulation runs are reproducible.
+    rng: Mutex<StdRng>,
 }
 
 impl LatencyIntercepor<Poisson<f32>> {
-    pub fn new_poisson(lambda_ms: f32) -> Result<Self, SimulationError> {
+    /// Creates a latency interceptor that samples delays from a Poisson distribution. If `seed` is provided the
+    /// sampled latencies are reproducible; otherwise the RNG is seeded from entropy.
+    pub fn new_poisson(lambda_ms: f32, seed: Option<u64>) -> Result<Self, SimulationError> {
         let poisson_dist = Poisson::new(lambda_ms).map_err(|e| {
             SimulationError::SimulatedNetworkError(format!("Could not create possion: {e}"))
         })?;
 
         Ok(Self {
             latency_dist: poisson_dist,
+            rng: Mutex::new(seeded_rng(seed)),
         })
+    }
+}
+
+/// Builds an RNG from an optional seed, falling back to entropy when no seed is provided.
+fn seeded_rng(seed: Option<u64>) -> StdRng {
+    match seed {
+        Some(seed) => StdRng::seed_from_u64(seed),
+        None => StdRng::from_entropy(),
     }
 }
 
@@ -37,7 +53,13 @@ where
         &self,
         req: InterceptRequest,
     ) -> Result<Result<CustomRecords, ForwardingError>, CriticalError> {
-        let latency = self.latency_dist.sample(&mut rand::thread_rng());
+        let latency = {
+            let mut rng = self
+                .rng
+                .lock()
+                .expect("latency interceptor RNG lock poisoned");
+            self.latency_dist.sample(&mut *rng)
+        };
 
         select! {
             _ = req.shutdown_listener => log::debug!("Latency interceptor exiting due to shutdown signal received."),
@@ -62,7 +84,9 @@ mod tests {
     use lightning::ln::PaymentHash;
     use ntest::assert_true;
     use rand::distributions::Distribution;
-    use rand::Rng;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+    use std::sync::Mutex;
     use tokio::time::timeout;
     use triggered::Trigger;
 
@@ -105,7 +129,10 @@ mod tests {
     async fn test_shutdown_signal() {
         // Set fixed dist to a high value so that the test won't flake.
         let latency_dist = ConstantDistribution { value: 1000.0 };
-        let interceptor = LatencyIntercepor { latency_dist };
+        let interceptor = LatencyIntercepor {
+            latency_dist,
+            rng: Mutex::new(StdRng::seed_from_u64(0)),
+        };
 
         let (request, trigger) = test_request();
         trigger.trigger();
@@ -121,7 +148,10 @@ mod tests {
     #[tokio::test]
     async fn test_latency_response() {
         let latency_dist = ConstantDistribution { value: 0.0 };
-        let interceptor = LatencyIntercepor { latency_dist };
+        let interceptor = LatencyIntercepor {
+            latency_dist,
+            rng: Mutex::new(StdRng::seed_from_u64(0)),
+        };
 
         let (request, _) = test_request();
         // We should return immediately because timeout is zero.

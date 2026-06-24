@@ -964,6 +964,7 @@ async fn handle_intercepted_htlc(
     let mut interceptor_failure = None;
     'get_resp: loop {
         tokio::select! {
+            biased;
             res = intercepts.join_next() => {
                 let res = match res {
                     Some(res) => res,
