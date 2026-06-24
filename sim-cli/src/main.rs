@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use clap::Parser;
 use log::LevelFilter;
@@ -47,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
             vec![]
         };
         let sim_cfg: SimulationCfg = SimulationCfg::try_from(&cli)?;
-        let clock = Arc::new(SimulationClock::new(cli.speedup_clock.unwrap_or(1))?);
+        let clock = Arc::new(SimulationClock::new(SystemTime::now()));
         let (sim, validated_activities, _) = create_simulation_with_network(
             sim_cfg,
             &sim_params,

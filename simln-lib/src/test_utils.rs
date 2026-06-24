@@ -7,11 +7,12 @@ use mockall::mock;
 use rand::distributions::Uniform;
 use rand::Rng;
 use std::collections::HashMap;
+use std::time::SystemTime;
 use std::{fmt, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 use tokio_util::task::TaskTracker;
 
-use crate::clock::SystemClock;
+use crate::clock::SimulationClock;
 use crate::{
     ActivityDefinition, Graph, LightningError, LightningNode, NodeInfo, PaymentGenerationError,
     PaymentGenerator, Simulation, SimulationCfg, ValueOrRange,
@@ -225,13 +226,13 @@ impl LightningTestNodeBuilder {
 /// Note: This sets a runtime for the simulation of 0, so run() will exit immediately.
 pub fn create_simulation(
     clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
-) -> Simulation<SystemClock> {
+) -> Simulation<SimulationClock> {
     let (shutdown_trigger, shutdown_listener) = triggered::trigger();
     Simulation::new(
         SimulationCfg::new(Some(0), 0, 0.0, None, None),
         clients,
         TaskTracker::new(),
-        Arc::new(SystemClock {}),
+        Arc::new(SimulationClock::new(SystemTime::now())),
         shutdown_trigger,
         shutdown_listener,
     )

@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::SystemTime;
 use tokio::sync::Mutex;
 use tokio_util::task::TaskTracker;
 
@@ -84,10 +85,6 @@ pub struct Cli {
     /// Seed to run random activity generator deterministically
     #[clap(long, short)]
     pub fix_seed: Option<u64>,
-    /// A multiplier to wall time to speed up the simulation's clock. Only available when when running on a network of
-    /// simulated nodes.
-    #[clap(long)]
-    pub speedup_clock: Option<u16>,
     /// Latency to optionally introduce for payments in a simulated network expressed in
     /// milliseconds.
     #[clap(long)]
@@ -111,12 +108,6 @@ impl Cli {
                 nodes or sim_graph to run with simulated nodes"
             ));
         }
-        if !sim_params.nodes.is_empty() && self.speedup_clock.is_some() {
-            return Err(anyhow!(
-                "Clock speedup is only allowed when running on a simulated network"
-            ));
-        }
-
         if !sim_params.nodes.is_empty() && self.latency_ms.is_some() {
             return Err(anyhow!(
                 "Latency for payments is only allowed when running on a simulated network"
@@ -364,9 +355,7 @@ pub async fn create_simulation(
             cfg,
             clients,
             tasks,
-            // When running on a real network, the underlying node may use wall time so we always use a clock with no
-            // speedup.
-            Arc::new(SimulationClock::new(1)?),
+            Arc::new(SimulationClock::new(SystemTime::now())),
             shutdown_trigger,
             shutdown_listener,
         ),

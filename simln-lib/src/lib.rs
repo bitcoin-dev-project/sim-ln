@@ -1603,7 +1603,7 @@ async fn track_payment_result(
 
 #[cfg(test)]
 mod tests {
-    use crate::clock::SystemClock;
+    use crate::clock::SimulationClock;
     use crate::test_utils::{MockLightningNode, TestNodesResult};
     use crate::{
         get_payment_delay, test_utils, test_utils::LightningTestNodeBuilder, LightningError,
@@ -1618,7 +1618,7 @@ mod tests {
     use std::str::FromStr;
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime};
     use tokio::sync::Mutex;
     use tokio_util::task::TaskTracker;
 
@@ -2079,7 +2079,7 @@ mod tests {
             SimulationCfg::new(None, 100, 2.0, None, None),
             network.get_client_hashmap(),
             TaskTracker::new(),
-            Arc::new(SystemClock {}),
+            Arc::new(SimulationClock::new(SystemTime::now())),
             shutdown_trigger,
             shutdown_listener,
         );
@@ -2147,7 +2147,7 @@ mod tests {
             SimulationCfg::new(Some(25), 100, 2.0, None, Some(42)),
             network.get_client_hashmap(),
             TaskTracker::new(),
-            Arc::new(SystemClock {}),
+            Arc::new(SimulationClock::new(SystemTime::now())),
             shutdown_trigger,
             shutdown_listener,
         );
@@ -2183,7 +2183,7 @@ mod tests {
             SimulationCfg::new(Some(25), 100, 2.0, None, Some(500)),
             network.get_client_hashmap(),
             TaskTracker::new(),
-            Arc::new(SystemClock {}),
+            Arc::new(SimulationClock::new(SystemTime::now())),
             shutdown_trigger,
             shutdown_listener,
         );
