@@ -518,7 +518,7 @@ async fn validate_activities(
     Ok(validated_activities)
 }
 
-async fn read_sim_path(data_dir: PathBuf, sim_file: PathBuf) -> anyhow::Result<PathBuf> {
+fn read_sim_path(data_dir: PathBuf, sim_file: PathBuf) -> anyhow::Result<PathBuf> {
     if sim_file.exists() {
         Ok(sim_file)
     } else if sim_file.is_relative() {
@@ -527,15 +527,15 @@ async fn read_sim_path(data_dir: PathBuf, sim_file: PathBuf) -> anyhow::Result<P
             Ok(sim_path)
         } else {
             log::info!("Simulation file '{}' does not exist.", sim_path.display());
-            select_sim_file(data_dir).await
+            select_sim_file(data_dir)
         }
     } else {
         log::info!("Simulation file '{}' does not exist.", sim_file.display());
-        select_sim_file(data_dir).await
+        select_sim_file(data_dir)
     }
 }
 
-pub async fn select_sim_file(data_dir: PathBuf) -> anyhow::Result<PathBuf> {
+pub fn select_sim_file(data_dir: PathBuf) -> anyhow::Result<PathBuf> {
     let sim_files = std::fs::read_dir(data_dir.clone())?
         .filter_map(|f| {
             f.ok().and_then(|f| {
@@ -572,8 +572,8 @@ fn mkdir(dir: PathBuf) -> anyhow::Result<PathBuf> {
     Ok(dir)
 }
 
-pub async fn parse_sim_params(cli: &Cli) -> anyhow::Result<SimParams> {
-    let sim_path = read_sim_path(cli.data_dir.clone(), cli.sim_file.clone()).await?;
+pub fn parse_sim_params(cli: &Cli) -> anyhow::Result<SimParams> {
+    let sim_path = read_sim_path(cli.data_dir.clone(), cli.sim_file.clone())?;
     let sim_params = serde_json::from_str(&std::fs::read_to_string(sim_path)?).map_err(|e| {
         anyhow!(
             "Could not deserialize node connection data or activity description from simulation file (line {}, col {}, err: {}).",

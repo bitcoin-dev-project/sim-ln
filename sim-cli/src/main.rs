@@ -22,7 +22,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let cli = Cli::parse();
-    let sim_params = parse_sim_params(&cli).await?;
+    let sim_params = parse_sim_params(&cli)?;
 
     SimpleLogger::new()
         .with_level(LevelFilter::Warn)
