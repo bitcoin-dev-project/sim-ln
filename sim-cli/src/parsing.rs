@@ -9,9 +9,9 @@ use simln_lib::sim_node::{
     SimGraph, SimNode, SimulatedChannel,
 };
 use simln_lib::{
-    cln, cln::ClnNode, eclair, eclair::EclairNode, lnd, lnd::LndNode, serializers,
-    ActivityDefinition, Amount, Interval, LightningError, LightningNode, NodeId, NodeInfo,
-    Simulation, SimulationCfg, WriteResults,
+    cln, cln::ClnNode, eclair, eclair::EclairNode, ldk_server, ldk_server::LdkServerNode, lnd,
+    lnd::LndNode, serializers, ActivityDefinition, Amount, Interval, LightningError, LightningNode,
+    NodeId, NodeInfo, Simulation, SimulationCfg, WriteResults,
 };
 use simln_lib::{ShortChannelID, SimulationError};
 use std::collections::HashMap;
@@ -160,6 +160,7 @@ pub enum NodeConnection {
     Lnd(lnd::LndConnection),
     Cln(cln::ClnConnection),
     Eclair(eclair::EclairConnection),
+    LdkServer(ldk_server::LdkServerConnection),
 }
 
 /// Data structure that is used to parse information from the simulation file. It is used to
@@ -396,6 +397,7 @@ async fn get_clients(
             NodeConnection::Lnd(c) => Arc::new(Mutex::new(LndNode::new(c).await?)),
             NodeConnection::Cln(c) => Arc::new(Mutex::new(ClnNode::new(c).await?)),
             NodeConnection::Eclair(c) => Arc::new(Mutex::new(EclairNode::new(c).await?)),
+            NodeConnection::LdkServer(c) => Arc::new(Mutex::new(LdkServerNode::new(c).await?)),
         };
 
         let node_info = node.lock().await.get_info().clone();

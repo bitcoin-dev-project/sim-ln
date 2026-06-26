@@ -36,6 +36,7 @@ pub mod clock;
 mod defined_activity;
 pub mod eclair;
 pub mod latency_interceptor;
+pub mod ldk_server;
 pub mod lnd;
 mod random_activity;
 pub mod serializers;

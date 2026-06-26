@@ -16,7 +16,7 @@ lightning network development. It may be useful to you if you are:
 * LND ✅
 * CLN ✅
 * Eclair ✅️
-* LDK-node 🏗️
+* LDK-Server ✅
 
 See our [tracking issue](https://github.com/bitcoin-dev-project/sim-ln/issues/26)
 for updates on implementation support (contributions welcome!).
@@ -36,6 +36,7 @@ of the simulator uses keysend to execute payments, which must be enabled as foll
 * LND: `--accept-keysend`
 * CLN: enabled by default
 * Eclair: `-Declair.features.keysend=optional` (or `--features.keysend=optional` if you're using Polar)
+* LDK-Server: enabled by default via `spontaneous_send`
 
 NOTE: for CLN `keysend` to work with eclair, you need to add additional config to eclair:
 ```
@@ -98,6 +99,23 @@ The required access details will depend on the node implementation.
   "api_password": <password_to_authorize>
 }
 ```
+* LDK-Server:
+```
+{
+  "address": <ip:port or domain:port>,
+  "api_key": <hex_encoded_api_key>,
+  "cert": <path_to_tls_cert>
+}
+```
+The `api_key` is the raw bytes of `~/.ldk-server/<network>/api_key` hex-encoded.
+Unlike other backends, ldk-server does not require an `id` field — the node's
+public key and network are fetched automatically on startup.
+
+Note: ldk-server channels are **unannounced by default**. Pass `--announce-channel`
+to `open-channel` (and set `announcement_addresses` in the ldk-server config) to
+make channels public and visible to other nodes for routing. Also ldk-server enforces a minimum final CLTV expiry delta
+of **144 blocks** on inbound keysend payments. Ensure that sending nodes are configured with a sufficiently high final
+CLTV delta.
 
 Payment activity can be simulated in two different ways:
 * [Random activity](#setup---random-activity): generate random activity on the `nodes` provided, 
@@ -135,6 +153,11 @@ to send and receive payments when running with random activity.
       "base_url": "127.0.0.1:8286",
       "api_username": "",
       "api_password": "eclairpw"
+    },
+    {
+      "address": "localhost:3536",
+      "api_key": "ldk_server_hex_encoded_api_key",
+      "cert": "/path/tls.crt"
     }
   ]
 }
