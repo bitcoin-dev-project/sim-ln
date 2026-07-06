@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use simln_lib::clock::SimulationClock;
 use simln_lib::sim_node::{
     ln_node_from_graph, populate_network_graph, ChannelPolicy, CustomRecords, Interceptor,
-    SimGraph, SimNode, SimulatedChannel,
+    RebalanceConfig, SimGraph, SimNode, SimulatedChannel,
 };
 use simln_lib::{
     cln, cln::ClnNode, eclair, eclair::EclairNode, lnd, lnd::LndNode, serializers,
@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio_util::task::TaskTracker;
 
@@ -138,6 +139,12 @@ impl Cli {
             }
         }
 
+        if sim_params.rebalance.is_some() && sim_params.sim_network.is_empty() {
+            return Err(anyhow!(
+                "Rebalancing is only allowed on a simulated network"
+            ));
+        }
+
         Ok(())
     }
 }
@@ -152,6 +159,34 @@ pub struct SimParams {
     pub activity: Vec<ActivityParser>,
     #[serde(default)]
     pub exclude: Vec<PublicKey>,
+    #[serde(default)]
+    pub rebalance: Option<RebalanceParser>,
+}
+
+/// Default fraction of channel capacity beneath which a channel side triggers a rebalance.
+fn default_rebalance_trigger() -> f64 {
+    0.1
+}
+
+/// Default number of seconds between rebalancing scans of the simulated network (one hour).
+fn default_rebalance_interval() -> u64 {
+    3600
+}
+
+/// Data structure that is used to parse rebalancing configuration for simulated networks from the simulation
+/// file. When present, channels in the simulated network whose available liquidity has drawn down beneath a
+/// trigger fraction of their capacity are periodically reset to an even split, modeling the out-of-band actions
+/// (circular rebalances, swaps, splices) that node operators take to restore liquidity. When absent, channels
+/// deplete naturally under the simulation's payment flows.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RebalanceParser {
+    /// The fraction of a channel's capacity beneath which a side's available balance triggers a rebalance,
+    /// exclusively between 0 and 0.5.
+    #[serde(default = "default_rebalance_trigger")]
+    pub trigger_below: f64,
+    /// The number of seconds between scans of the network's channels.
+    #[serde(default = "default_rebalance_interval")]
+    pub interval_secs: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -260,6 +295,7 @@ pub async fn create_simulation_with_network(
         sim_network,
         activity: _activity,
         exclude,
+        rebalance,
     } = sim_params;
 
     // Convert nodes representation for parsing to SimulatedChannel
@@ -299,6 +335,21 @@ pub async fn create_simulation_with_network(
         )
         .map_err(|e| SimulationError::SimulatedNetworkError(format!("{:?}", e)))?,
     ));
+
+    // If the user has opted into rebalancing, spawn a task that will periodically reset channels whose
+    // liquidity has drawn down. Without this, the network's channels will progressively deplete under the
+    // simulation's payment flows.
+    if let Some(rebalance) = rebalance {
+        let rebalance_cfg = RebalanceConfig::new(
+            rebalance.trigger_below,
+            Duration::from_secs(rebalance.interval_secs),
+        )?;
+
+        simulation_graph
+            .lock()
+            .await
+            .start_rebalancer(clock.clone(), rebalance_cfg);
+    }
 
     // Copy all simulated channels into a read-only routing graph, allowing to pathfind for
     // individual payments without locking the simulation graph (this is a duplication of the channels,
@@ -351,6 +402,7 @@ pub async fn create_simulation(
         sim_network: _sim_network,
         activity: _activity,
         exclude: _,
+        rebalance: _,
     } = sim_params;
 
     let (clients, clients_info) = get_clients(nodes.to_vec()).await?;
