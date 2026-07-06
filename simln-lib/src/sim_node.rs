@@ -27,6 +27,7 @@ use lightning::routing::scoring::{
 };
 use lightning::routing::utxo::{UtxoLookup, UtxoResult};
 use lightning::util::logger::{Level, Logger, Record};
+use std::time::Duration;
 use thiserror::Error;
 use tokio::select;
 use tokio::sync::oneshot::{channel, Receiver, Sender};
@@ -423,8 +424,6 @@ impl SimulatedChannel {
     /// Only the settled portion of the channel's capacity is redistributed; balance locked in in-flight HTLCs is
     /// left untouched and will settle to one side or the other as usual, preserving the channel's accounting
     /// invariant (the sides' local balances and in-flight totals always sum to the channel capacity).
-    // TODO: temporary allow until the rebalancing task that calls this lands in the next commit.
-    #[allow(dead_code)]
     fn rebalance_if_depleted(&mut self, trigger_below_fraction: f64) -> Option<u64> {
         let threshold = (self.capacity_msat as f64 * trigger_below_fraction) as u64;
         if self.node_1.local_balance_msat >= threshold
@@ -1052,6 +1051,40 @@ async fn handle_intercepted_htlc(
     Ok(Ok(attached_custom_records))
 }
 
+/// Configuration for optional "teleport" rebalancing of simulated channels, which periodically resets channels
+/// whose available liquidity has drawn down. See [`SimGraph::start_rebalancer`].
+#[derive(Clone, Copy, Debug)]
+pub struct RebalanceConfig {
+    /// The fraction of a channel's total capacity beneath which a side's available balance triggers a rebalance.
+    trigger_below_fraction: f64,
+    /// The time between scans of the network's channels.
+    interval: Duration,
+}
+
+impl RebalanceConfig {
+    /// Creates a new rebalancing configuration, validating that the trigger fraction is in (0, 0.5) and that the
+    /// scan interval is non-zero. The trigger must be beneath 0.5 because both sides of a channel cannot be at or
+    /// above half of its capacity, so any higher value would rebalance every channel on every scan.
+    pub fn new(trigger_below_fraction: f64, interval: Duration) -> Result<Self, SimulationError> {
+        if !(trigger_below_fraction > 0.0 && trigger_below_fraction < 0.5) {
+            return Err(SimulationError::SimulatedNetworkError(format!(
+                "rebalance trigger fraction must be in (0, 0.5), got: {trigger_below_fraction}"
+            )));
+        }
+
+        if interval.is_zero() {
+            return Err(SimulationError::SimulatedNetworkError(
+                "rebalance interval must be non-zero".to_string(),
+            ));
+        }
+
+        Ok(RebalanceConfig {
+            trigger_below_fraction,
+            interval,
+        })
+    }
+}
+
 /// Graph is the top level struct that is used to coordinate simulation of lightning nodes.
 pub struct SimGraph {
     /// nodes caches the list of nodes in the network with a vector of their channel ids, only used for quick
@@ -1127,6 +1160,55 @@ impl SimGraph {
             default_custom_records,
             shutdown_signal,
         })
+    }
+
+    /// Spawns a task that periodically "teleport" rebalances simulated channels whose available liquidity has
+    /// drawn down beneath the configured trigger, resetting them to an even split of their settled balance. This
+    /// is an opt-in escape hatch for long-running simulations: without any restoring force, random payment
+    /// activity progressively drains channels to one side and payment success rates decay, whereas real node
+    /// operators counteract depletion with out-of-band actions (circular rebalances, swaps, splices) that a
+    /// payment-only simulator cannot express directly.
+    ///
+    /// The task introduces no new source of randomness to the simulation: scans happen at a fixed interval on
+    /// the simulation clock, channels are visited in stable short channel ID order and the rebalance itself
+    /// involves no randomness. Each rebalance is logged with the amount moved, so the total volume of
+    /// intervention needed to keep the network liquid is observable in the simulation's logs.
+    ///
+    /// The task runs until the simulation's shutdown signal is triggered.
+    pub fn start_rebalancer<C: Clock + 'static>(&self, clock: Arc<C>, cfg: RebalanceConfig) {
+        let channels = Arc::clone(&self.channels);
+        let listener = self.shutdown_signal.1.clone();
+
+        self.tasks.spawn(async move {
+            log::info!(
+                "Started channel rebalancer: triggering below {} of channel capacity, scanning every {:?}.",
+                cfg.trigger_below_fraction,
+                cfg.interval
+            );
+
+            loop {
+                select! {
+                    _ = listener.clone() => {
+                        log::debug!("Channel rebalancer received shutdown signal.");
+                        return;
+                    },
+                    _ = clock.sleep(cfg.interval) => {},
+                }
+
+                let mut channels_lock = channels.lock().await;
+                let mut scids: Vec<ShortChannelID> = channels_lock.keys().copied().collect();
+                scids.sort_unstable();
+
+                for scid in scids {
+                    // Unwrap is safe because the key was drawn from the map and the lock is held throughout.
+                    let channel = channels_lock.get_mut(&scid).unwrap();
+                    if let Some(moved_msat) = channel.rebalance_if_depleted(cfg.trigger_below_fraction)
+                    {
+                        log::info!("Rebalanced channel: {scid}, moved {moved_msat} msat.");
+                    }
+                }
+            }
+        });
     }
 }
 
@@ -1738,6 +1820,83 @@ mod tests {
             assert_eq!($channel_state.in_flight.len(), $in_flight_len);
             assert_eq!($channel_state.in_flight_total(), $in_flight_total);
         };
+    }
+
+    /// Tests validation of rebalancing configurations.
+    #[test]
+    fn test_rebalance_config_validation() {
+        assert!(RebalanceConfig::new(0.1, Duration::from_secs(600)).is_ok());
+        assert!(RebalanceConfig::new(0.0, Duration::from_secs(600)).is_err());
+        assert!(RebalanceConfig::new(0.5, Duration::from_secs(600)).is_err());
+        assert!(RebalanceConfig::new(-0.1, Duration::from_secs(600)).is_err());
+        assert!(RebalanceConfig::new(0.1, Duration::ZERO).is_err());
+    }
+
+    /// Tests that the rebalancing task resets depleted channels on its scan interval, and leaves healthy channels
+    /// untouched. Runs on a sped up simulation clock so that scan intervals elapse quickly in real time.
+    #[tokio::test]
+    async fn test_start_rebalancer() {
+        let capacity = 100_000_000;
+        let balanced = SimulatedChannel {
+            capacity_msat: capacity,
+            short_channel_id: ShortChannelID::from(0),
+            node_1: ChannelState::new(create_test_policy(capacity / 2), capacity / 2),
+            node_2: ChannelState::new(create_test_policy(capacity / 2), capacity / 2),
+            exclude_capacity: false,
+        };
+        let depleted = SimulatedChannel {
+            capacity_msat: capacity,
+            short_channel_id: ShortChannelID::from(1),
+            node_1: ChannelState::new(create_test_policy(capacity / 2), capacity / 50),
+            node_2: ChannelState::new(create_test_policy(capacity / 2), capacity - capacity / 50),
+            exclude_capacity: false,
+        };
+
+        let (shutdown_trigger, shutdown_listener) = trigger();
+        let tasks = TaskTracker::new();
+        let graph = SimGraph::new(
+            vec![balanced, depleted],
+            tasks.clone(),
+            vec![],
+            CustomRecords::default(),
+            (shutdown_trigger.clone(), shutdown_listener),
+        )
+        .unwrap();
+
+        let clock = Arc::new(SimulationClock::new(1000).unwrap());
+        graph.start_rebalancer(
+            clock,
+            RebalanceConfig::new(0.1, Duration::from_secs(60)).unwrap(),
+        );
+
+        // The clock speeds wall time up by 1000x, so the rebalancer's 60 second scan interval elapses after 60ms
+        // of real time. Poll (with a generous timeout) until the depleted channel has been reset to an even split.
+        timeout(Duration::from_secs(5), async {
+            loop {
+                {
+                    let channels = graph.channels.lock().await;
+                    let depleted_channel = channels.get(&ShortChannelID::from(1)).unwrap();
+                    if depleted_channel.node_1.local_balance_msat == capacity / 2 {
+                        assert_eq!(depleted_channel.node_2.local_balance_msat, capacity / 2);
+                        depleted_channel.sanity_check().unwrap();
+
+                        // The balanced channel should have been left untouched by the scans that have run.
+                        let balanced_channel = channels.get(&ShortChannelID::from(0)).unwrap();
+                        assert_eq!(balanced_channel.node_1.local_balance_msat, capacity / 2);
+                        assert_eq!(balanced_channel.node_2.local_balance_msat, capacity / 2);
+                        break;
+                    }
+                }
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("depleted channel should be rebalanced within the timeout");
+
+        // The rebalancer should exit cleanly on shutdown.
+        shutdown_trigger.trigger();
+        tasks.close();
+        tasks.wait().await;
     }
 
     /// Tests rebalancing of channels whose liquidity has drawn down below a trigger fraction of capacity.
