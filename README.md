@@ -412,6 +412,20 @@ intervention required to keep the network liquid is itself a useful
 output). Rebalancing preserves determinism when running with a fixed
 seed. Balance that is locked in in-flight HTLCs is never moved.
 
+### Routing Fee Limit
+
+Payments on simulated networks will not pay more than 5% of the
+payment amount in routing fees, mirroring the fee limits that real
+senders place on payments. This can be tuned with a top-level field in
+the simulation file (only valid on simulated networks):
+
+```
+{
+  "sim_network": [ ... ],
+  "max_route_fee_pct": 0.5
+}
+```
+
 ### Inclusions and Limitations
 
 The simulator will execute payments on the mocked out network as it 

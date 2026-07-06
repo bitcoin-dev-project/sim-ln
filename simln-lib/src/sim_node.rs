@@ -552,17 +552,28 @@ pub struct SimNode<T: SimNetwork, C: Clock> {
     scorer: Mutex<ProbabilisticScorer<Arc<LdkNetworkGraph>, Arc<WrappedLog>>>,
     /// Clock for tracking simulation time.
     clock: Arc<C>,
+    /// The maximum total routing fee the node will pay for a payment, as a percentage of the payment amount.
+    max_route_fee_pct: f64,
 }
 
 impl<T: SimNetwork, C: Clock> SimNode<T, C> {
     /// Creates a new simulation node that refers to the high level network coordinator provided to process payments
     /// on its behalf. The pathfinding graph is provided separately so that each node can handle its own pathfinding.
+    /// The node will not pay more than `max_route_fee_pct` percent of a payment's amount in routing fees, which
+    /// must be greater than zero.
     pub fn new(
         info: NodeInfo,
         payment_network: Arc<Mutex<T>>,
         pathfinding_graph: Arc<LdkNetworkGraph>,
         clock: Arc<C>,
+        max_route_fee_pct: f64,
     ) -> Result<Self, LightningError> {
+        if max_route_fee_pct <= 0.0 {
+            return Err(LightningError::ValidationError(format!(
+                "max_route_fee_pct must be greater than zero, got: {max_route_fee_pct}"
+            )));
+        }
+
         // Initialize the probabilistic scorer with default parameters for learning from payment
         // history. These parameters control how much successful/failed payments affect routing
         // scores and how quickly these scores decay over time.
@@ -579,6 +590,7 @@ impl<T: SimNetwork, C: Clock> SimNode<T, C> {
             pathfinding_graph,
             scorer: Mutex::new(scorer),
             clock,
+            max_route_fee_pct,
         })
     }
 
@@ -644,18 +656,20 @@ fn node_info(pubkey: PublicKey, alias: String) -> NodeInfo {
     }
 }
 
-/// The maximum total routing fee that a payment will pay, expressed as a divisor of the payment amount
-/// (20 = 5% of the amount). Real senders place a limit on the fees that they are prepared to pay; without one,
-/// pathfinding will happily route through channels advertising absurd fees (which some datasets use to mark
-/// channel directions as unusable), silently draining the sender's liquidity in fees.
-const MAX_FEE_DIVISOR: u64 = 20;
+/// The default maximum total routing fee that a payment will pay, expressed as a percentage of the payment
+/// amount. Real senders place a limit on the fees that they are prepared to pay; without one, pathfinding will
+/// happily route through channels advertising absurd fees (which some datasets use to mark channel directions
+/// as unusable), silently draining the sender's liquidity in fees. Five percent is a generous budget by real
+/// node standards, while still refusing pathological routes.
+pub const DEFAULT_MAX_ROUTE_FEE_PCT: f64 = 5.0;
 
 /// Uses LDK's pathfinding algorithm with default parameters to find a path from source to destination, with the
-/// fee budget for the payment limited to 5% of its amount.
+/// total routing fees for the payment limited to the budget provided.
 async fn find_payment_route(
     source: &PublicKey,
     dest: PublicKey,
     amount_msat: u64,
+    max_fee_msat: u64,
     pathfinding_graph: &LdkNetworkGraph,
     scorer: &Mutex<ProbabilisticScorer<Arc<LdkNetworkGraph>, Arc<WrappedLog>>>,
 ) -> Result<Route, SimulationError> {
@@ -670,7 +684,7 @@ async fn find_payment_route(
                 // Allow sending htlcs up to 50% of the channel's capacity.
                 .with_max_channel_saturation_power_of_half(1),
             final_value_msat: amount_msat,
-            max_total_routing_fee_msat: Some(amount_msat / MAX_FEE_DIVISOR),
+            max_total_routing_fee_msat: Some(max_fee_msat),
         },
         pathfinding_graph,
         None,
@@ -717,10 +731,12 @@ impl<T: SimNetwork, C: Clock> LightningNode for SimNode<T, C> {
         };
 
         // Use the stored scorer when finding a route
+        let max_fee_msat = (amount_msat as f64 * self.max_route_fee_pct / 100.0) as u64;
         let route = match find_payment_route(
             &self.info.pubkey,
             dest,
             amount_msat,
+            max_fee_msat,
             &self.pathfinding_graph,
             &self.scorer,
         )
@@ -1218,11 +1234,13 @@ impl SimGraph {
     }
 }
 
-/// Produces a map of node public key to lightning node implementation to be used for simulations.
+/// Produces a map of node public key to lightning node implementation to be used for simulations. Nodes will not
+/// pay more than `max_route_fee_pct` percent of a payment's amount in routing fees.
 pub async fn ln_node_from_graph<C: Clock>(
     graph: Arc<Mutex<SimGraph>>,
     routing_graph: Arc<LdkNetworkGraph>,
     clock: Arc<C>,
+    max_route_fee_pct: f64,
 ) -> Result<HashMap<PublicKey, Arc<Mutex<SimNode<SimGraph, C>>>>, LightningError> {
     let sim_graph = graph.lock().await;
     let mut nodes: HashMap<PublicKey, Arc<Mutex<SimNode<SimGraph, C>>>> =
@@ -1236,6 +1254,7 @@ pub async fn ln_node_from_graph<C: Clock>(
                 graph.clone(),
                 routing_graph.clone(),
                 clock.clone(),
+                max_route_fee_pct,
             )?)),
         );
     }
@@ -2246,7 +2265,7 @@ mod tests {
         let clock = Arc::new(SimulationClock::new(1).unwrap());
         let routing_graph = Arc::new(populate_network_graph(channels, Arc::clone(&clock)).unwrap());
 
-        let nodes = ln_node_from_graph(sim_graph, routing_graph, clock)
+        let nodes = ln_node_from_graph(sim_graph, routing_graph, clock, DEFAULT_MAX_ROUTE_FEE_PCT)
             .await
             .unwrap();
 
@@ -2354,8 +2373,8 @@ mod tests {
         }
     }
 
-    /// Tests that pathfinding limits total routing fees to 5% of the payment amount. Real senders place a limit
-    /// on the fees that they are prepared to pay, so a path that charges more than the budget should not be used
+    /// Tests that pathfinding limits total routing fees to the budget provided. Real senders place a limit on
+    /// the fees that they are prepared to pay, so a path that charges more than the budget should not be used
     /// even if it is the only route to the destination (otherwise a single high-fee channel can drain the sender).
     #[tokio::test]
     async fn test_find_payment_route_fee_budget() {
@@ -2367,21 +2386,27 @@ mod tests {
 
         let clock = Arc::new(SimulationClock::new(1).unwrap());
 
-        // With the modest fees that our test channels are created with, pathfinding should succeed.
+        // With the modest fees that our test channels are created with, pathfinding should succeed with a fee
+        // budget of 5% of the payment amount.
         let graph = Arc::new(populate_network_graph(channels.clone(), clock.clone()).unwrap());
         let scorer = Mutex::new(ProbabilisticScorer::new(
             ProbabilisticScoringDecayParameters::default(),
             graph.clone(),
             Arc::new(WrappedLog {}),
         ));
-        assert!(
-            find_payment_route(&source, dest, amount_msat, &graph, &scorer)
-                .await
-                .is_ok()
-        );
+        assert!(find_payment_route(
+            &source,
+            dest,
+            amount_msat,
+            amount_msat / 20,
+            &graph,
+            &scorer
+        )
+        .await
+        .is_ok());
 
         // Set the forwarding node's fee for the second channel to 10% of the payment amount. The only path to
-        // the destination now exceeds the fee budget, so pathfinding should fail.
+        // the destination now exceeds a 5% fee budget, so pathfinding should fail.
         channels[1].node_1.policy.base_fee = amount_msat / 10;
         let graph = Arc::new(populate_network_graph(channels, clock).unwrap());
         let scorer = Mutex::new(ProbabilisticScorer::new(
@@ -2389,10 +2414,22 @@ mod tests {
             graph.clone(),
             Arc::new(WrappedLog {}),
         ));
+        assert!(find_payment_route(
+            &source,
+            dest,
+            amount_msat,
+            amount_msat / 20,
+            &graph,
+            &scorer
+        )
+        .await
+        .is_err());
+
+        // A more generous budget of 20% of the payment amount allows the payment to route again.
         assert!(
-            find_payment_route(&source, dest, amount_msat, &graph, &scorer)
+            find_payment_route(&source, dest, amount_msat, amount_msat / 5, &graph, &scorer)
                 .await
-                .is_err()
+                .is_ok()
         );
     }
 
@@ -2413,6 +2450,7 @@ mod tests {
             sim_network.clone(),
             Arc::new(graph),
             Arc::new(SystemClock {}),
+            DEFAULT_MAX_ROUTE_FEE_PCT,
         )
         .unwrap();
 
@@ -2504,6 +2542,7 @@ mod tests {
             Arc::new(Mutex::new(test_kit.graph)),
             test_kit.routing_graph.clone(),
             Arc::new(SystemClock {}),
+            DEFAULT_MAX_ROUTE_FEE_PCT,
         )
         .unwrap();
 
@@ -2664,9 +2703,16 @@ mod tests {
             dest: PublicKey,
             amt: u64,
         ) -> (Route, Result<PaymentResult, LightningError>) {
-            let route = find_payment_route(&source, dest, amt, &self.routing_graph, &self.scorer)
-                .await
-                .unwrap();
+            let route = find_payment_route(
+                &source,
+                dest,
+                amt,
+                amt / 20,
+                &self.routing_graph,
+                &self.scorer,
+            )
+            .await
+            .unwrap();
 
             let (sender, receiver) = oneshot::channel();
             self.graph
@@ -2877,6 +2923,7 @@ mod tests {
             Arc::new(Mutex::new(test_kit.graph)),
             test_kit.routing_graph.clone(),
             Arc::new(SystemClock {}),
+            DEFAULT_MAX_ROUTE_FEE_PCT,
         )
         .unwrap();
 

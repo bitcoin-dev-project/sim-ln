@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use simln_lib::clock::SimulationClock;
 use simln_lib::sim_node::{
     ln_node_from_graph, populate_network_graph, ChannelPolicy, CustomRecords, Interceptor,
-    RebalanceConfig, SimGraph, SimNode, SimulatedChannel,
+    RebalanceConfig, SimGraph, SimNode, SimulatedChannel, DEFAULT_MAX_ROUTE_FEE_PCT,
 };
 use simln_lib::{
     cln, cln::ClnNode, eclair, eclair::EclairNode, lnd, lnd::LndNode, serializers,
@@ -145,6 +145,12 @@ impl Cli {
             ));
         }
 
+        if sim_params.max_route_fee_pct.is_some() && sim_params.sim_network.is_empty() {
+            return Err(anyhow!(
+                "A routing fee limit can only be set on a simulated network"
+            ));
+        }
+
         Ok(())
     }
 }
@@ -161,6 +167,10 @@ pub struct SimParams {
     pub exclude: Vec<PublicKey>,
     #[serde(default)]
     pub rebalance: Option<RebalanceParser>,
+    /// The maximum total routing fee that simulated nodes will pay for a payment, expressed as a percentage of
+    /// the payment amount (only used on simulated networks, where it defaults to 5%).
+    #[serde(default)]
+    pub max_route_fee_pct: Option<f64>,
 }
 
 /// Default fraction of channel capacity beneath which a channel side triggers a rebalance.
@@ -296,6 +306,7 @@ pub async fn create_simulation_with_network(
         activity: _activity,
         exclude,
         rebalance,
+        max_route_fee_pct,
     } = sim_params;
 
     // Convert nodes representation for parsing to SimulatedChannel
@@ -363,7 +374,13 @@ pub async fn create_simulation_with_network(
     // custom actions on the simulated network. For the nodes we'll pass our simulation, cast them
     // to a dyn trait and exclude any nodes that shouldn't be included in random activity
     // generation.
-    let nodes = ln_node_from_graph(simulation_graph, routing_graph, clock.clone()).await?;
+    let nodes = ln_node_from_graph(
+        simulation_graph,
+        routing_graph,
+        clock.clone(),
+        max_route_fee_pct.unwrap_or(DEFAULT_MAX_ROUTE_FEE_PCT),
+    )
+    .await?;
     let mut nodes_dyn: HashMap<_, Arc<Mutex<dyn LightningNode>>> = nodes
         .iter()
         .map(|(pk, node)| (*pk, Arc::clone(node) as Arc<Mutex<dyn LightningNode>>))
@@ -403,6 +420,7 @@ pub async fn create_simulation(
         activity: _activity,
         exclude: _,
         rebalance: _,
+        max_route_fee_pct: _,
     } = sim_params;
 
     let (clients, clients_info) = get_clients(nodes.to_vec()).await?;
