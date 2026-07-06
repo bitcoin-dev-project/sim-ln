@@ -644,8 +644,14 @@ fn node_info(pubkey: PublicKey, alias: String) -> NodeInfo {
     }
 }
 
-/// Uses LDK's pathfinding algorithm with default parameters to find a path from source to destination, with no
-/// restrictions on fee budget.
+/// The maximum total routing fee that a payment will pay, expressed as a divisor of the payment amount
+/// (20 = 5% of the amount). Real senders place a limit on the fees that they are prepared to pay; without one,
+/// pathfinding will happily route through channels advertising absurd fees (which some datasets use to mark
+/// channel directions as unusable), silently draining the sender's liquidity in fees.
+const MAX_FEE_DIVISOR: u64 = 20;
+
+/// Uses LDK's pathfinding algorithm with default parameters to find a path from source to destination, with the
+/// fee budget for the payment limited to 5% of its amount.
 async fn find_payment_route(
     source: &PublicKey,
     dest: PublicKey,
@@ -664,7 +670,7 @@ async fn find_payment_route(
                 // Allow sending htlcs up to 50% of the channel's capacity.
                 .with_max_channel_saturation_power_of_half(1),
             final_value_msat: amount_msat,
-            max_total_routing_fee_msat: None,
+            max_total_routing_fee_msat: Some(amount_msat / MAX_FEE_DIVISOR),
         },
         pathfinding_graph,
         None,
@@ -2348,6 +2354,48 @@ mod tests {
         }
     }
 
+    /// Tests that pathfinding limits total routing fees to 5% of the payment amount. Real senders place a limit
+    /// on the fees that they are prepared to pay, so a path that charges more than the budget should not be used
+    /// even if it is the only route to the destination (otherwise a single high-fee channel can drain the sender).
+    #[tokio::test]
+    async fn test_find_payment_route_fee_budget() {
+        let capacity = 10_000_000_000;
+        let mut channels = create_simulated_channels(2, capacity);
+        let source = channels[0].node_1.policy.pubkey;
+        let dest = channels[1].node_2.policy.pubkey;
+        let amount_msat = 1_000_000;
+
+        let clock = Arc::new(SimulationClock::new(1).unwrap());
+
+        // With the modest fees that our test channels are created with, pathfinding should succeed.
+        let graph = Arc::new(populate_network_graph(channels.clone(), clock.clone()).unwrap());
+        let scorer = Mutex::new(ProbabilisticScorer::new(
+            ProbabilisticScoringDecayParameters::default(),
+            graph.clone(),
+            Arc::new(WrappedLog {}),
+        ));
+        assert!(
+            find_payment_route(&source, dest, amount_msat, &graph, &scorer)
+                .await
+                .is_ok()
+        );
+
+        // Set the forwarding node's fee for the second channel to 10% of the payment amount. The only path to
+        // the destination now exceeds the fee budget, so pathfinding should fail.
+        channels[1].node_1.policy.base_fee = amount_msat / 10;
+        let graph = Arc::new(populate_network_graph(channels, clock).unwrap());
+        let scorer = Mutex::new(ProbabilisticScorer::new(
+            ProbabilisticScoringDecayParameters::default(),
+            graph.clone(),
+            Arc::new(WrappedLog {}),
+        ));
+        assert!(
+            find_payment_route(&source, dest, amount_msat, &graph, &scorer)
+                .await
+                .is_err()
+        );
+    }
+
     /// Tests the functionality of a `SimNode`, mocking out the `SimNetwork` that is responsible for payment
     /// propagation to isolate testing to just the implementation of `LightningNode`.
     #[tokio::test]
@@ -2423,8 +2471,9 @@ mod tests {
             );
 
         // Dispatch payments to different destinations and assert that our track payment results are as expected.
-        let hash_1 = node.send_payment(dest_1, 10_000).await.unwrap();
-        let hash_2 = node.send_payment(dest_2, 15_000).await.unwrap();
+        // Amounts are large enough that route fees fit within pathfinding's fee budget of 5% of the payment amount.
+        let hash_1 = node.send_payment(dest_1, 1_000_000).await.unwrap();
+        let hash_2 = node.send_payment(dest_2, 1_500_000).await.unwrap();
 
         let (_, shutdown_listener) = triggered::trigger();
 
@@ -2650,8 +2699,9 @@ mod tests {
         let mut test_kit =
             DispatchPaymentTestKit::new(chan_capacity, vec![], CustomRecords::default()).await;
 
-        // Send a payment that should succeed from Alice -> Dave.
-        let mut amt = 20_000;
+        // Send a payment that should succeed from Alice -> Dave. The amount is large enough that the fees for the
+        // route comfortably fit within pathfinding's fee budget of 5% of the payment amount.
+        let mut amt = 1_000_000;
         let (route, _) = test_kit
             .send_test_payment(test_kit.nodes[0], test_kit.nodes[3], amt)
             .await;
@@ -2700,7 +2750,7 @@ mod tests {
         // Finally, we'll test a multi-hop failure by trying to send from Alice -> Dave. Since Bob's liquidity is
         // drained, we expect a failure and unchanged balances along the route.
         let _ = test_kit
-            .send_test_payment(test_kit.nodes[0], test_kit.nodes[3], 20_000)
+            .send_test_payment(test_kit.nodes[0], test_kit.nodes[3], 1_000_000)
             .await;
         assert_eq!(test_kit.channel_balances().await, expected_balances);
 
@@ -2716,8 +2766,9 @@ mod tests {
         let mut test_kit =
             DispatchPaymentTestKit::new(chan_capacity, vec![], CustomRecords::default()).await;
 
-        // Send a payment that should succeed from Alice -> Dave.
-        let amt = 20_000;
+        // Send a payment that should succeed from Alice -> Dave. The amount is large enough that the fees for the
+        // route comfortably fit within pathfinding's fee budget of 5% of the payment amount.
+        let amt = 1_000_000;
         let (route, _) = test_kit
             .send_test_payment(test_kit.nodes[0], test_kit.nodes[3], amt)
             .await;
