@@ -14,6 +14,17 @@ use crate::{
 const HOURS_PER_MONTH: u64 = 30 * 24;
 const SECONDS_PER_MONTH: u64 = HOURS_PER_MONTH * 60 * 60;
 
+/// The 95th percentile (z-score) of the standard normal distribution. Payment amount distributions are chosen such
+/// that at least 95% of sampled amounts fall below the payment limit for the node pair.
+const PAYMENT_LIMIT_QUANTILE: f64 = 1.6449;
+
+/// The maximum sigma for the log normal distribution that payment amounts are sampled from, sqrt(ln(2)), which caps
+/// the distribution's coefficient of variation (standard deviation / mean) at one. Bounding sigma keeps the tail of
+/// the distribution light enough that the average of sampled payment amounts converges on the expected payment
+/// amount within a reasonable number of payments (the standard error of the mean over n payments is at most
+/// expected_payment_amt / sqrt(n)).
+const MAX_SIGMA: f64 = 0.8325546111576977;
+
 #[derive(Debug, Error)]
 pub enum RandomActivityError {
     #[error("Value error: {0}")]
@@ -183,16 +194,12 @@ impl RandomPaymentActivity {
         node_capacity_msat: u64,
         expected_payment_amt: u64,
     ) -> Result<(), RandomActivityError> {
-        // We will not be able to generate payments if the variance of sigma squared for our log normal distribution
-        // is < 0 (because we have to take a square root).
+        // We will not be able to generate payments if the payment limit for a node pair (half of the smaller node's
+        // capacity) is beneath the expected payment amount, because no log normal distribution has the expected
+        // amount as its mean while keeping 95% of its samples below a limit that is smaller than that mean.
         //
-        // Sigma squared is calculated as: 2(ln(payment_limit) - ln(expected_payment_amt))
-        // Where: payment_limit = node_capacity_msat / 2.
-        //
-        // Therefore we can only process payments if: 2(ln(payment_limit) - ln(expected_payment_amt)) >= 0
-        //   ln(payment_limit)      >= ln(expected_payment_amt)
-        //   e^(ln(payment_limit)   >= e^(ln(expected_payment_amt))
-        //   payment_limit          >= expected_payment_amt
+        // The payment limit is at most node_capacity_msat / 2 (it may be smaller, depending on the capacity of the
+        // destination chosen per-payment), so we require:
         //   node_capacity_msat / 2 >= expected_payment_amt
         //   node_capacity_msat     >= 2 * expected_payment_amt
         let min_required_capacity = 2 * expected_payment_amt;
@@ -245,13 +252,13 @@ impl PaymentGenerator for RandomPaymentActivity {
         Ok(Duration::from_secs(duration_in_secs))
     }
 
-    /// Returns the payment amount for a payment to a node with the destination capacity provided. The expected value
-    /// for the payment is the simulation expected payment amount, and the variance is determined by the channel
-    /// capacity of the source and destination node. Variance is calculated such that 95% of payment amounts generated
-    /// will fall between the expected payment amount and 50% of the capacity of the node with the least channel
-    /// capacity. While the expected value of payments remains the same, scaling variance by node capacity means that
-    /// nodes with more deployed capital will see a larger range of payment values than those with smaller total
-    /// channel capacity.
+    /// Returns the payment amount for a payment to a node with the destination capacity provided. Amounts are
+    /// sampled from a log normal distribution with mean equal to the simulation's expected payment amount, and
+    /// variance chosen per node-pair such that at least 95% of sampled amounts fall below a payment limit of 50%
+    /// of the capacity of the node with the least channel capacity. Node pairs with more deployed capital therefore
+    /// see a wider range of payment amounts, while the average amount remains the expected payment amount, so the
+    /// volume that a node sends over time converges on the total implied by its capacity and the simulation's
+    /// activity multiplier.
     fn payment_amount(
         &self,
         destination_capacity: Option<u64>,
@@ -262,20 +269,35 @@ impl PaymentGenerator for RandomPaymentActivity {
 
         let payment_limit = std::cmp::min(self.source_capacity, destination_capacity) / 2;
 
-        let ln_pmt_amt = (self.expected_payment_amt as f64).ln();
-        let ln_limit = (payment_limit as f64).ln();
-
-        let mu = 2.0 * ln_pmt_amt - ln_limit;
-        let sigma_square = 2.0 * (ln_limit - ln_pmt_amt);
-
-        if sigma_square < 0.0 {
+        // A log normal distribution with mu = ln(mean) - sigma^2 / 2 has the expected payment amount as its mean
+        // for any choice of sigma. We pick sigma as large as possible for the node pair, subject to two constraints:
+        // * At least 95% of sampled amounts fall below the payment limit, which requires:
+        //   (ln(limit) - mu) / sigma >= z, ie: sigma^2 - 2 * z * sigma + 2 * ln(limit / mean) >= 0.
+        // * Sigma may not exceed MAX_SIGMA, so that the tail of the distribution stays light enough for sample
+        //   averages to converge on the mean quickly.
+        //
+        // When the quadratic's discriminant is negative, the limit constraint holds for any sigma (the limit is far
+        // above the mean); otherwise sigma must fall below the quadratic's smaller root. The region above the larger
+        // root also satisfies the constraint, but produces a heavy-tailed distribution where most payments are tiny
+        // and the volume target is carried by extremely rare, large payments.
+        let ln_ratio = (payment_limit as f64 / self.expected_payment_amt as f64).ln();
+        if ln_ratio < 0.0 {
             return Err(PaymentGenerationError(format!(
-                "payment amount not possible for limit: {payment_limit}, sigma squared: {sigma_square}"
+                "expected payment amount: {} exceeds payment limit: {payment_limit}",
+                self.expected_payment_amt
             )));
         }
 
-        let log_normal = LogNormal::new(mu, sigma_square.sqrt())
-            .map_err(|e| PaymentGenerationError(e.to_string()))?;
+        let discriminant = PAYMENT_LIMIT_QUANTILE * PAYMENT_LIMIT_QUANTILE - 2.0 * ln_ratio;
+        let sigma = if discriminant <= 0.0 {
+            MAX_SIGMA
+        } else {
+            MAX_SIGMA.min(PAYMENT_LIMIT_QUANTILE - discriminant.sqrt())
+        };
+        let mu = (self.expected_payment_amt as f64).ln() - sigma * sigma / 2.0;
+
+        let log_normal =
+            LogNormal::new(mu, sigma).map_err(|e| PaymentGenerationError(e.to_string()))?;
 
         let mut rng = self
             .rng
@@ -457,10 +479,12 @@ mod tests {
 
         #[test]
         fn test_payment_amount() {
-            // The special cases for payment_amount are those who may make the internal log normal distribution fail to build, which happens if
-            // sigma squared is either +-INF or NaN. Given that the constructor of the PaymentActivityGenerator already forces its internal values
-            // to be greater than zero, the only values that are left are all values of `destination_capacity` smaller or equal to the `source_capacity`
-            // All of them will yield a sigma squared smaller than 0, which we have a sanity check for.
+            // Payment amounts can only be generated if the payment limit for the node pair (half of the smaller
+            // node's capacity) is at least the expected payment amount, because no log normal distribution has the
+            // expected amount as its mean while keeping 95% of samples below a limit that is smaller than that mean.
+            // Given that the constructor of the PaymentActivityGenerator already forces its internal values to be
+            // greater than zero, the only values that are left are all values of `destination_capacity` small enough
+            // to drag the payment limit beneath the expected payment amount, which we have a sanity check for.
             let expected_payment = get_random_int(1, 100);
             let source_capacity = 2 * expected_payment;
             let rng = MutRng::new(Some((u64::MAX, None)));
@@ -489,6 +513,74 @@ mod tests {
                 pag.payment_amount(None),
                 Err(PaymentGenerationError(..))
             ));
+        }
+
+        #[test]
+        fn test_payment_amount_mean_convergence() {
+            // The average of generated payment amounts should converge on the expected payment amount within a
+            // reasonable number of payments, otherwise nodes do not send the volume that their capacity and the
+            // simulation's activity multiplier imply. Capacities are much larger than the expected payment amount
+            // so that sigma is at its cap; with a coefficient of variation of at most one, the standard error of
+            // the mean over 1000 samples is ~3% of the expected amount, so a 15% bound has comfortable headroom
+            // while still catching heavy-tailed parametrizations (which produce sample means that are off by
+            // orders of magnitude).
+            let expected_payment = 3_800_000;
+            let capacity = 1_000_000_000_000;
+            let rng = MutRng::new(Some((42, None)));
+            let pag = RandomPaymentActivity::new(capacity, expected_payment, 1.0, rng).unwrap();
+
+            let n = 1000;
+            let sum: u64 = (0..n)
+                .map(|_| pag.payment_amount(Some(capacity)).unwrap())
+                .sum();
+            let mean = sum as f64 / n as f64;
+
+            assert!(
+                (mean - expected_payment as f64).abs() < 0.15 * expected_payment as f64,
+                "sample mean {mean} not within 15% of expected payment amount {expected_payment}",
+            );
+        }
+
+        #[test]
+        fn test_payment_amount_respects_limit() {
+            // At least 95% of payment amounts should fall below the payment limit of half of the smaller node's
+            // capacity. The destination is small relative to the source so that the limit constraint (rather than
+            // the cap on sigma) binds.
+            let expected_payment = 3_800_000;
+            let rng = MutRng::new(Some((42, None)));
+            let pag =
+                RandomPaymentActivity::new(1_000_000_000_000, expected_payment, 1.0, rng).unwrap();
+
+            let destination_capacity = 10 * expected_payment;
+            let limit = destination_capacity / 2;
+            let n = 1000;
+            let below = (0..n)
+                .filter(|_| pag.payment_amount(Some(destination_capacity)).unwrap() <= limit)
+                .count();
+
+            assert!(
+                below >= 950,
+                "expected at least 950/1000 payment amounts below limit {limit}, got {below}",
+            );
+        }
+
+        #[test]
+        fn test_payment_amount_degenerate_limit() {
+            // When the payment limit is exactly the expected payment amount, the only distribution that has the
+            // expected amount as its mean and respects the limit is a constant, so every payment should be the
+            // expected amount (within one msat of floating point truncation).
+            let expected_payment = 3_800_000;
+            let rng = MutRng::new(Some((42, None)));
+            let pag = RandomPaymentActivity::new(2 * expected_payment, expected_payment, 1.0, rng)
+                .unwrap();
+
+            for _ in 0..10 {
+                let amt = pag.payment_amount(Some(2 * expected_payment)).unwrap();
+                assert!(
+                    amt.abs_diff(expected_payment) <= 1,
+                    "expected constant payment of {expected_payment}, got {amt}",
+                );
+            }
         }
     }
 }
