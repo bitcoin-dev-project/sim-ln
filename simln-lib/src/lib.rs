@@ -102,7 +102,7 @@ impl std::fmt::Display for NodeId {
 }
 
 /// Represents a short channel ID, expressed as a struct so that we can implement display for the trait.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Copy, Serialize, Deserialize)]
 pub struct ShortChannelID(u64);
 
 /// Utility function to easily convert from u64 to `ShortChannelID`.
