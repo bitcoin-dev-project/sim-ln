@@ -414,6 +414,35 @@ impl SimulatedChannel {
         Ok(())
     }
 
+    /// "Teleports" the channel's settled balance back to an even split between its two nodes if either side's
+    /// available balance has dropped beneath `trigger_below_fraction` of the channel's total capacity, returning
+    /// the amount moved if the channel was rebalanced. This models the out-of-band actions that node operators
+    /// take to restore usable liquidity (circular rebalances, swaps, splices) by their effect rather than their
+    /// mechanism.
+    ///
+    /// Only the settled portion of the channel's capacity is redistributed; balance locked in in-flight HTLCs is
+    /// left untouched and will settle to one side or the other as usual, preserving the channel's accounting
+    /// invariant (the sides' local balances and in-flight totals always sum to the channel capacity).
+    // TODO: temporary allow until the rebalancing task that calls this lands in the next commit.
+    #[allow(dead_code)]
+    fn rebalance_if_depleted(&mut self, trigger_below_fraction: f64) -> Option<u64> {
+        let threshold = (self.capacity_msat as f64 * trigger_below_fraction) as u64;
+        if self.node_1.local_balance_msat >= threshold
+            && self.node_2.local_balance_msat >= threshold
+        {
+            return None;
+        }
+
+        let settled = self.node_1.local_balance_msat + self.node_2.local_balance_msat;
+        let target_1 = settled / 2;
+        let moved = self.node_1.local_balance_msat.abs_diff(target_1);
+
+        self.node_1.local_balance_msat = target_1;
+        self.node_2.local_balance_msat = settled - target_1;
+
+        Some(moved)
+    }
+
     /// Removes an htlc from the appropriate side of the simulated channel, settling balances across channel sides
     /// based on the success of the htlc. The public key of the node that originally sent the HTLC (ie, the party
     /// that would send update_add_htlc in the protocol) must be provided to remove the htlc from its side of the
@@ -1709,6 +1738,74 @@ mod tests {
             assert_eq!($channel_state.in_flight.len(), $in_flight_len);
             assert_eq!($channel_state.in_flight_total(), $in_flight_total);
         };
+    }
+
+    /// Tests rebalancing of channels whose liquidity has drawn down below a trigger fraction of capacity.
+    #[test]
+    fn test_rebalance_if_depleted() {
+        let capacity = 100_000_000;
+        let mut channel = SimulatedChannel {
+            capacity_msat: capacity,
+            short_channel_id: ShortChannelID::from(0),
+            node_1: ChannelState::new(create_test_policy(capacity / 2), capacity / 2),
+            node_2: ChannelState::new(create_test_policy(capacity / 2), capacity / 2),
+            exclude_capacity: false,
+        };
+        let node_1_pk = channel.node_1.policy.pubkey;
+
+        // A balanced channel is left untouched.
+        assert!(channel.rebalance_if_depleted(0.2).is_none());
+        assert_channel_balances!(channel.node_1, capacity / 2, 0, 0);
+        assert_channel_balances!(channel.node_2, capacity / 2, 0, 0);
+
+        // Draw node_1's side of the channel down beneath the trigger threshold and check that the channel is
+        // reset to an even split of its capacity.
+        channel.node_1.local_balance_msat = capacity / 25;
+        channel.node_2.local_balance_msat = capacity - capacity / 25;
+
+        assert_eq!(
+            channel.rebalance_if_depleted(0.2),
+            Some(capacity / 2 - capacity / 25)
+        );
+        assert_channel_balances!(channel.node_1, capacity / 2, 0, 0);
+        assert_channel_balances!(channel.node_2, capacity / 2, 0, 0);
+        channel.sanity_check().unwrap();
+
+        // With an HTLC in flight from node_1, only the settled portion of the channel's capacity is
+        // redistributed; the in-flight balance remains locked in the HTLC.
+        let htlc_amt = 1_000_000;
+        let hash = PaymentHash([1; 32]);
+        channel
+            .add_htlc(
+                &node_1_pk,
+                hash,
+                Htlc {
+                    amount_msat: htlc_amt,
+                    cltv_expiry: 40,
+                },
+            )
+            .unwrap()
+            .unwrap();
+
+        // Manually drain the remainder of node_1's settled balance over to node_2.
+        channel.node_2.local_balance_msat += channel.node_1.local_balance_msat - capacity / 25;
+        channel.node_1.local_balance_msat = capacity / 25;
+        channel.sanity_check().unwrap();
+
+        let settled = capacity - htlc_amt;
+        assert_eq!(
+            channel.rebalance_if_depleted(0.2),
+            Some(settled / 2 - capacity / 25)
+        );
+        assert_channel_balances!(channel.node_1, settled / 2, 1, htlc_amt);
+        assert_channel_balances!(channel.node_2, settled - settled / 2, 0, 0);
+        channel.sanity_check().unwrap();
+
+        // Settling the in-flight HTLC after a rebalance keeps the channel's accounting consistent (remove_htlc
+        // runs the channel's sanity check internally).
+        channel.remove_htlc(&node_1_pk, &hash, true).unwrap();
+        assert_channel_balances!(channel.node_1, settled / 2, 0, 0);
+        assert_channel_balances!(channel.node_2, settled - settled / 2 + htlc_amt, 0, 0);
     }
 
     /// Tests state updates related to adding and removing HTLCs to a channel.
