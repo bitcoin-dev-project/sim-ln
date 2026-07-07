@@ -8,7 +8,7 @@ use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Network, ScriptBuf, TxOut};
 use lightning::ln::chan_utils::make_funding_redeemscript;
 use serde::{Deserialize, Serialize};
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::fmt::Display;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
@@ -27,6 +27,7 @@ use lightning::routing::scoring::{
 };
 use lightning::routing::utxo::{UtxoLookup, UtxoResult};
 use lightning::util::logger::{Level, Logger, Record};
+use std::time::Duration;
 use thiserror::Error;
 use tokio::select;
 use tokio::sync::oneshot::{channel, Receiver, Sender};
@@ -414,6 +415,33 @@ impl SimulatedChannel {
         Ok(())
     }
 
+    /// "Teleports" the channel's settled balance back to an even split between its two nodes if either side's
+    /// available balance has dropped beneath `trigger_below_fraction` of the channel's total capacity, returning
+    /// the amount moved if the channel was rebalanced. This models the out-of-band actions that node operators
+    /// take to restore usable liquidity (circular rebalances, swaps, splices) by their effect rather than their
+    /// mechanism.
+    ///
+    /// Only the settled portion of the channel's capacity is redistributed; balance locked in in-flight HTLCs is
+    /// left untouched and will settle to one side or the other as usual, preserving the channel's accounting
+    /// invariant (the sides' local balances and in-flight totals always sum to the channel capacity).
+    fn rebalance_if_depleted(&mut self, trigger_below_fraction: f64) -> Option<u64> {
+        let threshold = (self.capacity_msat as f64 * trigger_below_fraction) as u64;
+        if self.node_1.local_balance_msat >= threshold
+            && self.node_2.local_balance_msat >= threshold
+        {
+            return None;
+        }
+
+        let settled = self.node_1.local_balance_msat + self.node_2.local_balance_msat;
+        let target_1 = settled / 2;
+        let moved = self.node_1.local_balance_msat.abs_diff(target_1);
+
+        self.node_1.local_balance_msat = target_1;
+        self.node_2.local_balance_msat = settled - target_1;
+
+        Some(moved)
+    }
+
     /// Removes an htlc from the appropriate side of the simulated channel, settling balances across channel sides
     /// based on the success of the htlc. The public key of the node that originally sent the HTLC (ie, the party
     /// that would send update_add_htlc in the protocol) must be provided to remove the htlc from its side of the
@@ -524,17 +552,28 @@ pub struct SimNode<T: SimNetwork, C: Clock> {
     scorer: Mutex<ProbabilisticScorer<Arc<LdkNetworkGraph>, Arc<WrappedLog>>>,
     /// Clock for tracking simulation time.
     clock: Arc<C>,
+    /// The maximum total routing fee the node will pay for a payment, as a percentage of the payment amount.
+    max_route_fee_pct: f64,
 }
 
 impl<T: SimNetwork, C: Clock> SimNode<T, C> {
     /// Creates a new simulation node that refers to the high level network coordinator provided to process payments
     /// on its behalf. The pathfinding graph is provided separately so that each node can handle its own pathfinding.
+    /// The node will not pay more than `max_route_fee_pct` percent of a payment's amount in routing fees, which
+    /// must be greater than zero.
     pub fn new(
         info: NodeInfo,
         payment_network: Arc<Mutex<T>>,
         pathfinding_graph: Arc<LdkNetworkGraph>,
         clock: Arc<C>,
+        max_route_fee_pct: f64,
     ) -> Result<Self, LightningError> {
+        if max_route_fee_pct <= 0.0 {
+            return Err(LightningError::ValidationError(format!(
+                "max_route_fee_pct must be greater than zero, got: {max_route_fee_pct}"
+            )));
+        }
+
         // Initialize the probabilistic scorer with default parameters for learning from payment
         // history. These parameters control how much successful/failed payments affect routing
         // scores and how quickly these scores decay over time.
@@ -551,6 +590,7 @@ impl<T: SimNetwork, C: Clock> SimNode<T, C> {
             pathfinding_graph,
             scorer: Mutex::new(scorer),
             clock,
+            max_route_fee_pct,
         })
     }
 
@@ -616,12 +656,20 @@ fn node_info(pubkey: PublicKey, alias: String) -> NodeInfo {
     }
 }
 
-/// Uses LDK's pathfinding algorithm with default parameters to find a path from source to destination, with no
-/// restrictions on fee budget.
+/// The default maximum total routing fee that a payment will pay, expressed as a percentage of the payment
+/// amount. Real senders place a limit on the fees that they are prepared to pay; without one, pathfinding will
+/// happily route through channels advertising absurd fees (which some datasets use to mark channel directions
+/// as unusable), silently draining the sender's liquidity in fees. Five percent is a generous budget by real
+/// node standards, while still refusing pathological routes.
+pub const DEFAULT_MAX_ROUTE_FEE_PCT: f64 = 5.0;
+
+/// Uses LDK's pathfinding algorithm with default parameters to find a path from source to destination, with the
+/// total routing fees for the payment limited to the budget provided.
 async fn find_payment_route(
     source: &PublicKey,
     dest: PublicKey,
     amount_msat: u64,
+    max_fee_msat: u64,
     pathfinding_graph: &LdkNetworkGraph,
     scorer: &Mutex<ProbabilisticScorer<Arc<LdkNetworkGraph>, Arc<WrappedLog>>>,
 ) -> Result<Route, SimulationError> {
@@ -636,7 +684,7 @@ async fn find_payment_route(
                 // Allow sending htlcs up to 50% of the channel's capacity.
                 .with_max_channel_saturation_power_of_half(1),
             final_value_msat: amount_msat,
-            max_total_routing_fee_msat: None,
+            max_total_routing_fee_msat: Some(max_fee_msat),
         },
         pathfinding_graph,
         None,
@@ -683,10 +731,12 @@ impl<T: SimNetwork, C: Clock> LightningNode for SimNode<T, C> {
         };
 
         // Use the stored scorer when finding a route
+        let max_fee_msat = (amount_msat as f64 * self.max_route_fee_pct / 100.0) as u64;
         let route = match find_payment_route(
             &self.info.pubkey,
             dest,
             amount_msat,
+            max_fee_msat,
             &self.pathfinding_graph,
             &self.scorer,
         )
@@ -1023,6 +1073,49 @@ async fn handle_intercepted_htlc(
     Ok(Ok(attached_custom_records))
 }
 
+/// Configuration for optional "teleport" rebalancing of simulated channels, which periodically resets channels
+/// whose available liquidity has drawn down. See [`SimGraph::start_rebalancer`].
+#[derive(Clone, Debug)]
+pub struct RebalanceConfig {
+    /// The fraction of a channel's total capacity beneath which a side's available balance triggers a rebalance.
+    trigger_below_fraction: f64,
+    /// The time between scans of the network's channels.
+    interval: Duration,
+    /// Nodes that do not participate in rebalancing. A channel is skipped by the rebalancer if either of its
+    /// peers is excluded, regardless of which side of the channel has depleted.
+    exclude: HashSet<PublicKey>,
+}
+
+impl RebalanceConfig {
+    /// Creates a new rebalancing configuration, validating that the trigger fraction is in (0, 0.5) and that the
+    /// scan interval is non-zero. The trigger must be beneath 0.5 because both sides of a channel cannot be at or
+    /// above half of its capacity, so any higher value would rebalance every channel on every scan. Channels that
+    /// have a peer in `exclude` will never be rebalanced.
+    pub fn new(
+        trigger_below_fraction: f64,
+        interval: Duration,
+        exclude: HashSet<PublicKey>,
+    ) -> Result<Self, SimulationError> {
+        if !(trigger_below_fraction > 0.0 && trigger_below_fraction < 0.5) {
+            return Err(SimulationError::SimulatedNetworkError(format!(
+                "rebalance trigger fraction must be in (0, 0.5), got: {trigger_below_fraction}"
+            )));
+        }
+
+        if interval.is_zero() {
+            return Err(SimulationError::SimulatedNetworkError(
+                "rebalance interval must be non-zero".to_string(),
+            ));
+        }
+
+        Ok(RebalanceConfig {
+            trigger_below_fraction,
+            interval,
+            exclude,
+        })
+    }
+}
+
 /// Graph is the top level struct that is used to coordinate simulation of lightning nodes.
 pub struct SimGraph {
     /// nodes caches the list of nodes in the network with a vector of their channel ids, only used for quick
@@ -1099,13 +1192,78 @@ impl SimGraph {
             shutdown_signal,
         })
     }
+
+    /// Spawns a task that periodically "teleport" rebalances simulated channels whose available liquidity has
+    /// drawn down beneath the configured trigger, resetting them to an even split of their settled balance. This
+    /// is an opt-in escape hatch for long-running simulations: without any restoring force, random payment
+    /// activity progressively drains channels to one side and payment success rates decay, whereas real node
+    /// operators counteract depletion with out-of-band actions (circular rebalances, swaps, splices) that a
+    /// payment-only simulator cannot express directly.
+    ///
+    /// The task introduces no new source of randomness to the simulation: scans happen at a fixed interval on
+    /// the simulation clock, channels are visited in stable short channel ID order and the rebalance itself
+    /// involves no randomness. Each rebalance is logged with the amount moved, so the total volume of
+    /// intervention needed to keep the network liquid is observable in the simulation's logs.
+    ///
+    /// Nodes in the config's exclusion list do not participate in rebalancing: any channel that they are a peer
+    /// on is skipped by scans, no matter which side of the channel has depleted. This models operators that do
+    /// not maintain their liquidity, and allows their channels to drain naturally while the rest of the network
+    /// is kept liquid.
+    ///
+    /// The task runs until the simulation's shutdown signal is triggered.
+    pub fn start_rebalancer<C: Clock + 'static>(&self, clock: Arc<C>, cfg: RebalanceConfig) {
+        let channels = Arc::clone(&self.channels);
+        let listener = self.shutdown_signal.1.clone();
+
+        self.tasks.spawn(async move {
+            log::info!(
+                "Started channel rebalancer: triggering below {} of channel capacity, scanning every {:?}, {} nodes excluded.",
+                cfg.trigger_below_fraction,
+                cfg.interval,
+                cfg.exclude.len(),
+            );
+
+            loop {
+                select! {
+                    _ = listener.clone() => {
+                        log::debug!("Channel rebalancer received shutdown signal.");
+                        return;
+                    },
+                    _ = clock.sleep(cfg.interval) => {},
+                }
+
+                let mut channels_lock = channels.lock().await;
+                let mut scids: Vec<ShortChannelID> = channels_lock.keys().copied().collect();
+                scids.sort_unstable();
+
+                for scid in scids {
+                    // Unwrap is safe because the key was drawn from the map and the lock is held throughout.
+                    let channel = channels_lock.get_mut(&scid).unwrap();
+
+                    // Channels that have an excluded peer never rebalance, regardless of which side of the
+                    // channel has drawn down.
+                    if cfg.exclude.contains(&channel.node_1.policy.pubkey)
+                        || cfg.exclude.contains(&channel.node_2.policy.pubkey)
+                    {
+                        continue;
+                    }
+                    if let Some(moved_msat) = channel.rebalance_if_depleted(cfg.trigger_below_fraction)
+                    {
+                        log::info!("Rebalanced channel: {scid}, moved {moved_msat} msat.");
+                    }
+                }
+            }
+        });
+    }
 }
 
-/// Produces a map of node public key to lightning node implementation to be used for simulations.
+/// Produces a map of node public key to lightning node implementation to be used for simulations. Nodes will not
+/// pay more than `max_route_fee_pct` percent of a payment's amount in routing fees.
 pub async fn ln_node_from_graph<C: Clock>(
     graph: Arc<Mutex<SimGraph>>,
     routing_graph: Arc<LdkNetworkGraph>,
     clock: Arc<C>,
+    max_route_fee_pct: f64,
 ) -> Result<HashMap<PublicKey, Arc<Mutex<SimNode<SimGraph, C>>>>, LightningError> {
     let sim_graph = graph.lock().await;
     let mut nodes: HashMap<PublicKey, Arc<Mutex<SimNode<SimGraph, C>>>> =
@@ -1119,6 +1277,7 @@ pub async fn ln_node_from_graph<C: Clock>(
                 graph.clone(),
                 routing_graph.clone(),
                 clock.clone(),
+                max_route_fee_pct,
             )?)),
         );
     }
@@ -1711,6 +1870,180 @@ mod tests {
         };
     }
 
+    /// Tests validation of rebalancing configurations.
+    #[test]
+    fn test_rebalance_config_validation() {
+        assert!(RebalanceConfig::new(0.1, Duration::from_secs(600), HashSet::new()).is_ok());
+        assert!(RebalanceConfig::new(0.0, Duration::from_secs(600), HashSet::new()).is_err());
+        assert!(RebalanceConfig::new(0.5, Duration::from_secs(600), HashSet::new()).is_err());
+        assert!(RebalanceConfig::new(-0.1, Duration::from_secs(600), HashSet::new()).is_err());
+        assert!(RebalanceConfig::new(0.1, Duration::ZERO, HashSet::new()).is_err());
+    }
+
+    /// Tests that the rebalancing task resets depleted channels on its scan interval, and leaves healthy channels
+    /// untouched. Runs on a sped up simulation clock so that scan intervals elapse quickly in real time.
+    #[tokio::test]
+    async fn test_start_rebalancer() {
+        let capacity = 100_000_000;
+        let balanced = SimulatedChannel {
+            capacity_msat: capacity,
+            short_channel_id: ShortChannelID::from(0),
+            node_1: ChannelState::new(create_test_policy(capacity / 2), capacity / 2),
+            node_2: ChannelState::new(create_test_policy(capacity / 2), capacity / 2),
+            exclude_capacity: false,
+        };
+        let depleted = SimulatedChannel {
+            capacity_msat: capacity,
+            short_channel_id: ShortChannelID::from(1),
+            node_1: ChannelState::new(create_test_policy(capacity / 2), capacity / 50),
+            node_2: ChannelState::new(create_test_policy(capacity / 2), capacity - capacity / 50),
+            exclude_capacity: false,
+        };
+        // A channel that is just as depleted, but has a peer that is excluded from rebalancing. We exclude the
+        // node on the channel's healthy side to demonstrate that exclusion applies to the whole channel, not
+        // just to the side that has drawn down.
+        let excluded_depleted = SimulatedChannel {
+            capacity_msat: capacity,
+            short_channel_id: ShortChannelID::from(2),
+            node_1: ChannelState::new(create_test_policy(capacity / 2), capacity / 50),
+            node_2: ChannelState::new(create_test_policy(capacity / 2), capacity - capacity / 50),
+            exclude_capacity: false,
+        };
+        let excluded_pubkey = excluded_depleted.node_2.policy.pubkey;
+
+        let (shutdown_trigger, shutdown_listener) = trigger();
+        let tasks = TaskTracker::new();
+        let graph = SimGraph::new(
+            vec![balanced, depleted, excluded_depleted],
+            tasks.clone(),
+            vec![],
+            CustomRecords::default(),
+            (shutdown_trigger.clone(), shutdown_listener),
+        )
+        .unwrap();
+
+        let clock = Arc::new(SimulationClock::new(1000).unwrap());
+        graph.start_rebalancer(
+            clock,
+            RebalanceConfig::new(
+                0.1,
+                Duration::from_secs(60),
+                HashSet::from([excluded_pubkey]),
+            )
+            .unwrap(),
+        );
+
+        // The clock speeds wall time up by 1000x, so the rebalancer's 60 second scan interval elapses after 60ms
+        // of real time. Poll (with a generous timeout) until the depleted channel has been reset to an even split.
+        timeout(Duration::from_secs(5), async {
+            loop {
+                {
+                    let channels = graph.channels.lock().await;
+                    let depleted_channel = channels.get(&ShortChannelID::from(1)).unwrap();
+                    if depleted_channel.node_1.local_balance_msat == capacity / 2 {
+                        assert_eq!(depleted_channel.node_2.local_balance_msat, capacity / 2);
+                        depleted_channel.sanity_check().unwrap();
+
+                        // The balanced channel should have been left untouched by the scans that have run.
+                        let balanced_channel = channels.get(&ShortChannelID::from(0)).unwrap();
+                        assert_eq!(balanced_channel.node_1.local_balance_msat, capacity / 2);
+                        assert_eq!(balanced_channel.node_2.local_balance_msat, capacity / 2);
+                        break;
+                    }
+                }
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("depleted channel should be rebalanced within the timeout");
+
+        // Give the rebalancer a few more scan intervals, then check that the channel with an excluded peer has
+        // been skipped despite being just as depleted as the channel that was reset.
+        time::sleep(Duration::from_millis(300)).await;
+        {
+            let channels = graph.channels.lock().await;
+            let excluded_channel = channels.get(&ShortChannelID::from(2)).unwrap();
+            assert_eq!(excluded_channel.node_1.local_balance_msat, capacity / 50);
+            assert_eq!(
+                excluded_channel.node_2.local_balance_msat,
+                capacity - capacity / 50
+            );
+        }
+
+        // The rebalancer should exit cleanly on shutdown.
+        shutdown_trigger.trigger();
+        tasks.close();
+        tasks.wait().await;
+    }
+
+    /// Tests rebalancing of channels whose liquidity has drawn down below a trigger fraction of capacity.
+    #[test]
+    fn test_rebalance_if_depleted() {
+        let capacity = 100_000_000;
+        let mut channel = SimulatedChannel {
+            capacity_msat: capacity,
+            short_channel_id: ShortChannelID::from(0),
+            node_1: ChannelState::new(create_test_policy(capacity / 2), capacity / 2),
+            node_2: ChannelState::new(create_test_policy(capacity / 2), capacity / 2),
+            exclude_capacity: false,
+        };
+        let node_1_pk = channel.node_1.policy.pubkey;
+
+        // A balanced channel is left untouched.
+        assert!(channel.rebalance_if_depleted(0.2).is_none());
+        assert_channel_balances!(channel.node_1, capacity / 2, 0, 0);
+        assert_channel_balances!(channel.node_2, capacity / 2, 0, 0);
+
+        // Draw node_1's side of the channel down beneath the trigger threshold and check that the channel is
+        // reset to an even split of its capacity.
+        channel.node_1.local_balance_msat = capacity / 25;
+        channel.node_2.local_balance_msat = capacity - capacity / 25;
+
+        assert_eq!(
+            channel.rebalance_if_depleted(0.2),
+            Some(capacity / 2 - capacity / 25)
+        );
+        assert_channel_balances!(channel.node_1, capacity / 2, 0, 0);
+        assert_channel_balances!(channel.node_2, capacity / 2, 0, 0);
+        channel.sanity_check().unwrap();
+
+        // With an HTLC in flight from node_1, only the settled portion of the channel's capacity is
+        // redistributed; the in-flight balance remains locked in the HTLC.
+        let htlc_amt = 1_000_000;
+        let hash = PaymentHash([1; 32]);
+        channel
+            .add_htlc(
+                &node_1_pk,
+                hash,
+                Htlc {
+                    amount_msat: htlc_amt,
+                    cltv_expiry: 40,
+                },
+            )
+            .unwrap()
+            .unwrap();
+
+        // Manually drain the remainder of node_1's settled balance over to node_2.
+        channel.node_2.local_balance_msat += channel.node_1.local_balance_msat - capacity / 25;
+        channel.node_1.local_balance_msat = capacity / 25;
+        channel.sanity_check().unwrap();
+
+        let settled = capacity - htlc_amt;
+        assert_eq!(
+            channel.rebalance_if_depleted(0.2),
+            Some(settled / 2 - capacity / 25)
+        );
+        assert_channel_balances!(channel.node_1, settled / 2, 1, htlc_amt);
+        assert_channel_balances!(channel.node_2, settled - settled / 2, 0, 0);
+        channel.sanity_check().unwrap();
+
+        // Settling the in-flight HTLC after a rebalance keeps the channel's accounting consistent (remove_htlc
+        // runs the channel's sanity check internally).
+        channel.remove_htlc(&node_1_pk, &hash, true).unwrap();
+        assert_channel_balances!(channel.node_1, settled / 2, 0, 0);
+        assert_channel_balances!(channel.node_2, settled - settled / 2 + htlc_amt, 0, 0);
+    }
+
     /// Tests state updates related to adding and removing HTLCs to a channel.
     #[test]
     fn test_channel_state_transitions() {
@@ -1984,7 +2317,7 @@ mod tests {
         let clock = Arc::new(SimulationClock::new(1).unwrap());
         let routing_graph = Arc::new(populate_network_graph(channels, Arc::clone(&clock)).unwrap());
 
-        let nodes = ln_node_from_graph(sim_graph, routing_graph, clock)
+        let nodes = ln_node_from_graph(sim_graph, routing_graph, clock, DEFAULT_MAX_ROUTE_FEE_PCT)
             .await
             .unwrap();
 
@@ -2092,6 +2425,66 @@ mod tests {
         }
     }
 
+    /// Tests that pathfinding limits total routing fees to the budget provided. Real senders place a limit on
+    /// the fees that they are prepared to pay, so a path that charges more than the budget should not be used
+    /// even if it is the only route to the destination (otherwise a single high-fee channel can drain the sender).
+    #[tokio::test]
+    async fn test_find_payment_route_fee_budget() {
+        let capacity = 10_000_000_000;
+        let mut channels = create_simulated_channels(2, capacity);
+        let source = channels[0].node_1.policy.pubkey;
+        let dest = channels[1].node_2.policy.pubkey;
+        let amount_msat = 1_000_000;
+
+        let clock = Arc::new(SimulationClock::new(1).unwrap());
+
+        // With the modest fees that our test channels are created with, pathfinding should succeed with a fee
+        // budget of 5% of the payment amount.
+        let graph = Arc::new(populate_network_graph(channels.clone(), clock.clone()).unwrap());
+        let scorer = Mutex::new(ProbabilisticScorer::new(
+            ProbabilisticScoringDecayParameters::default(),
+            graph.clone(),
+            Arc::new(WrappedLog {}),
+        ));
+        assert!(find_payment_route(
+            &source,
+            dest,
+            amount_msat,
+            amount_msat / 20,
+            &graph,
+            &scorer
+        )
+        .await
+        .is_ok());
+
+        // Set the forwarding node's fee for the second channel to 10% of the payment amount. The only path to
+        // the destination now exceeds a 5% fee budget, so pathfinding should fail.
+        channels[1].node_1.policy.base_fee = amount_msat / 10;
+        let graph = Arc::new(populate_network_graph(channels, clock).unwrap());
+        let scorer = Mutex::new(ProbabilisticScorer::new(
+            ProbabilisticScoringDecayParameters::default(),
+            graph.clone(),
+            Arc::new(WrappedLog {}),
+        ));
+        assert!(find_payment_route(
+            &source,
+            dest,
+            amount_msat,
+            amount_msat / 20,
+            &graph,
+            &scorer
+        )
+        .await
+        .is_err());
+
+        // A more generous budget of 20% of the payment amount allows the payment to route again.
+        assert!(
+            find_payment_route(&source, dest, amount_msat, amount_msat / 5, &graph, &scorer)
+                .await
+                .is_ok()
+        );
+    }
+
     /// Tests the functionality of a `SimNode`, mocking out the `SimNetwork` that is responsible for payment
     /// propagation to isolate testing to just the implementation of `LightningNode`.
     #[tokio::test]
@@ -2109,6 +2502,7 @@ mod tests {
             sim_network.clone(),
             Arc::new(graph),
             Arc::new(SystemClock {}),
+            DEFAULT_MAX_ROUTE_FEE_PCT,
         )
         .unwrap();
 
@@ -2167,8 +2561,9 @@ mod tests {
             );
 
         // Dispatch payments to different destinations and assert that our track payment results are as expected.
-        let hash_1 = node.send_payment(dest_1, 10_000).await.unwrap();
-        let hash_2 = node.send_payment(dest_2, 15_000).await.unwrap();
+        // Amounts are large enough that route fees fit within pathfinding's fee budget of 5% of the payment amount.
+        let hash_1 = node.send_payment(dest_1, 1_000_000).await.unwrap();
+        let hash_2 = node.send_payment(dest_2, 1_500_000).await.unwrap();
 
         let (_, shutdown_listener) = triggered::trigger();
 
@@ -2199,6 +2594,7 @@ mod tests {
             Arc::new(Mutex::new(test_kit.graph)),
             test_kit.routing_graph.clone(),
             Arc::new(SystemClock {}),
+            DEFAULT_MAX_ROUTE_FEE_PCT,
         )
         .unwrap();
 
@@ -2359,9 +2755,16 @@ mod tests {
             dest: PublicKey,
             amt: u64,
         ) -> (Route, Result<PaymentResult, LightningError>) {
-            let route = find_payment_route(&source, dest, amt, &self.routing_graph, &self.scorer)
-                .await
-                .unwrap();
+            let route = find_payment_route(
+                &source,
+                dest,
+                amt,
+                amt / 20,
+                &self.routing_graph,
+                &self.scorer,
+            )
+            .await
+            .unwrap();
 
             let (sender, receiver) = oneshot::channel();
             self.graph
@@ -2394,8 +2797,9 @@ mod tests {
         let mut test_kit =
             DispatchPaymentTestKit::new(chan_capacity, vec![], CustomRecords::default()).await;
 
-        // Send a payment that should succeed from Alice -> Dave.
-        let mut amt = 20_000;
+        // Send a payment that should succeed from Alice -> Dave. The amount is large enough that the fees for the
+        // route comfortably fit within pathfinding's fee budget of 5% of the payment amount.
+        let mut amt = 1_000_000;
         let (route, _) = test_kit
             .send_test_payment(test_kit.nodes[0], test_kit.nodes[3], amt)
             .await;
@@ -2444,7 +2848,7 @@ mod tests {
         // Finally, we'll test a multi-hop failure by trying to send from Alice -> Dave. Since Bob's liquidity is
         // drained, we expect a failure and unchanged balances along the route.
         let _ = test_kit
-            .send_test_payment(test_kit.nodes[0], test_kit.nodes[3], 20_000)
+            .send_test_payment(test_kit.nodes[0], test_kit.nodes[3], 1_000_000)
             .await;
         assert_eq!(test_kit.channel_balances().await, expected_balances);
 
@@ -2460,8 +2864,9 @@ mod tests {
         let mut test_kit =
             DispatchPaymentTestKit::new(chan_capacity, vec![], CustomRecords::default()).await;
 
-        // Send a payment that should succeed from Alice -> Dave.
-        let amt = 20_000;
+        // Send a payment that should succeed from Alice -> Dave. The amount is large enough that the fees for the
+        // route comfortably fit within pathfinding's fee budget of 5% of the payment amount.
+        let amt = 1_000_000;
         let (route, _) = test_kit
             .send_test_payment(test_kit.nodes[0], test_kit.nodes[3], amt)
             .await;
@@ -2570,6 +2975,7 @@ mod tests {
             Arc::new(Mutex::new(test_kit.graph)),
             test_kit.routing_graph.clone(),
             Arc::new(SystemClock {}),
+            DEFAULT_MAX_ROUTE_FEE_PCT,
         )
         .unwrap();
 

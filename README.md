@@ -400,6 +400,64 @@ This is required for the case where you want to specify a channel that
 will be used in the simulated network that is just responsible for 
 forwarding payments, but does not send or receive any payments itself.
 
+### Channel Rebalancing
+
+Since payment flows in the simulation are not perfectly circular, the
+channels in a simulated network will progressively deplete to one side
+over the course of a long-running simulation, and payment success rates
+will decay accordingly. On the real network, node operators counteract
+this with out-of-band actions such as circular rebalances, swaps and
+splices. The simulator can optionally model the *effect* of these
+actions (without their mechanics) by periodically "teleporting" the
+balance of depleted channels back to an even split:
+
+```
+{
+  "sim_network": [ ... ],
+  "rebalance": {
+    "trigger_below": 0.1,
+    "interval_secs": 3600,
+    "exclude": [
+      "020a30431ce58843eedf8051214dbfadb65b107cc598b8277f14bb9b33c9cd026f"
+    ]
+  }
+}
+```
+
+* `trigger_below`: the fraction of a channel's capacity beneath which
+  either side's available balance triggers a rebalance of the channel,
+  exclusively between 0 and 0.5 (default: 0.1).
+* `interval_secs`: the number of seconds between scans of the network's
+  channels (default: 3600).
+* `exclude`: nodes that do not participate in rebalancing (default:
+  empty). Any channel that has a listed node as one of its peers will
+  never be rebalanced, regardless of which side of the channel has
+  depleted. This models operators that don't maintain their liquidity,
+  letting their channels drain naturally while the rest of the network
+  is kept liquid.
+
+Rebalancing is opt-in and only available on simulated networks. Leave
+it off to study how liquidity depletes under a traffic pattern; turn it
+on for long-running simulations that need sustained payment success
+(each rebalance is logged with the amount moved, so the volume of
+intervention required to keep the network liquid is itself a useful
+output). Rebalancing preserves determinism when running with a fixed
+seed. Balance that is locked in in-flight HTLCs is never moved.
+
+### Routing Fee Limit
+
+Payments on simulated networks will not pay more than 5% of the
+payment amount in routing fees, mirroring the fee limits that real
+senders place on payments. This can be tuned with a top-level field in
+the simulation file (only valid on simulated networks):
+
+```
+{
+  "sim_network": [ ... ],
+  "max_route_fee_pct": 0.5
+}
+```
+
 ### Inclusions and Limitations
 
 The simulator will execute payments on the mocked out network as it 

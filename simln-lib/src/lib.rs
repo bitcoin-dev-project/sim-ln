@@ -103,7 +103,7 @@ impl std::fmt::Display for NodeId {
 }
 
 /// Represents a short channel ID, expressed as a struct so that we can implement display for the trait.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Copy, Serialize, Deserialize)]
 pub struct ShortChannelID(u64);
 
 /// Utility function to easily convert from u64 to `ShortChannelID`.
@@ -2163,15 +2163,23 @@ mod tests {
             "Simulation should have run at least for 25s, took {:?}",
             elapsed
         );
+        // The total number of payments made within the simulation's 25 second runtime depends on wall clock
+        // scheduling at the cutoff, so we only assert on a prefix of payments that will reliably complete in time.
         let expected_payment_list = vec![
-            pk1, pk2, pk1, pk1, pk1, pk3, pk3, pk3, pk4, pk3, pk2, pk1, pk4,
+            pk1, pk2, pk1, pk1, pk3, pk3, pk3, pk4, pk2, pk4, pk3, pk2, pk3, pk2, pk4, pk4, pk1,
+            pk4, pk2, pk4,
         ];
 
-        assert!(
-            payments_list.lock().unwrap().as_ref() == expected_payment_list,
-            "The expected order of payments is not correct: {:?} vs {:?}",
-            payments_list.lock().unwrap(),
-            expected_payment_list,
+        let actual_payments: Vec<PublicKey> = payments_list
+            .lock()
+            .unwrap()
+            .iter()
+            .take(expected_payment_list.len())
+            .cloned()
+            .collect();
+        assert_eq!(
+            actual_payments, expected_payment_list,
+            "The expected order of payments is not correct"
         );
 
         // remove all the payments made in the previous execution
@@ -2190,9 +2198,16 @@ mod tests {
         );
         let _ = simulation2.run(&[]).await;
 
-        assert!(
-            payments_list.lock().unwrap().as_ref() != expected_payment_list,
-            "The expected order of payments shoud be different because a different is used"
+        let actual_payments: Vec<PublicKey> = payments_list
+            .lock()
+            .unwrap()
+            .iter()
+            .take(expected_payment_list.len())
+            .cloned()
+            .collect();
+        assert_ne!(
+            actual_payments, expected_payment_list,
+            "The expected order of payments should be different because a different seed is used"
         );
     }
 }

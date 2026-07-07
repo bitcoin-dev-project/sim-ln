@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use simln_lib::clock::SimulationClock;
 use simln_lib::sim_node::{
     ln_node_from_graph, populate_network_graph, ChannelPolicy, CustomRecords, Interceptor,
-    SimGraph, SimNode, SimulatedChannel,
+    RebalanceConfig, SimGraph, SimNode, SimulatedChannel, DEFAULT_MAX_ROUTE_FEE_PCT,
 };
 use simln_lib::{
     cln, cln::ClnNode, eclair, eclair::EclairNode, ldk_server, ldk_server::LdkServerNode, lnd,
@@ -14,10 +14,11 @@ use simln_lib::{
     NodeId, NodeInfo, Simulation, SimulationCfg, WriteResults,
 };
 use simln_lib::{ShortChannelID, SimulationError};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio_util::task::TaskTracker;
 
@@ -138,6 +139,18 @@ impl Cli {
             }
         }
 
+        if sim_params.rebalance.is_some() && sim_params.sim_network.is_empty() {
+            return Err(anyhow!(
+                "Rebalancing is only allowed on a simulated network"
+            ));
+        }
+
+        if sim_params.max_route_fee_pct.is_some() && sim_params.sim_network.is_empty() {
+            return Err(anyhow!(
+                "A routing fee limit can only be set on a simulated network"
+            ));
+        }
+
         Ok(())
     }
 }
@@ -150,6 +163,42 @@ pub struct SimParams {
     pub sim_network: Vec<NetworkParser>,
     #[serde(default)]
     pub activity: Vec<ActivityParser>,
+    #[serde(default)]
+    pub exclude: Vec<PublicKey>,
+    #[serde(default)]
+    pub rebalance: Option<RebalanceParser>,
+    /// The maximum total routing fee that simulated nodes will pay for a payment, expressed as a percentage of
+    /// the payment amount (only used on simulated networks, where it defaults to 5%).
+    #[serde(default)]
+    pub max_route_fee_pct: Option<f64>,
+}
+
+/// Default fraction of channel capacity beneath which a channel side triggers a rebalance.
+fn default_rebalance_trigger() -> f64 {
+    0.1
+}
+
+/// Default number of seconds between rebalancing scans of the simulated network (one hour).
+fn default_rebalance_interval() -> u64 {
+    3600
+}
+
+/// Data structure that is used to parse rebalancing configuration for simulated networks from the simulation
+/// file. When present, channels in the simulated network whose available liquidity has drawn down beneath a
+/// trigger fraction of their capacity are periodically reset to an even split, modeling the out-of-band actions
+/// (circular rebalances, swaps, splices) that node operators take to restore liquidity. When absent, channels
+/// deplete naturally under the simulation's payment flows.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RebalanceParser {
+    /// The fraction of a channel's capacity beneath which a side's available balance triggers a rebalance,
+    /// exclusively between 0 and 0.5.
+    #[serde(default = "default_rebalance_trigger")]
+    pub trigger_below: f64,
+    /// The number of seconds between scans of the network's channels.
+    #[serde(default = "default_rebalance_interval")]
+    pub interval_secs: u64,
+    /// Nodes that do not participate in rebalancing. Any channel that has a node in this list as one of its
+    /// peers will never be rebalanced, regardless of which side of the channel has depleted.
     #[serde(default)]
     pub exclude: Vec<PublicKey>,
 }
@@ -261,6 +310,8 @@ pub async fn create_simulation_with_network(
         sim_network,
         activity: _activity,
         exclude,
+        rebalance,
+        max_route_fee_pct,
     } = sim_params;
 
     // Convert nodes representation for parsing to SimulatedChannel
@@ -301,6 +352,32 @@ pub async fn create_simulation_with_network(
         .map_err(|e| SimulationError::SimulatedNetworkError(format!("{:?}", e)))?,
     ));
 
+    // If the user has opted into rebalancing, spawn a task that will periodically reset channels whose
+    // liquidity has drawn down. Without this, the network's channels will progressively deplete under the
+    // simulation's payment flows.
+    if let Some(rebalance) = rebalance {
+        // Fail early on exclusions for nodes that aren't part of the simulated network, because they'd
+        // otherwise be silently ignored (most likely hiding a typo in the pubkey).
+        for pk in &rebalance.exclude {
+            if !nodes_info.contains_key(pk) {
+                return Err(anyhow!(
+                    "Rebalance exclusion pubkey: {pk} not found in simulated network"
+                ));
+            }
+        }
+
+        let rebalance_cfg = RebalanceConfig::new(
+            rebalance.trigger_below,
+            Duration::from_secs(rebalance.interval_secs),
+            HashSet::from_iter(rebalance.exclude.iter().copied()),
+        )?;
+
+        simulation_graph
+            .lock()
+            .await
+            .start_rebalancer(clock.clone(), rebalance_cfg);
+    }
+
     // Copy all simulated channels into a read-only routing graph, allowing to pathfind for
     // individual payments without locking the simulation graph (this is a duplication of the channels,
     // but the performance tradeoff is worthwhile for concurrent pathfinding).
@@ -313,7 +390,13 @@ pub async fn create_simulation_with_network(
     // custom actions on the simulated network. For the nodes we'll pass our simulation, cast them
     // to a dyn trait and exclude any nodes that shouldn't be included in random activity
     // generation.
-    let nodes = ln_node_from_graph(simulation_graph, routing_graph, clock.clone()).await?;
+    let nodes = ln_node_from_graph(
+        simulation_graph,
+        routing_graph,
+        clock.clone(),
+        max_route_fee_pct.unwrap_or(DEFAULT_MAX_ROUTE_FEE_PCT),
+    )
+    .await?;
     let mut nodes_dyn: HashMap<_, Arc<Mutex<dyn LightningNode>>> = nodes
         .iter()
         .map(|(pk, node)| (*pk, Arc::clone(node) as Arc<Mutex<dyn LightningNode>>))
@@ -352,6 +435,8 @@ pub async fn create_simulation(
         sim_network: _sim_network,
         activity: _activity,
         exclude: _,
+        rebalance: _,
+        max_route_fee_pct: _,
     } = sim_params;
 
     let (clients, clients_info) = get_clients(nodes.to_vec()).await?;
