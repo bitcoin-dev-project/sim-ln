@@ -197,6 +197,10 @@ pub struct RebalanceParser {
     /// The number of seconds between scans of the network's channels.
     #[serde(default = "default_rebalance_interval")]
     pub interval_secs: u64,
+    /// Nodes that do not participate in rebalancing. Any channel that has a node in this list as one of its
+    /// peers will never be rebalanced, regardless of which side of the channel has depleted.
+    #[serde(default)]
+    pub exclude: Vec<PublicKey>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -351,10 +355,20 @@ pub async fn create_simulation_with_network(
     // liquidity has drawn down. Without this, the network's channels will progressively deplete under the
     // simulation's payment flows.
     if let Some(rebalance) = rebalance {
+        // Fail early on exclusions for nodes that aren't part of the simulated network, because they'd
+        // otherwise be silently ignored (most likely hiding a typo in the pubkey).
+        for pk in &rebalance.exclude {
+            if !nodes_info.contains_key(pk) {
+                return Err(anyhow!(
+                    "Rebalance exclusion pubkey: {pk} not found in simulated network"
+                ));
+            }
+        }
+
         let rebalance_cfg = RebalanceConfig::new(
             rebalance.trigger_below,
             Duration::from_secs(rebalance.interval_secs),
-            HashSet::new(),
+            HashSet::from_iter(rebalance.exclude.iter().copied()),
         )?;
 
         simulation_graph

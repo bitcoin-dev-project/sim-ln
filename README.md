@@ -393,7 +393,10 @@ balance of depleted channels back to an even split:
   "sim_network": [ ... ],
   "rebalance": {
     "trigger_below": 0.1,
-    "interval_secs": 3600
+    "interval_secs": 3600,
+    "exclude": [
+      "020a30431ce58843eedf8051214dbfadb65b107cc598b8277f14bb9b33c9cd026f"
+    ]
   }
 }
 ```
@@ -403,6 +406,12 @@ balance of depleted channels back to an even split:
   exclusively between 0 and 0.5 (default: 0.1).
 * `interval_secs`: the number of seconds between scans of the network's
   channels (default: 3600).
+* `exclude`: nodes that do not participate in rebalancing (default:
+  empty). Any channel that has a listed node as one of its peers will
+  never be rebalanced, regardless of which side of the channel has
+  depleted. This models operators that don't maintain their liquidity,
+  letting their channels drain naturally while the rest of the network
+  is kept liquid.
 
 Rebalancing is opt-in and only available on simulated networks. Leave
 it off to study how liquidity depletes under a traffic pattern; turn it
