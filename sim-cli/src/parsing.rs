@@ -14,7 +14,7 @@ use simln_lib::{
     Simulation, SimulationCfg, WriteResults,
 };
 use simln_lib::{ShortChannelID, SimulationError};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -354,6 +354,7 @@ pub async fn create_simulation_with_network(
         let rebalance_cfg = RebalanceConfig::new(
             rebalance.trigger_below,
             Duration::from_secs(rebalance.interval_secs),
+            HashSet::new(),
         )?;
 
         simulation_graph

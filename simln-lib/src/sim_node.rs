@@ -8,7 +8,7 @@ use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Network, ScriptBuf, TxOut};
 use lightning::ln::chan_utils::make_funding_redeemscript;
 use serde::{Deserialize, Serialize};
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::fmt::Display;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
@@ -1075,19 +1075,27 @@ async fn handle_intercepted_htlc(
 
 /// Configuration for optional "teleport" rebalancing of simulated channels, which periodically resets channels
 /// whose available liquidity has drawn down. See [`SimGraph::start_rebalancer`].
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct RebalanceConfig {
     /// The fraction of a channel's total capacity beneath which a side's available balance triggers a rebalance.
     trigger_below_fraction: f64,
     /// The time between scans of the network's channels.
     interval: Duration,
+    /// Nodes that do not participate in rebalancing. A channel is skipped by the rebalancer if either of its
+    /// peers is excluded, regardless of which side of the channel has depleted.
+    exclude: HashSet<PublicKey>,
 }
 
 impl RebalanceConfig {
     /// Creates a new rebalancing configuration, validating that the trigger fraction is in (0, 0.5) and that the
     /// scan interval is non-zero. The trigger must be beneath 0.5 because both sides of a channel cannot be at or
-    /// above half of its capacity, so any higher value would rebalance every channel on every scan.
-    pub fn new(trigger_below_fraction: f64, interval: Duration) -> Result<Self, SimulationError> {
+    /// above half of its capacity, so any higher value would rebalance every channel on every scan. Channels that
+    /// have a peer in `exclude` will never be rebalanced.
+    pub fn new(
+        trigger_below_fraction: f64,
+        interval: Duration,
+        exclude: HashSet<PublicKey>,
+    ) -> Result<Self, SimulationError> {
         if !(trigger_below_fraction > 0.0 && trigger_below_fraction < 0.5) {
             return Err(SimulationError::SimulatedNetworkError(format!(
                 "rebalance trigger fraction must be in (0, 0.5), got: {trigger_below_fraction}"
@@ -1103,6 +1111,7 @@ impl RebalanceConfig {
         Ok(RebalanceConfig {
             trigger_below_fraction,
             interval,
+            exclude,
         })
     }
 }
@@ -1196,6 +1205,11 @@ impl SimGraph {
     /// involves no randomness. Each rebalance is logged with the amount moved, so the total volume of
     /// intervention needed to keep the network liquid is observable in the simulation's logs.
     ///
+    /// Nodes in the config's exclusion list do not participate in rebalancing: any channel that they are a peer
+    /// on is skipped by scans, no matter which side of the channel has depleted. This models operators that do
+    /// not maintain their liquidity, and allows their channels to drain naturally while the rest of the network
+    /// is kept liquid.
+    ///
     /// The task runs until the simulation's shutdown signal is triggered.
     pub fn start_rebalancer<C: Clock + 'static>(&self, clock: Arc<C>, cfg: RebalanceConfig) {
         let channels = Arc::clone(&self.channels);
@@ -1203,9 +1217,10 @@ impl SimGraph {
 
         self.tasks.spawn(async move {
             log::info!(
-                "Started channel rebalancer: triggering below {} of channel capacity, scanning every {:?}.",
+                "Started channel rebalancer: triggering below {} of channel capacity, scanning every {:?}, {} nodes excluded.",
                 cfg.trigger_below_fraction,
-                cfg.interval
+                cfg.interval,
+                cfg.exclude.len(),
             );
 
             loop {
@@ -1224,6 +1239,14 @@ impl SimGraph {
                 for scid in scids {
                     // Unwrap is safe because the key was drawn from the map and the lock is held throughout.
                     let channel = channels_lock.get_mut(&scid).unwrap();
+
+                    // Channels that have an excluded peer never rebalance, regardless of which side of the
+                    // channel has drawn down.
+                    if cfg.exclude.contains(&channel.node_1.policy.pubkey)
+                        || cfg.exclude.contains(&channel.node_2.policy.pubkey)
+                    {
+                        continue;
+                    }
                     if let Some(moved_msat) = channel.rebalance_if_depleted(cfg.trigger_below_fraction)
                     {
                         log::info!("Rebalanced channel: {scid}, moved {moved_msat} msat.");
@@ -1850,11 +1873,11 @@ mod tests {
     /// Tests validation of rebalancing configurations.
     #[test]
     fn test_rebalance_config_validation() {
-        assert!(RebalanceConfig::new(0.1, Duration::from_secs(600)).is_ok());
-        assert!(RebalanceConfig::new(0.0, Duration::from_secs(600)).is_err());
-        assert!(RebalanceConfig::new(0.5, Duration::from_secs(600)).is_err());
-        assert!(RebalanceConfig::new(-0.1, Duration::from_secs(600)).is_err());
-        assert!(RebalanceConfig::new(0.1, Duration::ZERO).is_err());
+        assert!(RebalanceConfig::new(0.1, Duration::from_secs(600), HashSet::new()).is_ok());
+        assert!(RebalanceConfig::new(0.0, Duration::from_secs(600), HashSet::new()).is_err());
+        assert!(RebalanceConfig::new(0.5, Duration::from_secs(600), HashSet::new()).is_err());
+        assert!(RebalanceConfig::new(-0.1, Duration::from_secs(600), HashSet::new()).is_err());
+        assert!(RebalanceConfig::new(0.1, Duration::ZERO, HashSet::new()).is_err());
     }
 
     /// Tests that the rebalancing task resets depleted channels on its scan interval, and leaves healthy channels
@@ -1876,11 +1899,22 @@ mod tests {
             node_2: ChannelState::new(create_test_policy(capacity / 2), capacity - capacity / 50),
             exclude_capacity: false,
         };
+        // A channel that is just as depleted, but has a peer that is excluded from rebalancing. We exclude the
+        // node on the channel's healthy side to demonstrate that exclusion applies to the whole channel, not
+        // just to the side that has drawn down.
+        let excluded_depleted = SimulatedChannel {
+            capacity_msat: capacity,
+            short_channel_id: ShortChannelID::from(2),
+            node_1: ChannelState::new(create_test_policy(capacity / 2), capacity / 50),
+            node_2: ChannelState::new(create_test_policy(capacity / 2), capacity - capacity / 50),
+            exclude_capacity: false,
+        };
+        let excluded_pubkey = excluded_depleted.node_2.policy.pubkey;
 
         let (shutdown_trigger, shutdown_listener) = trigger();
         let tasks = TaskTracker::new();
         let graph = SimGraph::new(
-            vec![balanced, depleted],
+            vec![balanced, depleted, excluded_depleted],
             tasks.clone(),
             vec![],
             CustomRecords::default(),
@@ -1891,7 +1925,12 @@ mod tests {
         let clock = Arc::new(SimulationClock::new(1000).unwrap());
         graph.start_rebalancer(
             clock,
-            RebalanceConfig::new(0.1, Duration::from_secs(60)).unwrap(),
+            RebalanceConfig::new(
+                0.1,
+                Duration::from_secs(60),
+                HashSet::from([excluded_pubkey]),
+            )
+            .unwrap(),
         );
 
         // The clock speeds wall time up by 1000x, so the rebalancer's 60 second scan interval elapses after 60ms
@@ -1917,6 +1956,19 @@ mod tests {
         })
         .await
         .expect("depleted channel should be rebalanced within the timeout");
+
+        // Give the rebalancer a few more scan intervals, then check that the channel with an excluded peer has
+        // been skipped despite being just as depleted as the channel that was reset.
+        time::sleep(Duration::from_millis(300)).await;
+        {
+            let channels = graph.channels.lock().await;
+            let excluded_channel = channels.get(&ShortChannelID::from(2)).unwrap();
+            assert_eq!(excluded_channel.node_1.local_balance_msat, capacity / 50);
+            assert_eq!(
+                excluded_channel.node_2.local_balance_msat,
+                capacity - capacity / 50
+            );
+        }
 
         // The rebalancer should exit cleanly on shutdown.
         shutdown_trigger.trigger();
