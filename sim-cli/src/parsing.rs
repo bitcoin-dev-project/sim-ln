@@ -84,14 +84,15 @@ pub struct Cli {
     /// Seed to run random activity generator deterministically
     #[clap(long, short)]
     pub fix_seed: Option<u64>,
-    /// A multiplier to wall time to speed up the simulation's clock. Only available when when running on a network of
-    /// simulated nodes.
-    #[clap(long)]
-    pub speedup_clock: Option<u16>,
     /// Latency to optionally introduce for payments in a simulated network expressed in
     /// milliseconds.
     #[clap(long)]
     pub latency_ms: Option<u32>,
+    /// Run the simulated network on virtual time: time advances instantly to the next event instead of sleeping on the
+    /// wall clock, so the run finishes as fast as the CPU allows and is reproducible for a given seed. Only available on
+    /// a simulated network, and requires --total-time to bound the run.
+    #[clap(long, default_value_t = false)]
+    pub virtual_time: bool,
 }
 
 impl Cli {
@@ -111,16 +112,23 @@ impl Cli {
                 nodes or sim_graph to run with simulated nodes"
             ));
         }
-        if !sim_params.nodes.is_empty() && self.speedup_clock.is_some() {
-            return Err(anyhow!(
-                "Clock speedup is only allowed when running on a simulated network"
-            ));
-        }
-
         if !sim_params.nodes.is_empty() && self.latency_ms.is_some() {
             return Err(anyhow!(
                 "Latency for payments is only allowed when running on a simulated network"
             ));
+        }
+
+        if self.virtual_time {
+            if !sim_params.nodes.is_empty() {
+                return Err(anyhow!(
+                    "Virtual time is only allowed when running on a simulated network; real nodes run on wall time"
+                ));
+            }
+            if self.total_time.is_none() {
+                return Err(anyhow!(
+                    "Virtual time requires --total-time, otherwise it advances forever"
+                ));
+            }
         }
 
         if !sim_params.exclude.is_empty() {
@@ -339,14 +347,15 @@ pub async fn create_simulation_with_network(
     ))
 }
 
-/// Parses the cli options provided and creates a simulation to be run, connecting to lightning nodes and validating
-/// any activity described in the simulation file.
+/// Creates a simulation to be run against a set of real lightning nodes, connecting to the nodes described in
+/// `sim_params` and validating any activity described in the simulation file. The simulation is driven by `clock`,
+/// which must be constructed on the runtime that will run the simulation.
 pub async fn create_simulation(
-    cli: &Cli,
+    cfg: SimulationCfg,
     sim_params: &SimParams,
+    clock: Arc<SimulationClock>,
     tasks: TaskTracker,
 ) -> Result<(Simulation<SimulationClock>, Vec<ActivityDefinition>), anyhow::Error> {
-    let cfg: SimulationCfg = SimulationCfg::try_from(cli)?;
     let SimParams {
         nodes,
         sim_network: _sim_network,
@@ -365,9 +374,7 @@ pub async fn create_simulation(
             cfg,
             clients,
             tasks,
-            // When running on a real network, the underlying node may use wall time so we always use a clock with no
-            // speedup.
-            Arc::new(SimulationClock::new(1)?),
+            clock,
             shutdown_trigger,
             shutdown_listener,
         ),
@@ -531,7 +538,7 @@ async fn validate_activities(
     Ok(validated_activities)
 }
 
-async fn read_sim_path(data_dir: PathBuf, sim_file: PathBuf) -> anyhow::Result<PathBuf> {
+fn read_sim_path(data_dir: PathBuf, sim_file: PathBuf) -> anyhow::Result<PathBuf> {
     if sim_file.exists() {
         Ok(sim_file)
     } else if sim_file.is_relative() {
@@ -540,15 +547,15 @@ async fn read_sim_path(data_dir: PathBuf, sim_file: PathBuf) -> anyhow::Result<P
             Ok(sim_path)
         } else {
             log::info!("Simulation file '{}' does not exist.", sim_path.display());
-            select_sim_file(data_dir).await
+            select_sim_file(data_dir)
         }
     } else {
         log::info!("Simulation file '{}' does not exist.", sim_file.display());
-        select_sim_file(data_dir).await
+        select_sim_file(data_dir)
     }
 }
 
-pub async fn select_sim_file(data_dir: PathBuf) -> anyhow::Result<PathBuf> {
+pub fn select_sim_file(data_dir: PathBuf) -> anyhow::Result<PathBuf> {
     let sim_files = std::fs::read_dir(data_dir.clone())?
         .filter_map(|f| {
             f.ok().and_then(|f| {
@@ -585,8 +592,8 @@ fn mkdir(dir: PathBuf) -> anyhow::Result<PathBuf> {
     Ok(dir)
 }
 
-pub async fn parse_sim_params(cli: &Cli) -> anyhow::Result<SimParams> {
-    let sim_path = read_sim_path(cli.data_dir.clone(), cli.sim_file.clone()).await?;
+pub fn parse_sim_params(cli: &Cli) -> anyhow::Result<SimParams> {
+    let sim_path = read_sim_path(cli.data_dir.clone(), cli.sim_file.clone())?;
     let sim_params = serde_json::from_str(&std::fs::read_to_string(sim_path)?).map_err(|e| {
         anyhow!(
             "Could not deserialize node connection data or activity description from simulation file (line {}, col {}, err: {}).",

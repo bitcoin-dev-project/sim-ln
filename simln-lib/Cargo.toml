@@ -24,7 +24,7 @@ thiserror = "1.0.45"
 log = "0.4.20"
 triggered = "0.1.2"
 mpsc = "0.2.0"
-tokio = "1.31.0"
+tokio = { version = "1.31.0", features = ["rt", "sync", "time", "macros", "fs", "io-util"] }
 rand = "0.8.5"
 hex = "0.4.3"
 csv = "1.2.2"
@@ -35,8 +35,12 @@ reqwest = { version = "0.12", features = ["json", "multipart"] }
 tokio-util = { version = "0.7.13", features = ["rt"] }
 ldk-server-client = { git = "https://github.com/lightningdevkit/ldk-server", rev = "8163f4fe139368613959bf4f10b19ee6a5b9b4ab" }
 
+[features]
+virtual-time = ["tokio/test-util"]
+
 [dev-dependencies]
 ntest = "0.9.0"
 mockall = "0.13.1"
 futures = "0.3.31"
 tempfile = "3"
+tokio = { version = "1.31.0", features = ["macros", "rt-multi-thread"] }

@@ -1130,6 +1130,9 @@ pub async fn ln_node_from_graph<C: Clock>(
 /// announcements, which has the effect of adding the nodes in each channel to the graph, because LDK does not export
 /// all of the fields required to apply node announcements. This means that we will not have node-level information
 /// (such as features) available in the routing graph.
+///
+/// Note that LDK's channel validation uses the wall clock to validate that announcements are not more than 24 hours
+/// in the future. If using a sped up clock, this must be called before the clock has advanced beyond that.
 pub fn populate_network_graph<C: Clock>(
     channels: Vec<SimulatedChannel>,
     clock: Arc<C>,
@@ -1164,9 +1167,6 @@ pub fn populate_network_graph<C: Clock>(
         };
 
         graph.update_channel_from_unsigned_announcement(&announcement, &Some(&utxo_validator))?;
-
-        // LDK only allows channel announcements up to 24h in the future. Use a fixed timestamp so that even if we've
-        // sped up our clock dramatically, we won't hit that limit.
         let now = clock.now().duration_since(UNIX_EPOCH).unwrap().as_secs() as u32;
         for (i, node) in [channel.node_1, channel.node_2].iter().enumerate() {
             let update = UnsignedChannelUpdate {
@@ -1620,13 +1620,13 @@ impl UtxoLookup for UtxoValidator {
 mod tests {
     use super::*;
     use crate::clock::SimulationClock;
-    use crate::clock::SystemClock;
     use crate::test_utils::get_random_keypair;
     use lightning::routing::router::build_route_from_hops;
     use lightning::routing::router::Route;
     use mockall::mock;
     use ntest::assert_true;
     use std::time::Duration;
+    use std::time::SystemTime;
     use tokio::sync::oneshot;
     use tokio::time::{self, timeout};
     use triggered::trigger;
@@ -1981,7 +1981,7 @@ mod tests {
             .unwrap(),
         ));
 
-        let clock = Arc::new(SimulationClock::new(1).unwrap());
+        let clock = Arc::new(SimulationClock::new(SystemTime::now()));
         let routing_graph = Arc::new(populate_network_graph(channels, Arc::clone(&clock)).unwrap());
 
         let nodes = ln_node_from_graph(sim_graph, routing_graph, clock)
@@ -2098,9 +2098,10 @@ mod tests {
     async fn test_simulated_node() {
         // Mock out our network and create a routing graph with 5 hops.
         let mock = MockNetwork::new();
+        let clock = Arc::new(SimulationClock::new(SystemTime::now()));
         let sim_network = Arc::new(Mutex::new(mock));
         let channels = create_simulated_channels(5, 300000000);
-        let graph = populate_network_graph(channels.clone(), Arc::new(SystemClock {})).unwrap();
+        let graph = populate_network_graph(channels.clone(), clock.clone()).unwrap();
 
         // Create a simulated node for the first channel in our network.
         let pk = channels[0].node_1.policy.pubkey;
@@ -2108,7 +2109,7 @@ mod tests {
             node_info(pk, String::default()),
             sim_network.clone(),
             Arc::new(graph),
-            Arc::new(SystemClock {}),
+            clock,
         )
         .unwrap();
 
@@ -2198,7 +2199,7 @@ mod tests {
             node_info(test_kit.nodes[0], String::default()),
             Arc::new(Mutex::new(test_kit.graph)),
             test_kit.routing_graph.clone(),
-            Arc::new(SystemClock {}),
+            Arc::new(SimulationClock::new(SystemTime::now())),
         )
         .unwrap();
 
@@ -2286,7 +2287,11 @@ mod tests {
             let shutdown_signal = triggered::trigger();
             let channels = create_simulated_channels(3, capacity);
             let routing_graph = Arc::new(
-                populate_network_graph(channels.clone(), Arc::new(SystemClock {})).unwrap(),
+                populate_network_graph(
+                    channels.clone(),
+                    Arc::new(SimulationClock::new(SystemTime::now())),
+                )
+                .unwrap(),
             );
 
             let scorer = Mutex::new(ProbabilisticScorer::new(
@@ -2569,7 +2574,7 @@ mod tests {
             node_info(test_kit.nodes[0], String::default()),
             Arc::new(Mutex::new(test_kit.graph)),
             test_kit.routing_graph.clone(),
-            Arc::new(SystemClock {}),
+            Arc::new(SimulationClock::new(SystemTime::now())),
         )
         .unwrap();
 
