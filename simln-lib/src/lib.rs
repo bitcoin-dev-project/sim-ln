@@ -1610,7 +1610,7 @@ async fn track_payment_result(
 
 #[cfg(test)]
 mod tests {
-    use crate::clock::SimulationClock;
+    use crate::clock::{Clock, SimulationClock};
     use crate::test_utils::{MockLightningNode, TestNodesResult};
     use crate::{
         get_payment_delay, test_utils, test_utils::LightningTestNodeBuilder, LightningError,
@@ -2005,6 +2005,21 @@ mod tests {
         });
     }
 
+    /// Fixed pubkeys for payment ordering tests. Payment events that are scheduled for the same
+    /// instant are tie-broken on their source pubkey, so node keys must be stable across runs
+    /// for the order of payments to be deterministic.
+    fn fixed_test_pubkeys() -> Vec<PublicKey> {
+        [
+            "02f6dc1fcf3431f461ff5e6d870f286e134b064fddd3795a98d5903c55e76cfa8c",
+            "0363a5321c2778e2f13f4d7602a84e866824551b4bd31fdfc66e044a274863d647",
+            "037b0c8a943a6bc3ebb5b56ed1c377a1d3e6b68e9231ad9bf7afd45ba37374f7a3",
+            "026389dd21b3611bf4bb78f8939d5912f3175107ff9c14b6881bb4bef0e7c6e905",
+        ]
+        .iter()
+        .map(|pk| PublicKey::from_str(pk).unwrap())
+        .collect()
+    }
+
     #[allow(clippy::type_complexity)]
     /// Helper to create and configure mock nodes for testing
     async fn setup_test_nodes_for_testing_deterministic_events(
@@ -2053,10 +2068,12 @@ mod tests {
         (network, payments_list)
     }
 
-    #[tokio::test]
+    // Run on a paused runtime so that the payment interval sleeps auto-advance rather than
+    // consuming real time; elapsed time is measured against the simulation's virtual clock.
+    #[tokio::test(start_paused = true)]
     async fn test_deterministic_payments_events_defined_activities() {
         let (network, payments_list) =
-            setup_test_nodes_for_testing_deterministic_events(None).await;
+            setup_test_nodes_for_testing_deterministic_events(Some(fixed_test_pubkeys())).await;
 
         // Define two activities
         // Activity 1: From node_1 to node_2
@@ -2081,28 +2098,33 @@ mod tests {
 
         let (shutdown_trigger, shutdown_listener) = triggered::trigger();
 
+        let clock = Arc::new(SimulationClock::new(SystemTime::now()));
+
         // Create simulation without a timeout.
         let simulation = Simulation::new(
             SimulationCfg::new(None, 100, 2.0, None, None),
             network.get_client_hashmap(),
             TaskTracker::new(),
-            Arc::new(SimulationClock::new(SystemTime::now())),
+            clock.clone(),
             shutdown_trigger,
             shutdown_listener,
         );
 
         // Run the simulation
-        let start = std::time::Instant::now();
+        let start = clock.now();
         let _ = simulation.run(&vec![activity_1, activity_2]).await;
-        let elapsed = start.elapsed();
+        let elapsed = clock.now().duration_since(start).unwrap();
 
+        // Activity 1 pays at t = 2, 4, 6, 8, 10 and activity 2 at t = 4, 8, 12, 16, 20. At the
+        // instants where both activities fire (t = 4, 8), activity 1 dispatches first because
+        // simultaneous events are ordered by source pubkey and its source sorts first.
         let expected_payment_list = vec![
             network.nodes[1].pubkey,
-            network.nodes[3].pubkey,
-            network.nodes[1].pubkey,
             network.nodes[1].pubkey,
             network.nodes[3].pubkey,
             network.nodes[1].pubkey,
+            network.nodes[1].pubkey,
+            network.nodes[3].pubkey,
             network.nodes[1].pubkey,
             network.nodes[3].pubkey,
             network.nodes[3].pubkey,
@@ -2121,57 +2143,47 @@ mod tests {
 
         assert!(
             payments_list.lock().unwrap().as_ref() == expected_payment_list,
-            "The expected order of payments is not correct"
+            "The expected order of payments is not correct: {:?} vs {:?}",
+            payments_list.lock().unwrap(),
+            expected_payment_list,
         );
     }
 
-    #[tokio::test]
+    // Run on a paused runtime so that the payment interval sleeps auto-advance rather than
+    // consuming real time; elapsed time is measured against the simulation's virtual clock.
+    #[tokio::test(start_paused = true)]
     async fn test_deterministic_payments_events_random() {
-        let pk1 = PublicKey::from_str(
-            "02f6dc1fcf3431f461ff5e6d870f286e134b064fddd3795a98d5903c55e76cfa8c",
-        )
-        .unwrap();
-        let pk2 = PublicKey::from_str(
-            "0363a5321c2778e2f13f4d7602a84e866824551b4bd31fdfc66e044a274863d647",
-        )
-        .unwrap();
-        let pk3 = PublicKey::from_str(
-            "037b0c8a943a6bc3ebb5b56ed1c377a1d3e6b68e9231ad9bf7afd45ba37374f7a3",
-        )
-        .unwrap();
-        let pk4 = PublicKey::from_str(
-            "026389dd21b3611bf4bb78f8939d5912f3175107ff9c14b6881bb4bef0e7c6e905",
-        )
-        .unwrap();
+        let pks = fixed_test_pubkeys();
+        let (pk1, pk2, pk3, pk4) = (pks[0], pks[1], pks[2], pks[3]);
 
         let (network, payments_list) =
-            setup_test_nodes_for_testing_deterministic_events(Some(vec![pk1, pk2, pk3, pk4])).await;
+            setup_test_nodes_for_testing_deterministic_events(Some(pks)).await;
 
         let (shutdown_trigger, shutdown_listener) = triggered::trigger();
+
+        let clock = Arc::new(SimulationClock::new(SystemTime::now()));
 
         // Create simulation with a defined seed.
         let simulation = Simulation::new(
             SimulationCfg::new(Some(25), 100, 2.0, None, Some(42)),
             network.get_client_hashmap(),
             TaskTracker::new(),
-            Arc::new(SimulationClock::new(SystemTime::now())),
+            clock.clone(),
             shutdown_trigger,
             shutdown_listener,
         );
 
         // Run the simulation
-        let start = std::time::Instant::now();
+        let start = clock.now();
         let _ = simulation.run(&[]).await;
-        let elapsed = start.elapsed();
+        let elapsed = clock.now().duration_since(start).unwrap();
 
         assert!(
             elapsed >= Duration::from_secs(25),
             "Simulation should have run at least for 25s, took {:?}",
             elapsed
         );
-        let expected_payment_list = vec![
-            pk1, pk2, pk1, pk1, pk1, pk3, pk3, pk3, pk4, pk3, pk2, pk1, pk4,
-        ];
+        let expected_payment_list = vec![pk1, pk1, pk2, pk2, pk4, pk2, pk2, pk2, pk3, pk3];
 
         assert!(
             payments_list.lock().unwrap().as_ref() == expected_payment_list,
