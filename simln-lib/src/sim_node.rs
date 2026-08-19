@@ -227,18 +227,27 @@ impl ChannelState {
         Ok(Ok(()))
     }
 
-    /// Checks whether the proposed HTLC can be added to the channel as an outgoing HTLC. This requires that we have
-    /// sufficient liquidity, and that the restrictions on our in flight htlc balance and count are not violated by
-    /// the addition of the HTLC. Specification sanity checks (such as reasonable CLTV) are also included, as this
-    /// is where we'd check it in real life.
-    fn check_outgoing_addition(&self, htlc: &Htlc) -> Result<(), ForwardingError> {
+    /// Checks whether the proposed HTLC can be added to the channel as an outgoing HTLC. Each limit is read from the
+    /// party that owns it:
+    ///
+    /// * `htlc_minimum_msat` / `htlc_maximum_msat` are forwarder-advertised: they are part of the gossiped
+    ///   `channel_update` for the sending node's own direction (populated into the graph from `self.policy`), so they
+    ///   are enforced against `self.policy`.
+    /// * `max_accepted_htlcs` / `max_htlc_value_in_flight_msat` are receiver-negotiated (BOLT-2 channel open, never
+    ///   gossiped): they bound the HTLCs the counterparty will accept in flight towards it, so they are enforced
+    ///   against `counterparty_policy`.
+    fn check_outgoing_addition(
+        &self,
+        htlc: &Htlc,
+        counterparty_policy: &ChannelPolicy,
+    ) -> Result<(), ForwardingError> {
         fail_forwarding_inequality!(htlc.amount_msat, >, self.policy.max_htlc_size_msat, MoreThanMaximum);
         fail_forwarding_inequality!(htlc.amount_msat, <, self.policy.min_htlc_size_msat, LessThanMinimum);
         fail_forwarding_inequality!(
-            self.in_flight.len() as u64 + 1, >, self.policy.max_htlc_count, ExceedsInFlightCount
+            self.in_flight.len() as u64 + 1, >, counterparty_policy.max_htlc_count, ExceedsInFlightCount
         );
         fail_forwarding_inequality!(
-            self.in_flight_total() + htlc.amount_msat, >, self.policy.max_in_flight_msat, ExceedsInFlightTotal
+            self.in_flight_total() + htlc.amount_msat, >, counterparty_policy.max_in_flight_msat, ExceedsInFlightTotal
         );
         fail_forwarding_inequality!(htlc.amount_msat, >, self.local_balance_msat, InsufficientBalance);
         fail_forwarding_inequality!(htlc.cltv_expiry, >, 500000000, ExpiryInSeconds);
@@ -256,8 +265,9 @@ impl ChannelState {
         &mut self,
         hash: PaymentHash,
         htlc: Htlc,
+        counterparty_policy: &ChannelPolicy,
     ) -> Result<Result<u64, ForwardingError>, CriticalError> {
-        if let Err(fwd_err) = self.check_outgoing_addition(&htlc) {
+        if let Err(fwd_err) = self.check_outgoing_addition(&htlc, counterparty_policy) {
             return Ok(Err(fwd_err));
         }
 
@@ -393,8 +403,15 @@ impl SimulatedChannel {
         }
 
         self.sanity_check()?;
-        self.get_node_mut(sending_node)?
-            .add_outgoing_htlc(hash, htlc)
+        let (sender, counterparty) = if sending_node == &self.node_1.policy.pubkey {
+            (&mut self.node_1, &self.node_2)
+        } else if sending_node == &self.node_2.policy.pubkey {
+            (&mut self.node_2, &self.node_1)
+        } else {
+            return Err(CriticalError::NodeNotFound(*sending_node));
+        };
+
+        sender.add_outgoing_htlc(hash, htlc, &counterparty.policy)
     }
 
     /// Performs a sanity check on the total balances in a channel. Note that we do not currently include on-chain
@@ -1718,6 +1735,8 @@ mod tests {
         let mut channel_state =
             ChannelState::new(create_test_policy(local_balance / 2), local_balance);
 
+        let policy = channel_state.policy.clone();
+
         // Basic sanity check that we Initialize the channel correctly.
         assert_channel_balances!(channel_state, local_balance, 0, 0);
 
@@ -1730,7 +1749,9 @@ mod tests {
             cltv_expiry: 40,
         };
 
-        assert!(channel_state.add_outgoing_htlc(hash_1, htlc_1).is_ok());
+        assert!(channel_state
+            .add_outgoing_htlc(hash_1, htlc_1, &policy)
+            .is_ok());
         assert_channel_balances!(
             channel_state,
             local_balance - htlc_1.amount_msat,
@@ -1741,7 +1762,7 @@ mod tests {
         // Try to add a htlc with the same payment hash and assert that we fail because we enforce one htlc per hash
         // at present.
         assert!(matches!(
-            channel_state.add_outgoing_htlc(hash_1, htlc_1),
+            channel_state.add_outgoing_htlc(hash_1, htlc_1, &policy),
             Err(CriticalError::PaymentHashExists(_))
         ));
 
@@ -1752,7 +1773,9 @@ mod tests {
             cltv_expiry: 40,
         };
 
-        assert!(channel_state.add_outgoing_htlc(hash_2, htlc_2).is_ok());
+        assert!(channel_state
+            .add_outgoing_htlc(hash_2, htlc_2, &policy)
+            .is_ok());
         assert_channel_balances!(
             channel_state,
             local_balance - htlc_1.amount_msat - htlc_2.amount_msat,
@@ -1834,46 +1857,56 @@ mod tests {
         let mut channel_state =
             ChannelState::new(create_test_policy(local_balance / 2), local_balance);
 
+        // Size limits (min/max htlc size) are read from our own policy, while the in-flight limits (count and total)
+        // are read from the counterparty's.
+        let mut counterparty = channel_state.policy.clone();
+        counterparty.max_in_flight_msat = 30_000;
+        counterparty.max_htlc_count = 4;
+
         let mut htlc = Htlc {
             amount_msat: channel_state.policy.max_htlc_size_msat + 1,
             cltv_expiry: channel_state.policy.cltv_expiry_delta,
         };
-        // HTLC maximum size exceeded.
         assert!(matches!(
-            channel_state.check_outgoing_addition(&htlc),
+            channel_state.check_outgoing_addition(&htlc, &counterparty),
             Err(ForwardingError::MoreThanMaximum(_, _))
         ));
 
-        // Beneath HTLC minimum size.
         htlc.amount_msat = channel_state.policy.min_htlc_size_msat - 1;
         assert!(matches!(
-            channel_state.check_outgoing_addition(&htlc),
+            channel_state.check_outgoing_addition(&htlc, &counterparty),
             Err(ForwardingError::LessThanMinimum(_, _))
         ));
 
-        // Add two large htlcs so that we will start to run into our in-flight total amount limit.
         let hash_1 = PaymentHash([1; 32]);
         let htlc_1 = Htlc {
-            amount_msat: channel_state.policy.max_in_flight_msat / 2,
+            amount_msat: counterparty.max_in_flight_msat / 2,
             cltv_expiry: channel_state.policy.cltv_expiry_delta,
         };
 
-        assert!(channel_state.check_outgoing_addition(&htlc_1).is_ok());
-        assert!(channel_state.add_outgoing_htlc(hash_1, htlc_1).is_ok());
+        assert!(channel_state
+            .check_outgoing_addition(&htlc_1, &counterparty)
+            .is_ok());
+        assert!(channel_state
+            .add_outgoing_htlc(hash_1, htlc_1, &counterparty)
+            .is_ok());
 
         let hash_2 = PaymentHash([2; 32]);
         let htlc_2 = Htlc {
-            amount_msat: channel_state.policy.max_in_flight_msat / 2,
+            amount_msat: counterparty.max_in_flight_msat / 2,
             cltv_expiry: channel_state.policy.cltv_expiry_delta,
         };
 
-        assert!(channel_state.check_outgoing_addition(&htlc_2).is_ok());
-        assert!(channel_state.add_outgoing_htlc(hash_2, htlc_2).is_ok());
+        assert!(channel_state
+            .check_outgoing_addition(&htlc_2, &counterparty)
+            .is_ok());
+        assert!(channel_state
+            .add_outgoing_htlc(hash_2, htlc_2, &counterparty)
+            .is_ok());
 
-        // Now, assert that we can't add even our smallest htlc size, because we're hit our in-flight amount limit.
         htlc.amount_msat = channel_state.policy.min_htlc_size_msat;
         assert!(matches!(
-            channel_state.check_outgoing_addition(&htlc),
+            channel_state.check_outgoing_addition(&htlc, &counterparty),
             Err(ForwardingError::ExceedsInFlightTotal(_, _))
         ));
 
@@ -1884,11 +1917,14 @@ mod tests {
         assert!(channel_state.remove_outgoing_htlc(&hash_2).is_ok());
         channel_state.settle_outgoing_htlc(htlc_2.amount_msat, true);
 
-        // Now we're going to add many htlcs so that we hit our in-flight count limit (unique payment hash per htlc).
-        for i in 0..channel_state.policy.max_htlc_count {
+        for i in 0..counterparty.max_htlc_count {
             let hash = PaymentHash([i.try_into().unwrap(); 32]);
-            assert!(channel_state.check_outgoing_addition(&htlc).is_ok());
-            assert!(channel_state.add_outgoing_htlc(hash, htlc).is_ok());
+            assert!(channel_state
+                .check_outgoing_addition(&htlc, &counterparty)
+                .is_ok());
+            assert!(channel_state
+                .add_outgoing_htlc(hash, htlc, &counterparty)
+                .is_ok());
         }
 
         // Try to add one more htlc and we should be rejected.
@@ -1898,34 +1934,35 @@ mod tests {
         };
 
         assert!(matches!(
-            channel_state.check_outgoing_addition(&htlc_3),
+            channel_state.check_outgoing_addition(&htlc_3, &counterparty),
             Err(ForwardingError::ExceedsInFlightCount(_, _))
         ));
 
         // Resolve all in-flight htlcs.
-        for i in 0..channel_state.policy.max_htlc_count {
+        for i in 0..counterparty.max_htlc_count {
             let hash = PaymentHash([i.try_into().unwrap(); 32]);
             assert!(channel_state.remove_outgoing_htlc(&hash).is_ok());
             channel_state.settle_outgoing_htlc(htlc.amount_msat, true)
         }
 
-        // Add and settle another htlc to move more liquidity away from our local balance.
-        let hash_4 = PaymentHash([1; 32]);
         let htlc_4 = Htlc {
             amount_msat: channel_state.policy.max_htlc_size_msat,
             cltv_expiry: channel_state.policy.cltv_expiry_delta,
         };
-        assert!(channel_state.check_outgoing_addition(&htlc_4).is_ok());
-        assert!(channel_state.add_outgoing_htlc(hash_4, htlc_4).is_ok());
-        assert!(channel_state.remove_outgoing_htlc(&hash_4).is_ok());
-        channel_state.settle_outgoing_htlc(htlc_4.amount_msat, true);
+        for hash in [PaymentHash([10; 32]), PaymentHash([11; 32])] {
+            assert!(channel_state
+                .add_outgoing_htlc(hash, htlc_4, &counterparty)
+                .is_ok());
+            assert!(channel_state.remove_outgoing_htlc(&hash).is_ok());
+            channel_state.settle_outgoing_htlc(htlc_4.amount_msat, true);
+        }
 
-        // Finally, assert that we don't have enough balance to forward our largest possible htlc (because of all the
-        // htlcs that we've settled) and assert that we fail to a large htlc. The balance assertion here is just a
-        // sanity check for the test, which will fail if we change the amounts settled/failed in the test.
+        // Finally, assert that we don't have enough balance to forward our largest possible htlc. The balance
+        // assertion here is just a sanity check for the test, which will fail if we change the amounts settled in the
+        // test.
         assert!(channel_state.local_balance_msat < channel_state.policy.max_htlc_size_msat);
         assert!(matches!(
-            channel_state.check_outgoing_addition(&htlc_4),
+            channel_state.check_outgoing_addition(&htlc_4, &counterparty),
             Err(ForwardingError::InsufficientBalance(_, _))
         ));
     }
@@ -2070,6 +2107,104 @@ mod tests {
         assert!(matches!(
             simulated_channel.remove_htlc(&pk, &hash_2, true),
             Err(CriticalError::NodeNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn test_add_htlc_policy_ownership() {
+        let capacity_msat = 500_000_000;
+
+        // A policy that trips none of the limits under test, so only the party deliberately made strict can reject.
+        let permissive = || {
+            let mut policy = create_test_policy(capacity_msat / 2);
+            policy.min_htlc_size_msat = 1;
+            policy.max_htlc_size_msat = capacity_msat;
+            policy.max_htlc_count = 483;
+            policy.max_in_flight_msat = capacity_msat;
+            policy
+        };
+
+        // Builds a channel with node_1 as the sender and node_2 as the receiver under the given policies.
+        let build_channel = |sender_policy: ChannelPolicy, receiver_policy: ChannelPolicy| {
+            let node_1 = ChannelState::new(sender_policy, capacity_msat);
+            let node_2 = ChannelState::new(receiver_policy, 0);
+            (
+                node_1.policy.pubkey,
+                SimulatedChannel {
+                    capacity_msat,
+                    short_channel_id: ShortChannelID::from(123),
+                    node_1,
+                    node_2,
+                    exclude_capacity: false,
+                },
+            )
+        };
+
+        let htlc = Htlc {
+            amount_msat: 1000,
+            cltv_expiry: 40,
+        };
+
+        // An HTLC above the sender's advertised maximum is rejected, even though the receiver's maximum is higher.
+        let mut sender_policy = permissive();
+        sender_policy.max_htlc_size_msat = 2000;
+        let (sender, mut channel) = build_channel(sender_policy, permissive());
+        assert!(matches!(
+            channel.add_htlc(
+                &sender,
+                PaymentHash([1; 32]),
+                Htlc {
+                    amount_msat: 3000,
+                    cltv_expiry: 40
+                }
+            ),
+            Ok(Err(ForwardingError::MoreThanMaximum(_, _)))
+        ));
+
+        // An HTLC below the sender's advertised minimum is rejected, even though the receiver's minimum is lower.
+        let mut sender_policy = permissive();
+        sender_policy.min_htlc_size_msat = 10_000;
+        let (sender, mut channel) = build_channel(sender_policy, permissive());
+        assert!(matches!(
+            channel.add_htlc(
+                &sender,
+                PaymentHash([2; 32]),
+                Htlc {
+                    amount_msat: 5000,
+                    cltv_expiry: 40
+                }
+            ),
+            Ok(Err(ForwardingError::LessThanMinimum(_, _)))
+        ));
+
+        // The receiver's `max_accepted_htlcs` bounds the in-flight HTLC count: with a limit of 1 the second HTLC is
+        // rejected, even though the sender's own policy (483) would allow it.
+        let mut receiver_policy = permissive();
+        receiver_policy.max_htlc_count = 1;
+        let (sender, mut channel) = build_channel(permissive(), receiver_policy);
+        assert!(channel
+            .add_htlc(&sender, PaymentHash([3; 32]), htlc)
+            .is_ok());
+        assert!(matches!(
+            channel.add_htlc(&sender, PaymentHash([4; 32]), htlc),
+            Ok(Err(ForwardingError::ExceedsInFlightCount(_, _)))
+        ));
+
+        // The receiver's `max_htlc_value_in_flight_msat` bounds the in-flight value: a 6000 msat HTLC exceeds the
+        // receiver's 5000 msat limit, even though the sender permits the full channel capacity in flight.
+        let mut receiver_policy = permissive();
+        receiver_policy.max_in_flight_msat = 5000;
+        let (sender, mut channel) = build_channel(permissive(), receiver_policy);
+        assert!(matches!(
+            channel.add_htlc(
+                &sender,
+                PaymentHash([5; 32]),
+                Htlc {
+                    amount_msat: 6000,
+                    cltv_expiry: 40
+                }
+            ),
+            Ok(Err(ForwardingError::ExceedsInFlightTotal(_, _)))
         ));
     }
 

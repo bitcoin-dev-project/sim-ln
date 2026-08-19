@@ -304,7 +304,7 @@ If you want to run the cli in a containerized environment, see the docker set up
 
 ## Advanced Usage - Network Simulation
 
-If you are looking to simulate payments are large lightning networks 
+If you are looking to simulate payments on large lightning networks 
 without the resource consumption of setting up a large cluster of nodes,
 you may be interested in dispatching payments on a simulated network.
 
@@ -375,9 +375,20 @@ nodes by their pubkey (aliases are not yet supported).
 }
 ```
 
-Note that you need to provide forwarding policies in each direction, 
-because each participant in the channel sets their own forwarding 
-policy and restrictions on their counterparty. 
+Note that you need to provide a policy in each direction, because each
+participant in the channel sets their own forwarding policy and
+restrictions on their counterparty. Each `node_N` entry is that node's
+own policy for the direction it forwards in. The fields split across
+the two parties as follows:
+
+* Forwarder-advertised limits (`min_htlc_size_msat`,
+  `max_htlc_size_msat`, `cltv_expiry_delta`, `base_fee`, `fee_rate_prop`)
+  belong to the node forwarding the HTLC and are enforced against that
+  node's own policy. These are the values a sender learns from gossip and
+  uses during pathfinding.
+* Counterparty-negotiated limits (`max_htlc_count`, `max_in_flight_msat`)
+  constrain what may be offered inbound and are enforced against the
+  receiving counterparty's policy.
 
 
 ### Random Activity Exclusions
