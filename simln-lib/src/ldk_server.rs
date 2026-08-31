@@ -9,7 +9,7 @@ use ldk_server_client::ldk_server_grpc::api::{
     GetNodeInfoRequest, GetPaymentDetailsRequest, GraphGetNodeRequest, GraphListNodesRequest,
     ListChannelsRequest, SpontaneousSendRequest,
 };
-use ldk_server_client::ldk_server_grpc::types::PaymentStatus;
+use ldk_server_client::ldk_server_grpc::types::{GraphNodeAnnouncement, PaymentStatus};
 use lightning::ln::features::NodeFeatures;
 use lightning::ln::PaymentHash;
 use serde::{Deserialize, Serialize};
@@ -176,10 +176,7 @@ impl LightningNode for LdkServerNode {
             .node
             .ok_or_else(|| LightningError::GetNodeInfoError("Node not found".to_string()))?;
 
-        let alias = node.announcement_info.map(|a| a.alias).unwrap_or_default();
-
-        let mut features = NodeFeatures::empty();
-        features.set_keysend_optional();
+        let (alias, features) = parse_announcement_info(node.announcement_info);
 
         Ok(NodeInfo {
             pubkey: *node_id,
@@ -213,14 +210,14 @@ impl LightningNode for LdkServerNode {
             .node_ids;
 
         // ldk-server has no bulk "describe graph" RPC, so we pull each node's
-        // announcement (for its alias) one by one. This is sequential and will
-        // be slow on large public graphs — fine for regtest/signet simulations.
+        // announcement (for its alias and features) one by one. This is sequential
+        // and will be slow on large public graphs — fine for regtest/signet simulations.
         let mut nodes_by_pk: HashMap<PublicKey, NodeInfo> = HashMap::new();
         for node_id in node_ids {
             let pubkey = PublicKey::from_str(&node_id)
                 .map_err(|err| LightningError::GetGraphError(err.to_string()))?;
 
-            let alias = self
+            let announcement_info = self
                 .client
                 .graph_get_node(GraphGetNodeRequest {
                     node_id: node_id.clone(),
@@ -228,12 +225,9 @@ impl LightningNode for LdkServerNode {
                 .await
                 .map_err(|err| LightningError::GetGraphError(err.to_string()))?
                 .node
-                .and_then(|n| n.announcement_info)
-                .map(|a| a.alias)
-                .unwrap_or_default();
+                .and_then(|node| node.announcement_info);
 
-            let mut features = NodeFeatures::empty();
-            features.set_keysend_optional();
+            let (alias, features) = parse_announcement_info(announcement_info);
 
             nodes_by_pk.insert(
                 pubkey,
@@ -282,6 +276,16 @@ fn parse_node_features(bits: impl IntoIterator<Item = u32>) -> NodeFeatures {
     NodeFeatures::from_le_bytes(flags)
 }
 
+fn parse_announcement_info(announcement: Option<GraphNodeAnnouncement>) -> (String, NodeFeatures) {
+    announcement.map_or_else(
+        || (String::new(), NodeFeatures::empty()),
+        |announcement| {
+            let features = parse_node_features(announcement.features.keys().copied());
+            (announcement.alias, features)
+        },
+    )
+}
+
 fn string_to_payment_hash(hash: &str) -> Result<PaymentHash, LightningError> {
     let bytes = hex::decode(hash).map_err(|_| LightningError::InvalidPaymentHash)?;
     let slice: [u8; 32] = bytes
@@ -303,5 +307,51 @@ fn ldk_server_error_to_send_error(err: LdkServerError) -> LightningError {
         LdkServerErrorCode::AuthError | LdkServerErrorCode::InvalidRequestError => {
             LightningError::PermanentError(err.message)
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ldk_server_client::ldk_server_grpc::types::GraphNodeAnnouncement;
+
+    use super::*;
+
+    fn announcement(alias: &str, feature_bits: &[u32]) -> GraphNodeAnnouncement {
+        GraphNodeAnnouncement {
+            alias: alias.to_string(),
+            features: feature_bits
+                .iter()
+                .map(|bit| (*bit, Default::default()))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn parse_announcement_info_extracts_alias_and_features() {
+        let (alias, features) =
+            parse_announcement_info(Some(announcement("destination", &[9, 55, 80])));
+
+        assert_eq!(alias, "destination");
+        assert!(features.supports_keysend());
+        assert_eq!(
+            features,
+            NodeFeatures::from_le_bytes(vec![0, 2, 0, 0, 0, 0, 128, 0, 0, 0, 1])
+        );
+    }
+
+    #[test]
+    fn parse_announcement_info_does_not_assume_keysend_support() {
+        let (_, features) = parse_announcement_info(Some(announcement("destination", &[9])));
+
+        assert!(!features.supports_keysend());
+    }
+
+    #[test]
+    fn parse_announcement_info_defaults_missing_announcement() {
+        let (alias, features) = parse_announcement_info(None);
+
+        assert!(alias.is_empty());
+        assert_eq!(features, NodeFeatures::empty());
     }
 }
