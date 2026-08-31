@@ -33,7 +33,7 @@ rand_distr = "0.4.3"
 rand_chacha = "0.3.1"
 reqwest = { version = "0.12", features = ["json", "multipart"] }
 tokio-util = { version = "0.7.13", features = ["rt"] }
-ldk-server-client = { git = "https://github.com/lightningdevkit/ldk-server", rev = "8163f4fe139368613959bf4f10b19ee6a5b9b4ab" }
+ldk-server-client = { git = "https://github.com/lightningdevkit/ldk-server", rev = "1ed4356dd48e47103a09a96b4090f1f31917514a" }
 
 [features]
 virtual-time = ["tokio/test-util"]
