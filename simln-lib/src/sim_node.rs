@@ -514,6 +514,7 @@ pub trait SimNetwork: Send + Sync {
 }
 
 type LdkNetworkGraph = NetworkGraph<Arc<WrappedLog>>;
+type Scorer = ProbabilisticScorer<Arc<LdkNetworkGraph>, Arc<WrappedLog>>;
 
 struct InFlightPayment {
     /// The channel used to report payment results to.
@@ -538,7 +539,7 @@ pub struct SimNode<T: SimNetwork, C: Clock> {
     pathfinding_graph: Arc<LdkNetworkGraph>,
     /// Probabilistic scorer used to rank paths through the network for routing. This is reused across
     /// multiple payments to maintain scoring state.
-    scorer: Mutex<ProbabilisticScorer<Arc<LdkNetworkGraph>, Arc<WrappedLog>>>,
+    scorer: Arc<std::sync::RwLock<Scorer>>,
     /// Clock for tracking simulation time.
     clock: Arc<C>,
 }
@@ -566,7 +567,7 @@ impl<T: SimNetwork, C: Clock> SimNode<T, C> {
             network: payment_network,
             in_flight: Mutex::new(HashMap::new()),
             pathfinding_graph,
-            scorer: Mutex::new(scorer),
+            scorer: Arc::new(std::sync::RwLock::new(scorer)),
             clock,
         })
     }
@@ -635,14 +636,13 @@ fn node_info(pubkey: PublicKey, alias: String) -> NodeInfo {
 
 /// Uses LDK's pathfinding algorithm with default parameters to find a path from source to destination, with no
 /// restrictions on fee budget.
-async fn find_payment_route(
+fn find_payment_route(
     source: &PublicKey,
     dest: PublicKey,
     amount_msat: u64,
     pathfinding_graph: &LdkNetworkGraph,
-    scorer: &Mutex<ProbabilisticScorer<Arc<LdkNetworkGraph>, Arc<WrappedLog>>>,
+    scorer: &Scorer,
 ) -> Result<Route, SimulationError> {
-    let scorer_guard = scorer.lock().await;
     find_route(
         source,
         &RouteParameters {
@@ -657,7 +657,7 @@ async fn find_payment_route(
         pathfinding_graph,
         None,
         &WrappedLog {},
-        &scorer_guard,
+        scorer,
         &Default::default(),
         &[0; 32],
     )
@@ -698,16 +698,20 @@ impl<T: SimNetwork, C: Clock> LightningNode for SimNode<T, C> {
             Entry::Vacant(vacant) => vacant,
         };
 
-        // Use the stored scorer when finding a route
-        let route = match find_payment_route(
-            &self.info.pubkey,
-            dest,
-            amount_msat,
-            &self.pathfinding_graph,
-            &self.scorer,
-        )
-        .await
-        {
+        // Use the stored scorer when finding a route.
+        let route = {
+            let scorer = self.scorer.read().map_err(|e| {
+                LightningError::SendPaymentError(format!("scorer lock poisoned: {e}"))
+            })?;
+            find_payment_route(
+                &self.info.pubkey,
+                dest,
+                amount_msat,
+                &self.pathfinding_graph,
+                &scorer,
+            )
+        };
+        let route = match route {
             Ok(path) => path,
             // In the case that we can't find a route for the payment, we still report a successful payment *api call*
             // and report RouteNotFound to the tracking channel. This mimics the behavior of real nodes.
@@ -784,10 +788,13 @@ impl<T: SimNetwork, C: Clock> LightningNode for SimNode<T, C> {
                             };
                             match &in_flight.path {
                                 Some(path) => {
+                                    let mut scorer = self.scorer.write().map_err(|e| {
+                                        LightningError::TrackPaymentError(format!("scorer lock poisoned: {e}"))
+                                    })?;
                                     if payment_result.payment_outcome == PaymentOutcome::Success {
-                                        self.scorer.lock().await.payment_path_successful(path, duration);
+                                        scorer.payment_path_successful(path, duration);
                                     } else if let PaymentOutcome::IndexFailure(index) = payment_result.payment_outcome {
-                                        self.scorer.lock().await.payment_path_failed(path, index as u64, duration);
+                                        scorer.payment_path_failed(path, index as u64, duration);
                                     }
                                 },
                                 None => {
@@ -2402,7 +2409,7 @@ mod tests {
         graph: SimGraph,
         nodes: Vec<PublicKey>,
         routing_graph: Arc<LdkNetworkGraph>,
-        scorer: Mutex<ProbabilisticScorer<Arc<LdkNetworkGraph>, Arc<WrappedLog>>>,
+        scorer: Scorer,
         shutdown: (Trigger, Listener),
     }
 
@@ -2428,11 +2435,11 @@ mod tests {
                 .unwrap(),
             );
 
-            let scorer = Mutex::new(ProbabilisticScorer::new(
+            let scorer = ProbabilisticScorer::new(
                 ProbabilisticScoringDecayParameters::default(),
                 routing_graph.clone(),
                 Arc::new(WrappedLog {}),
-            ));
+            );
 
             // Collect pubkeys in-order, pushing the last node on separately because they don't have an outgoing
             // channel (they are not node_1 in any channel, only node_2).
@@ -2498,9 +2505,8 @@ mod tests {
             dest: PublicKey,
             amt: u64,
         ) -> (Route, Result<PaymentResult, LightningError>) {
-            let route = find_payment_route(&source, dest, amt, &self.routing_graph, &self.scorer)
-                .await
-                .unwrap();
+            let route =
+                find_payment_route(&source, dest, amt, &self.routing_graph, &self.scorer).unwrap();
 
             let (sender, receiver) = oneshot::channel();
             self.graph
