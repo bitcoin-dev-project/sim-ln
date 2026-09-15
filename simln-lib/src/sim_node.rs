@@ -647,7 +647,6 @@ async fn find_payment_route(
         source,
         &RouteParameters {
             payment_params: PaymentParameters::from_node_id(dest, 0)
-                .with_max_total_cltv_expiry_delta(u32::MAX)
                 // TODO: set non-zero value to support MPP.
                 .with_max_path_count(1)
                 // Allow sending htlcs up to 50% of the channel's capacity.
