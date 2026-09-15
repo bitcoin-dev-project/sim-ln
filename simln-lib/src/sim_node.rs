@@ -687,7 +687,35 @@ impl<T: SimNetwork, C: Clock> LightningNode for SimNode<T, C> {
         let preimage = PaymentPreimage(rand::random());
         let payment_hash = preimage.into();
 
-        // Check for payment hash collision, failing the payment if we happen to repeat one.
+        // Pathfinding dominates the cost of a payment and is pure CPU work, so run it on the blocking pool rather
+        // than on the scheduler thread. Routes for different payments are then computed in parallel, using the stored
+        // scorer under a shared read guard.
+        //
+        // On a paused runtime, virtual time cannot advance while a blocking task is outstanding, so the simulation
+        // clock still only moves once every route in progress has been computed.
+        let route = {
+            let source = self.info.pubkey;
+            let pathfinding_graph = self.pathfinding_graph.clone();
+            let scorer = self.scorer.clone();
+
+            tokio::task::spawn_blocking(move || -> Result<_, LightningError> {
+                let scorer = scorer.read().map_err(|e| {
+                    LightningError::SendPaymentError(format!("scorer lock poisoned: {e}"))
+                })?;
+                Ok(find_payment_route(
+                    &source,
+                    dest,
+                    amount_msat,
+                    &pathfinding_graph,
+                    &scorer,
+                ))
+            })
+            .await
+            .map_err(|e| {
+                LightningError::SendPaymentError(format!("pathfinding task failed: {e}"))
+            })??
+        };
+
         let mut in_flight_guard = self.in_flight.lock().await;
         let entry = match in_flight_guard.entry(payment_hash) {
             Entry::Occupied(_) => {
@@ -698,19 +726,6 @@ impl<T: SimNetwork, C: Clock> LightningNode for SimNode<T, C> {
             Entry::Vacant(vacant) => vacant,
         };
 
-        // Use the stored scorer when finding a route.
-        let route = {
-            let scorer = self.scorer.read().map_err(|e| {
-                LightningError::SendPaymentError(format!("scorer lock poisoned: {e}"))
-            })?;
-            find_payment_route(
-                &self.info.pubkey,
-                dest,
-                amount_msat,
-                &self.pathfinding_graph,
-                &scorer,
-            )
-        };
         let route = match route {
             Ok(path) => path,
             // In the case that we can't find a route for the payment, we still report a successful payment *api call*
