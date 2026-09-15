@@ -582,7 +582,7 @@ impl<T: SimNetwork, C: Clock> SimNode<T, C> {
     ///
     /// **Note:** The route passed in here must contain only one path.
     pub async fn send_to_route(
-        &mut self,
+        &self,
         route: Route,
         payment_hash: PaymentHash,
         custom_records: Option<CustomRecords>,
@@ -1424,7 +1424,7 @@ async fn add_htlcs(
         let request = InterceptRequest {
             forwarding_node: hop.pubkey,
             payment_hash,
-            incoming_htlc: incoming_htlc.clone(),
+            incoming_htlc,
             incoming_custom_records,
             outgoing_channel_id: next_scid,
             incoming_amount_msat: outgoing_amount,
@@ -2351,7 +2351,7 @@ mod tests {
         let test_kit =
             DispatchPaymentTestKit::new(chan_capacity, vec![], CustomRecords::default()).await;
 
-        let mut node = SimNode::new(
+        let node = SimNode::new(
             node_info(test_kit.nodes[0], String::default()),
             Arc::new(Mutex::new(test_kit.graph)),
             test_kit.routing_graph.clone(),
@@ -2725,7 +2725,7 @@ mod tests {
         let test_kit =
             DispatchPaymentTestKit::new(chan_capacity, vec![], CustomRecords::default()).await;
 
-        let mut node = SimNode::new(
+        let node = SimNode::new(
             node_info(test_kit.nodes[0], String::default()),
             Arc::new(Mutex::new(test_kit.graph)),
             test_kit.routing_graph.clone(),
