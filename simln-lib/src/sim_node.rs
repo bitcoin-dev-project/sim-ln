@@ -1144,20 +1144,20 @@ pub async fn ln_node_from_graph<C: Clock>(
     graph: Arc<Mutex<SimGraph>>,
     routing_graph: Arc<LdkNetworkGraph>,
     clock: Arc<C>,
-) -> Result<HashMap<PublicKey, Arc<Mutex<SimNode<SimGraph, C>>>>, LightningError> {
+) -> Result<HashMap<PublicKey, Arc<SimNode<SimGraph, C>>>, LightningError> {
     let sim_graph = graph.lock().await;
-    let mut nodes: HashMap<PublicKey, Arc<Mutex<SimNode<SimGraph, C>>>> =
+    let mut nodes: HashMap<PublicKey, Arc<SimNode<SimGraph, C>>> =
         HashMap::with_capacity(sim_graph.nodes.len());
 
     for node in sim_graph.nodes.iter() {
         nodes.insert(
             *node.0,
-            Arc::new(Mutex::new(SimNode::new(
+            Arc::new(SimNode::new(
                 node.1 .0.clone(),
                 graph.clone(),
                 routing_graph.clone(),
                 clock.clone(),
-            )?)),
+            )?),
         );
     }
 
@@ -2048,14 +2048,14 @@ mod tests {
 
         assert!(nodes.len() == 3);
 
-        let node_1 = nodes.get(&pk1).unwrap().lock().await;
+        let node_1 = nodes.get(&pk1).unwrap();
         let node_1_capacity = node_1.channel_capacities().await.unwrap();
 
         // Node 1 has 2 channels but one was excluded so here we should only have the capacity of
         // the channel that was not excluded.
         assert!(node_1_capacity == capacity_1);
 
-        let node_2 = nodes.get(&pk2).unwrap().lock().await;
+        let node_2 = nodes.get(&pk2).unwrap();
         let node_2_capacity = node_2.channel_capacities().await.unwrap();
         assert!(node_2_capacity == capacity_1);
 
@@ -2063,7 +2063,7 @@ mod tests {
         // present because its only channel was excluded.
         let node_3 = nodes.get(&pk3);
         assert!(node_3.is_some());
-        let node_3 = node_3.unwrap().lock().await;
+        let node_3 = node_3.unwrap();
         assert!(node_3.channel_capacities().await.unwrap() == 0);
     }
 

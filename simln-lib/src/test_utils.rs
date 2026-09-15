@@ -9,7 +9,6 @@ use rand::Rng;
 use std::collections::HashMap;
 use std::time::SystemTime;
 use std::{fmt, sync::Arc, time::Duration};
-use tokio::sync::Mutex;
 use tokio_util::task::TaskTracker;
 
 use crate::clock::SimulationClock;
@@ -98,13 +97,13 @@ mock! {
 /// Type alias for the result of setup_test_nodes.
 pub struct TestNodesResult {
     pub nodes: Vec<NodeInfo>,
-    pub clients: Vec<Arc<Mutex<MockLightningNode>>>,
+    pub clients: Vec<Arc<MockLightningNode>>,
 }
 
 impl TestNodesResult {
     // Returns a hashmap of the mocked lightning clients, cast to dyn LightningNode.
-    pub fn get_client_hashmap(&self) -> HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> {
-        let mut client_map: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> =
+    pub fn get_client_hashmap(&self) -> HashMap<PublicKey, Arc<dyn LightningNode>> {
+        let mut client_map: HashMap<PublicKey, Arc<dyn LightningNode>> =
             HashMap::with_capacity(self.nodes.len());
 
         for (idx, node) in self.nodes.iter().enumerate() {
@@ -214,7 +213,7 @@ impl LightningTestNodeBuilder {
                 mock_node.expect_get_network().return_const(network);
             }
 
-            clients.push(Arc::new(Mutex::new(mock_node)));
+            clients.push(Arc::new(mock_node));
             nodes.push(node_info);
         }
 
@@ -225,7 +224,7 @@ impl LightningTestNodeBuilder {
 /// Creates a new simulation with the given clients and activity definitions.
 /// Note: This sets a runtime for the simulation of 0, so run() will exit immediately.
 pub fn create_simulation(
-    clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
+    clients: HashMap<PublicKey, Arc<dyn LightningNode>>,
 ) -> Simulation<SimulationClock> {
     let (shutdown_trigger, shutdown_listener) = triggered::trigger();
     Simulation::new(
