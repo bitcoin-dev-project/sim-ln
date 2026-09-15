@@ -111,7 +111,7 @@ impl DestinationGenerator for NetworkGraphView {
 
 impl Display for NetworkGraphView {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "network graph view with: {} channels", self.nodes.len())
+        write!(f, "network graph view with: {} nodes", self.nodes.len())
     }
 }
 
