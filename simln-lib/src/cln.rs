@@ -8,8 +8,8 @@ use cln_grpc::pb::{
     KeysendRequest, KeysendResponse, ListchannelsRequest, ListnodesRequest, ListpaysRequest,
     ListpaysResponse,
 };
-use lightning::ln::features::NodeFeatures;
-use lightning::ln::PaymentHash;
+use lightning::types::features::NodeFeatures;
+use lightning::types::payment::PaymentHash;
 use serde::{Deserialize, Serialize};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, Error};

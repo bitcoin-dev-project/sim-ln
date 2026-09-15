@@ -5,8 +5,8 @@ use self::clock::Clock;
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
-use lightning::ln::features::NodeFeatures;
-use lightning::ln::PaymentHash;
+use lightning::types::features::NodeFeatures;
+use lightning::types::payment::PaymentHash;
 use rand::{Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use random_activity::RandomActivityError;
@@ -1997,7 +1997,7 @@ mod tests {
         let pl = payments_list.clone();
         mock_node.expect_send_payment().returning(move |a, _| {
             pl.lock().unwrap().push(a);
-            Ok(lightning::ln::PaymentHash(payment_hash))
+            Ok(lightning::types::payment::PaymentHash(payment_hash))
         });
     }
 

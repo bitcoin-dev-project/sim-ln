@@ -5,8 +5,8 @@ use crate::{
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
-use lightning::ln::features::NodeFeatures;
-use lightning::ln::{PaymentHash, PaymentPreimage};
+use lightning::types::features::NodeFeatures;
+use lightning::types::payment::{PaymentHash, PaymentPreimage};
 use reqwest::multipart::Form;
 use reqwest::{Client, Method, Url};
 use serde::{Deserialize, Serialize};

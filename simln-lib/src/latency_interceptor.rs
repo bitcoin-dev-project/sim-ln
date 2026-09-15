@@ -81,7 +81,7 @@ mod tests {
     use crate::sim_node::{CustomRecords, HtlcRef, InterceptRequest};
     use crate::test_utils::get_random_keypair;
     use crate::ShortChannelID;
-    use lightning::ln::PaymentHash;
+    use lightning::types::payment::PaymentHash;
     use ntest::assert_true;
     use rand::distributions::Distribution;
     use rand::rngs::StdRng;

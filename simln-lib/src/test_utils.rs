@@ -2,7 +2,7 @@
 use async_trait::async_trait;
 use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 use bitcoin::Network;
-use lightning::ln::features::Features;
+use lightning::types::features::Features;
 use mockall::mock;
 use rand::distributions::Uniform;
 use rand::Rng;
@@ -82,10 +82,10 @@ mock! {
                 &self,
                 dest: bitcoin::secp256k1::PublicKey,
                 amount_msat: u64,
-            ) -> Result<lightning::ln::PaymentHash, LightningError>;
+            ) -> Result<lightning::types::payment::PaymentHash, LightningError>;
         async fn track_payment(
                 &self,
-                hash: &lightning::ln::PaymentHash,
+                hash: &lightning::types::payment::PaymentHash,
                 shutdown: triggered::Listener,
             ) -> Result<crate::PaymentResult, LightningError>;
         async fn get_node_info(&self, node_id: &PublicKey) -> Result<NodeInfo, LightningError>;

@@ -10,8 +10,8 @@ use ldk_server_client::ldk_server_grpc::api::{
     ListChannelsRequest, SpontaneousSendRequest,
 };
 use ldk_server_client::ldk_server_grpc::types::{GraphNodeAnnouncement, PaymentStatus};
-use lightning::ln::features::NodeFeatures;
-use lightning::ln::PaymentHash;
+use lightning::types::features::NodeFeatures;
+use lightning::types::payment::PaymentHash;
 use serde::{Deserialize, Serialize};
 use tokio::time::{self, Duration};
 use triggered::Listener;
