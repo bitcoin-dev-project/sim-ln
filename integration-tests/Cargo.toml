@@ -1,0 +1,34 @@
+[package]
+name = "integration-tests"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = """
+Integration test framework for sim-ln, covering simulated and real (dockerized) lightning networks.
+"""
+
+[dependencies]
+anyhow = { version = "1.0.69", features = ["backtrace"] }
+bitcoin = { version = "0.30.1", features = ["serde"] }
+bitcoincore-rpc = "0.17"
+cln-grpc = "0.1.3"
+csv = "1.2.2"
+hex = "0.4.3"
+ldk-server-client = { git = "https://github.com/lightningdevkit/ldk-server", rev = "8163f4fe139368613959bf4f10b19ee6a5b9b4ab" }
+log = "0.4.20"
+reqwest = { version = "0.12", features = ["json", "multipart"] }
+serde_json = "1.0.104"
+simln-lib = { path = "../simln-lib", features = ["virtual-time"] }
+sim-cli = { path = "../sim-cli" }
+# Pinned to the last version whose MSRV is compatible with the repo's Rust 1.85 toolchain.
+testcontainers = "=0.25.0"
+tokio = { version = "1.31.0", features = ["full"] }
+tokio-util = { version = "0.7.13", features = ["rt"] }
+tonic = { version = "0.8", features = ["tls", "transport"] }
+tonic_lnd = { package = "fedimint-tonic-lnd", version = "0.1.2", features = ["lightningrpc"] }
+
+[dev-dependencies]
+ntest = "0.9.0"
+rstest = "0.23.0"
+tempfile = "3"

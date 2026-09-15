@@ -35,3 +35,30 @@ jobs:
         run: make dev-install
       - name: cargo test
         run: cargo test --all-features --all-targets --benches
+
+  integration-real:
+    name: Integration tests (real nodes)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Install protoc
+        run: sudo apt install -y protobuf-compiler
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Read pinned ldk-server rev
+        id: ldk-rev
+        run: echo "rev=$(grep -o 'ldk-server?rev=[a-f0-9]*' Cargo.lock | head -1 | cut -d= -f2)" >> "$GITHUB_OUTPUT"
+      - name: Build ldk-server image
+        uses: docker/build-push-action@v6
+        with:
+          context: "https://github.com/lightningdevkit/ldk-server.git#${{ steps.ldk-rev.outputs.rev }}"
+          tags: simln-ldk-server:ci
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Run real-node integration tests
+        run: make integration-real
+        env:
+          SIMLN_LDK_SERVER_IMAGE: simln-ldk-server:ci

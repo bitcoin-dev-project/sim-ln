@@ -17,6 +17,8 @@ help:
 	@echo "  run-docker         Runs the Docker container in detached mode."
 	@echo "  run-interactive    Runs the Docker container in interactive mode."
 	@echo "  stop-docker        Stops the Docker container."
+	@echo "  integration-sim    Runs integration tests against a simulated network (no docker needed)."
+	@echo "  integration-real   Runs integration tests against real nodes in docker containers."
 	@echo "  check              Runs code formatting and linting checks."
 	@echo "  check-code         Runs code formatting and linting without stability check."
 	@echo "  format             Fixes both formatting and linting issues in one go."
@@ -40,6 +42,13 @@ run-interactive:
 
 stop-docker:
 	docker stop sim-ln
+
+integration-sim:
+	cargo test -p integration-tests --test sim_matrix
+
+integration-real:
+	@docker info > /dev/null 2>&1 || { echo "Error: no reachable docker daemon; integration-real needs a running docker runtime (Docker Desktop, colima or OrbStack)."; exit 1; }
+	cargo test -p integration-tests --test real_nodes -- --ignored --nocapture
 
 check-code:
 	$(FMT_CMD) --check
