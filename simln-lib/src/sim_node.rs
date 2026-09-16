@@ -525,6 +525,9 @@ pub trait SimNetwork: Send + Sync {
 type LdkNetworkGraph = NetworkGraph<Arc<WrappedLog>>;
 type Scorer = ProbabilisticScorer<Arc<LdkNetworkGraph>, Arc<WrappedLog>>;
 
+/// The maximum number of times that a failed payment is re-routed before it is failed.
+const MAX_RETRIES: u32 = 5;
+
 struct InFlightPayment {
     /// The channel used to report payment results to.
     track_payment_receiver: Receiver<Result<HtlcOutcome, LightningError>>,
@@ -532,6 +535,11 @@ struct InFlightPayment {
     /// This should be set to `None` if no payment path was found and the payment
     /// was not dispatched.
     path: Option<Path>,
+    /// The amount that the payment is for, re-routed to `dest` when an attempt fails.
+    amount_msat: u64,
+    /// The destination that a failed payment is re-routed to. `None` for payments sent to a specific route, which
+    /// are not retried.
+    dest: Option<PublicKey>,
 }
 
 /// A wrapper struct used to implement the LightningNode trait (can be thought of as "the" lightning node). Passes
@@ -614,7 +622,9 @@ impl<T: SimNetwork, C: Clock> SimNode<T, C> {
             Entry::Vacant(vacant) => vacant.insert(InFlightPayment {
                 track_payment_receiver: receiver,
                 path: Some(route.paths[0].clone()), // TODO: MPP payments? we check in dispatch_payment
-                                                    // should probably only pass a single path to dispatch
+                // should probably only pass a single path to dispatch
+                amount_msat: route.get_total_amount(),
+                dest: None,
             }),
         };
 
@@ -629,50 +639,159 @@ impl<T: SimNetwork, C: Clock> SimNode<T, C> {
         Ok(())
     }
 
-    /// Drives a dispatched payment to its outcome, reporting the path that it took to the scorer.
+    /// Drives a dispatched payment to its outcome, re-routing it over paths that avoid the channels that have
+    /// rejected it until it succeeds, no route is left or [`MAX_RETRIES`] retries have been made. Each attempt is
+    /// reported to the scorer.
     async fn resolve_payment(
         &self,
+        payment_hash: PaymentHash,
         in_flight: InFlightPayment,
     ) -> Result<PaymentResult, LightningError> {
         let InFlightPayment {
-            track_payment_receiver,
-            path,
+            mut track_payment_receiver,
+            mut path,
+            amount_msat,
+            dest,
         } = in_flight;
 
-        let outcome = track_payment_receiver.await.map_err(|e| {
-            LightningError::TrackPaymentError(format!("channel receive err: {}", e))
-        })??;
+        let mut failed_channels = vec![];
+        let mut htlc_count = 0;
+        let mut retries = 0;
 
-        let attempt = match path {
-            Some(ref attempt) => attempt,
-            // No route was found for the payment, so nothing was dispatched to score.
-            None => {
-                if outcome.result.payment_outcome != PaymentOutcome::RouteNotFound {
-                    return Err(LightningError::TrackPaymentError(
-                        "payment outcome was not RouteNotFound, but no path was provided"
-                            .to_string(),
-                    ));
-                }
+        loop {
+            let outcome = track_payment_receiver.await.map_err(|e| {
+                LightningError::TrackPaymentError(format!("channel receive err: {}", e))
+            })??;
+            htlc_count += outcome.result.htlc_count;
 
-                return Ok(outcome.result);
-            },
-        };
+            let attempt = match path {
+                Some(ref attempt) => attempt,
+                // No route was found for the payment, so nothing was dispatched to score or retry.
+                None => {
+                    if outcome.result.payment_outcome != PaymentOutcome::RouteNotFound {
+                        return Err(LightningError::TrackPaymentError(
+                            "payment outcome was not RouteNotFound, but no path was provided"
+                                .to_string(),
+                        ));
+                    }
 
-        let duration = self.clock.now().duration_since(UNIX_EPOCH).map_err(|e| {
-            log::error!("Failed to get duration: {}", e);
-            LightningError::SystemTimeConversionError(e)
-        })?;
-        let mut scorer = self
-            .scorer
-            .write()
-            .map_err(|e| LightningError::TrackPaymentError(format!("scorer lock poisoned: {e}")))?;
-        if outcome.result.payment_outcome == PaymentOutcome::Success {
-            scorer.payment_path_successful(attempt, duration);
-        } else if let Some(failed_channel) = outcome.failed_channel {
-            scorer.payment_path_failed(attempt, failed_channel, duration);
+                    return Ok(outcome.result);
+                },
+            };
+
+            let duration = self.clock.now().duration_since(UNIX_EPOCH).map_err(|e| {
+                log::error!("Failed to get duration: {}", e);
+                LightningError::SystemTimeConversionError(e)
+            })?;
+            if outcome.result.payment_outcome == PaymentOutcome::Success {
+                self.scorer
+                    .write()
+                    .map_err(|e| {
+                        LightningError::TrackPaymentError(format!("scorer lock poisoned: {e}"))
+                    })?
+                    .payment_path_successful(attempt, duration);
+
+                return Ok(PaymentResult {
+                    htlc_count,
+                    payment_outcome: PaymentOutcome::Success,
+                });
+            }
+
+            // If the network did not blame a channel for the failure, there is nothing to learn from it and
+            // nothing for a retry to avoid.
+            let failed_channel = match outcome.failed_channel {
+                Some(failed_channel) => failed_channel,
+                None => {
+                    return Ok(PaymentResult {
+                        htlc_count,
+                        ..outcome.result
+                    })
+                },
+            };
+
+            self.scorer
+                .write()
+                .map_err(|e| {
+                    LightningError::TrackPaymentError(format!("scorer lock poisoned: {e}"))
+                })?
+                .payment_path_failed(attempt, failed_channel, duration);
+            failed_channels.push(failed_channel);
+
+            // Payments sent to a specific route are not retried, because the route was not ours to choose.
+            let dest = match dest {
+                Some(dest) => dest,
+                None => {
+                    return Ok(PaymentResult {
+                        htlc_count,
+                        ..outcome.result
+                    })
+                },
+            };
+
+            if retries == MAX_RETRIES {
+                return Ok(PaymentResult {
+                    htlc_count,
+                    payment_outcome: PaymentOutcome::RetriesExhausted,
+                });
+            }
+            retries += 1;
+
+            log::debug!(
+                "Retrying payment {} ({retries}/{MAX_RETRIES}), avoiding channels: {failed_channels:?}.",
+                hex::encode(payment_hash.0),
+            );
+
+            // Re-route on the blocking pool for the same reason as the payment's first route: pathfinding is
+            // pure CPU work that would otherwise hold up the scheduler thread.
+            let route = {
+                let source = self.info.pubkey;
+                let pathfinding_graph = self.pathfinding_graph.clone();
+                let scorer = self.scorer.clone();
+                let previously_failed_channels = failed_channels.clone();
+
+                tokio::task::spawn_blocking(move || -> Result<_, LightningError> {
+                    let scorer = scorer.read().map_err(|e| {
+                        LightningError::TrackPaymentError(format!("scorer lock poisoned: {e}"))
+                    })?;
+                    Ok(find_payment_route(
+                        &source,
+                        dest,
+                        amount_msat,
+                        &pathfinding_graph,
+                        &scorer,
+                        previously_failed_channels,
+                    ))
+                })
+                .await
+                .map_err(|e| {
+                    LightningError::TrackPaymentError(format!("pathfinding task failed: {e}"))
+                })??
+            };
+
+            let route = match route {
+                Ok(route) => route,
+                Err(e) => {
+                    log::trace!("Could not find route to retry payment: {:?}.", e);
+
+                    return Ok(PaymentResult {
+                        htlc_count,
+                        payment_outcome: PaymentOutcome::RouteNotFound,
+                    });
+                },
+            };
+
+            let (sender, receiver) = channel();
+            track_payment_receiver = receiver;
+            path = Some(route.paths[0].clone());
+
+            self.network.lock().await.dispatch_payment(
+                self.info.pubkey,
+                route,
+                None, // Default custom records.
+                payment_hash,
+                sender,
+            );
         }
-
-        Ok(outcome.result)
     }
 }
 
@@ -690,22 +809,26 @@ fn node_info(pubkey: PublicKey, alias: String) -> NodeInfo {
 }
 
 /// Uses LDK's pathfinding algorithm with default parameters to find a path from source to destination, with no
-/// restrictions on fee budget.
+/// restrictions on fee budget. The path will avoid the channels in `previously_failed_channels`.
 fn find_payment_route(
     source: &PublicKey,
     dest: PublicKey,
     amount_msat: u64,
     pathfinding_graph: &LdkNetworkGraph,
     scorer: &Scorer,
+    previously_failed_channels: Vec<u64>,
 ) -> Result<Route, SimulationError> {
+    let mut payment_params = PaymentParameters::from_node_id(dest, 0)
+        // TODO: set non-zero value to support MPP.
+        .with_max_path_count(1)
+        // Allow sending htlcs up to 50% of the channel's capacity.
+        .with_max_channel_saturation_power_of_half(1);
+    payment_params.previously_failed_channels = previously_failed_channels;
+
     find_route(
         source,
         &RouteParameters {
-            payment_params: PaymentParameters::from_node_id(dest, 0)
-                // TODO: set non-zero value to support MPP.
-                .with_max_path_count(1)
-                // Allow sending htlcs up to 50% of the channel's capacity.
-                .with_max_channel_saturation_power_of_half(1),
+            payment_params,
             final_value_msat: amount_msat,
             max_total_routing_fee_msat: None,
         },
@@ -763,6 +886,7 @@ impl<T: SimNetwork, C: Clock> LightningNode for SimNode<T, C> {
                     amount_msat,
                     &pathfinding_graph,
                     &scorer,
+                    Vec::new(),
                 ))
             })
             .await
@@ -801,7 +925,9 @@ impl<T: SimNetwork, C: Clock> LightningNode for SimNode<T, C> {
                 entry.insert(InFlightPayment {
                     track_payment_receiver: receiver,
                     path: None, // TODO: how to handle non-MPP support (where would we do
-                                // paths in the world where we have them?).
+                    // paths in the world where we have them?).
+                    amount_msat,
+                    dest: None,
                 });
 
                 return Ok(payment_hash);
@@ -817,7 +943,9 @@ impl<T: SimNetwork, C: Clock> LightningNode for SimNode<T, C> {
         entry.insert(InFlightPayment {
             track_payment_receiver: receiver,
             path: Some(route.paths[0].clone()), // TODO: how to handle non-MPP support (where would we do
-                                                // paths in the world where we have them?).
+            // paths in the world where we have them?).
+            amount_msat,
+            dest: Some(dest),
         });
 
         // If we did successfully obtain a route, dispatch the payment through the network and then report success.
@@ -855,7 +983,7 @@ impl<T: SimNetwork, C: Clock> LightningNode for SimNode<T, C> {
             _ = listener => Err(
                 LightningError::TrackPaymentError("shutdown during payment tracking".to_string()),
             ),
-            res = self.resolve_payment(in_flight) => res,
+            res = self.resolve_payment(*hash, in_flight) => res,
         }
     }
 
@@ -2601,8 +2729,15 @@ mod tests {
             dest: PublicKey,
             amt: u64,
         ) -> (Route, Result<HtlcOutcome, LightningError>) {
-            let route =
-                find_payment_route(&source, dest, amt, &self.routing_graph, &self.scorer).unwrap();
+            let route = find_payment_route(
+                &source,
+                dest,
+                amt,
+                &self.routing_graph,
+                &self.scorer,
+                Vec::new(),
+            )
+            .unwrap();
 
             let outcome = self.dispatch_route(source, route.clone()).await;
             (route, outcome)
@@ -2910,6 +3045,183 @@ mod tests {
         test_kit.shutdown.0.trigger();
         test_kit.graph.tasks.close();
         test_kit.graph.tasks.wait().await;
+    }
+
+    /// Creates `routes` routes from Alice to Dave, each through its own intermediate node, with all of the
+    /// capacity of each channel on the side of the first node. With two routes (via Bob and via Carol) the network
+    /// is:
+    ///
+    /// Alice --(0)-- Bob --(1)-- Dave
+    ///   |                        |
+    ///   +---(2)-- Carol --(3)----+
+    ///
+    /// Each route charges a higher base fee than the one before it, so that pathfinding has a strict preference
+    /// between them and picks them in order rather than breaking a tie. The nodes are returned in the order Alice,
+    /// the intermediate nodes, Dave.
+    fn create_parallel_channels(
+        routes: usize,
+        capacity_msat: u64,
+    ) -> (Vec<SimulatedChannel>, Vec<PublicKey>) {
+        let nodes: Vec<PublicKey> = (0..routes + 2).map(|_| get_random_keypair().1).collect();
+        let (alice, dave) = (nodes[0], nodes[routes + 1]);
+
+        let policy = |pubkey: PublicKey, base_fee: u64| ChannelPolicy {
+            pubkey,
+            alias: String::default(),
+            max_htlc_count: 483,
+            max_in_flight_msat: capacity_msat,
+            min_htlc_size_msat: 1,
+            max_htlc_size_msat: capacity_msat,
+            cltv_expiry_delta: 40,
+            base_fee,
+            fee_rate_prop: 1000,
+        };
+
+        let channels = nodes[1..=routes]
+            .iter()
+            .enumerate()
+            .flat_map(|(route, mid)| {
+                let base_fee = 1000 * (route as u64 + 1);
+                [(alice, *mid, base_fee), (*mid, dave, base_fee)]
+            })
+            .enumerate()
+            .map(|(i, (node_1, node_2, base_fee))| SimulatedChannel {
+                capacity_msat,
+                short_channel_id: ShortChannelID::from(i as u64),
+                node_1: ChannelState::new(policy(node_1, base_fee), capacity_msat),
+                node_2: ChannelState::new(policy(node_2, base_fee), 0),
+                exclude_capacity: false,
+            })
+            .collect();
+
+        (channels, nodes)
+    }
+
+    /// Creates a simulated node for Alice in a network of `routes` routes to Dave (see
+    /// [`create_parallel_channels`]), returning the node and the network's pubkeys.
+    fn create_parallel_node(
+        routes: usize,
+        capacity: u64,
+        interceptors: Vec<Arc<dyn Interceptor>>,
+    ) -> (SimNode<SimGraph, SimulationClock>, Vec<PublicKey>) {
+        let (channels, nodes) = create_parallel_channels(routes, capacity);
+        let clock = Arc::new(SimulationClock::new(SystemTime::now()));
+        let routing_graph =
+            Arc::new(populate_network_graph(channels.clone(), clock.clone()).unwrap());
+
+        let graph = SimGraph::new(
+            channels,
+            TaskTracker::new(),
+            interceptors,
+            CustomRecords::default(),
+            triggered::trigger(),
+        )
+        .expect("could not create test graph");
+
+        let node = SimNode::new(
+            node_info(nodes[0], String::default()),
+            Arc::new(Mutex::new(graph)),
+            routing_graph,
+            clock,
+        )
+        .unwrap();
+
+        (node, nodes)
+    }
+
+    /// Drains the channel provided so that its first node cannot forward any htlcs.
+    async fn drain_channel(node: &SimNode<SimGraph, SimulationClock>, scid: u64) {
+        let network = node.network.lock().await;
+        let mut channels = network.channels.lock().await;
+        let channel = channels.get_mut(&ShortChannelID::from(scid)).unwrap();
+        channel.node_2.local_balance_msat += channel.node_1.local_balance_msat;
+        channel.node_1.local_balance_msat = 0;
+    }
+
+    /// Sends a payment from Alice to the destination provided and waits for its outcome.
+    async fn send_and_track(
+        node: &SimNode<SimGraph, SimulationClock>,
+        dest: PublicKey,
+        amount_msat: u64,
+    ) -> PaymentResult {
+        let payment_hash = node.send_payment(dest, amount_msat).await.unwrap();
+        let (_, shutdown_listener) = triggered::trigger();
+        node.track_payment(&payment_hash, shutdown_listener)
+            .await
+            .unwrap()
+    }
+
+    /// Tests that a payment rejected by a channel is retried over a route that avoids it.
+    #[tokio::test]
+    async fn test_retry_avoids_failed_channel() {
+        let capacity = 1_000_000;
+        let (node, nodes) = create_parallel_node(2, capacity, vec![]);
+        let dave = nodes[3];
+
+        // Drain Bob --> Dave, so that the cheapest route (and so the one that pathfinding picks first) cannot
+        // carry the payment and only a retry through Carol can succeed.
+        drain_channel(&node, 1).await;
+
+        let result = send_and_track(&node, dave, 100_000).await;
+        assert!(
+            matches!(result.payment_outcome, PaymentOutcome::Success),
+            "unexpected outcome: {:?}",
+            result.payment_outcome
+        );
+
+        // One htlc was dispatched for the attempt through Bob and one for the retry through Carol.
+        assert_eq!(result.htlc_count, 2);
+    }
+
+    /// Tests that a payment with no route left to retry over is failed as soon as pathfinding gives up.
+    #[tokio::test]
+    async fn test_retry_without_route_fails_payment() {
+        let capacity = 1_000_000;
+        let (node, nodes) = create_parallel_node(1, capacity, vec![]);
+        let dave = nodes[2];
+
+        // Drain the only channel that reaches Dave, so that the payment fails and its retry has no route left.
+        drain_channel(&node, 1).await;
+
+        let result = send_and_track(&node, dave, 100_000).await;
+        assert!(
+            matches!(result.payment_outcome, PaymentOutcome::RouteNotFound),
+            "unexpected outcome: {:?}",
+            result.payment_outcome
+        );
+        assert_eq!(result.htlc_count, 1);
+    }
+
+    /// Tests that a payment that is rejected on every attempt is failed once its retry budget is spent.
+    #[tokio::test]
+    async fn test_retries_exhausted() {
+        let capacity = 1_000_000;
+
+        // Interceptor that rejects htlcs at the receiving node, so that every attempt fails.
+        let mut interceptor = MockTestInterceptor::new();
+        interceptor.expect_intercept_htlc().returning(|req| {
+            if req.outgoing_channel_id.is_none() {
+                Ok(Err(ForwardingError::InterceptorError(
+                    "receiver rejected".into(),
+                )))
+            } else {
+                Ok(Ok(CustomRecords::default()))
+            }
+        });
+        interceptor.expect_notify_resolution().returning(|_| Ok(()));
+
+        // Give the network more routes than the retry budget, so that pathfinding always has one left.
+        let routes = MAX_RETRIES as usize + 1;
+        let (node, nodes) = create_parallel_node(routes, capacity, vec![Arc::new(interceptor)]);
+        let dave = nodes[routes + 1];
+
+        let result = send_and_track(&node, dave, 100_000).await;
+        assert!(
+            matches!(result.payment_outcome, PaymentOutcome::RetriesExhausted),
+            "unexpected outcome: {:?}",
+            result.payment_outcome
+        );
+        assert_eq!(result.htlc_count, MAX_RETRIES as usize + 1);
     }
 
     fn create_intercept_request(shutdown_listener: Listener) -> InterceptRequest {

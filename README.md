@@ -425,6 +425,8 @@ Included:
   count and value limitations set on channel creation.
 * Liquidity checks: HTLCs are only forwarded if the node has sufficient
   liquidity in the mocked channel.
+* Retries: a failed payment is re-routed up to 5 times, avoiding the
+  channels that rejected it, before it is reported as failed.
 
 Not included: 
 * Channel reserve: the required minimum reserve balance is not 
