@@ -628,6 +628,52 @@ impl<T: SimNetwork, C: Clock> SimNode<T, C> {
 
         Ok(())
     }
+
+    /// Drives a dispatched payment to its outcome, reporting the path that it took to the scorer.
+    async fn resolve_payment(
+        &self,
+        in_flight: InFlightPayment,
+    ) -> Result<PaymentResult, LightningError> {
+        let InFlightPayment {
+            track_payment_receiver,
+            path,
+        } = in_flight;
+
+        let outcome = track_payment_receiver.await.map_err(|e| {
+            LightningError::TrackPaymentError(format!("channel receive err: {}", e))
+        })??;
+
+        let attempt = match path {
+            Some(ref attempt) => attempt,
+            // No route was found for the payment, so nothing was dispatched to score.
+            None => {
+                if outcome.result.payment_outcome != PaymentOutcome::RouteNotFound {
+                    return Err(LightningError::TrackPaymentError(
+                        "payment outcome was not RouteNotFound, but no path was provided"
+                            .to_string(),
+                    ));
+                }
+
+                return Ok(outcome.result);
+            },
+        };
+
+        let duration = self.clock.now().duration_since(UNIX_EPOCH).map_err(|e| {
+            log::error!("Failed to get duration: {}", e);
+            LightningError::SystemTimeConversionError(e)
+        })?;
+        let mut scorer = self
+            .scorer
+            .write()
+            .map_err(|e| LightningError::TrackPaymentError(format!("scorer lock poisoned: {e}")))?;
+        if outcome.result.payment_outcome == PaymentOutcome::Success {
+            scorer.payment_path_successful(attempt, duration);
+        } else if let Some(failed_channel) = outcome.failed_channel {
+            scorer.payment_path_failed(attempt, failed_channel, duration);
+        }
+
+        Ok(outcome.result)
+    }
 }
 
 /// Produces the node info for a mocked node, filling in the features that the simulator requires.
@@ -794,53 +840,22 @@ impl<T: SimNetwork, C: Clock> LightningNode for SimNode<T, C> {
         hash: &PaymentHash,
         listener: Listener,
     ) -> Result<PaymentResult, LightningError> {
-        match self.in_flight.lock().await.remove(hash) {
-            Some(in_flight) => {
-                select! {
-                    biased;
-                    _ = listener => Err(
-                        LightningError::TrackPaymentError("shutdown during payment tracking".to_string()),
-                    ),
-
-                    // If we get a payment result back, remove from our in flight set of payments and return the result.
-                    res = in_flight.track_payment_receiver => {
-                        let track_result = res.map_err(|e| LightningError::TrackPaymentError(format!("channel receive err: {}", e)))?;
-                        if let Ok(ref outcome) = track_result {
-                            let duration = match self.clock.now().duration_since(UNIX_EPOCH) {
-                                Ok(d) => d,
-                                Err(e) => {
-                                    log::error!("Failed to get duration: {}", e);
-                                    return Err(LightningError::SystemTimeConversionError(e));
-                                }
-                            };
-                            match &in_flight.path {
-                                Some(path) => {
-                                    let mut scorer = self.scorer.write().map_err(|e| {
-                                        LightningError::TrackPaymentError(format!("scorer lock poisoned: {e}"))
-                                    })?;
-                                    if outcome.result.payment_outcome == PaymentOutcome::Success {
-                                        scorer.payment_path_successful(path, duration);
-                                    } else if let Some(failed_channel) = outcome.failed_channel {
-                                        scorer.payment_path_failed(path, failed_channel, duration);
-                                    }
-                                },
-                                None => {
-                                    if outcome.result.payment_outcome != PaymentOutcome::RouteNotFound {
-                                        return Err(LightningError::TrackPaymentError(
-                                            "payment outcome was not RouteNotFound, but no path was provided".to_string(),
-                                        ))?;
-                                    }
-                                }
-                            }
-                        }
-                        track_result.map(|outcome| outcome.result)
-                    },
-                }
+        let in_flight = match self.in_flight.lock().await.remove(hash) {
+            Some(in_flight) => in_flight,
+            None => {
+                return Err(LightningError::TrackPaymentError(format!(
+                    "payment hash {} not found",
+                    hex::encode(hash.0),
+                )))
             },
-            None => Err(LightningError::TrackPaymentError(format!(
-                "payment hash {} not found",
-                hex::encode(hash.0),
-            ))),
+        };
+
+        select! {
+            biased;
+            _ = listener => Err(
+                LightningError::TrackPaymentError("shutdown during payment tracking".to_string()),
+            ),
+            res = self.resolve_payment(in_flight) => res,
         }
     }
 
