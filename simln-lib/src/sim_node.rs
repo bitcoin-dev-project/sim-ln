@@ -492,6 +492,15 @@ impl SimulatedChannel {
     }
 }
 
+/// The outcome of a payment dispatched with [`SimNetwork::dispatch_payment`], reported to the sending node.
+#[derive(Debug)]
+pub struct HtlcOutcome {
+    pub result: PaymentResult,
+    /// The short channel id of the channel that rejected the htlc, set when the payment was failed by the network
+    /// while the htlc was being added along its route.
+    pub failed_channel: Option<u64>,
+}
+
 /// SimNetwork represents a high level network coordinator that is responsible for the task of actually propagating
 /// payments through the simulated network.
 #[async_trait]
@@ -504,7 +513,7 @@ pub trait SimNetwork: Send + Sync {
         route: Route,
         custom_records: Option<CustomRecords>,
         payment_hash: PaymentHash,
-        sender: Sender<Result<PaymentResult, LightningError>>,
+        sender: Sender<Result<HtlcOutcome, LightningError>>,
     );
 
     /// Looks up a node in the simulated network and a list of its channel capacities.
@@ -518,7 +527,7 @@ type Scorer = ProbabilisticScorer<Arc<LdkNetworkGraph>, Arc<WrappedLog>>;
 
 struct InFlightPayment {
     /// The channel used to report payment results to.
-    track_payment_receiver: Receiver<Result<PaymentResult, LightningError>>,
+    track_payment_receiver: Receiver<Result<HtlcOutcome, LightningError>>,
     /// The path the payment was dispatched on.
     /// This should be set to `None` if no payment path was found and the payment
     /// was not dispatched.
@@ -733,9 +742,12 @@ impl<T: SimNetwork, C: Clock> LightningNode for SimNode<T, C> {
             Err(e) => {
                 log::trace!("Could not find path for payment: {:?}.", e);
 
-                if let Err(e) = sender.send(Ok(PaymentResult {
-                    htlc_count: 0,
-                    payment_outcome: PaymentOutcome::RouteNotFound,
+                if let Err(e) = sender.send(Ok(HtlcOutcome {
+                    result: PaymentResult {
+                        htlc_count: 0,
+                        payment_outcome: PaymentOutcome::RouteNotFound,
+                    },
+                    failed_channel: None,
                 })) {
                     log::error!("Could not send payment result: {:?}.", e);
                 }
@@ -793,7 +805,7 @@ impl<T: SimNetwork, C: Clock> LightningNode for SimNode<T, C> {
                     // If we get a payment result back, remove from our in flight set of payments and return the result.
                     res = in_flight.track_payment_receiver => {
                         let track_result = res.map_err(|e| LightningError::TrackPaymentError(format!("channel receive err: {}", e)))?;
-                        if let Ok(ref payment_result) = track_result {
+                        if let Ok(ref outcome) = track_result {
                             let duration = match self.clock.now().duration_since(UNIX_EPOCH) {
                                 Ok(d) => d,
                                 Err(e) => {
@@ -806,14 +818,14 @@ impl<T: SimNetwork, C: Clock> LightningNode for SimNode<T, C> {
                                     let mut scorer = self.scorer.write().map_err(|e| {
                                         LightningError::TrackPaymentError(format!("scorer lock poisoned: {e}"))
                                     })?;
-                                    if payment_result.payment_outcome == PaymentOutcome::Success {
+                                    if outcome.result.payment_outcome == PaymentOutcome::Success {
                                         scorer.payment_path_successful(path, duration);
-                                    } else if let PaymentOutcome::IndexFailure(index) = payment_result.payment_outcome {
+                                    } else if let PaymentOutcome::IndexFailure(index) = outcome.result.payment_outcome {
                                         scorer.payment_path_failed(path, index as u64, duration);
                                     }
                                 },
                                 None => {
-                                    if payment_result.payment_outcome != PaymentOutcome::RouteNotFound {
+                                    if outcome.result.payment_outcome != PaymentOutcome::RouteNotFound {
                                         return Err(LightningError::TrackPaymentError(
                                             "payment outcome was not RouteNotFound, but no path was provided".to_string(),
                                         ))?;
@@ -821,7 +833,7 @@ impl<T: SimNetwork, C: Clock> LightningNode for SimNode<T, C> {
                                 }
                             }
                         }
-                        track_result
+                        track_result.map(|outcome| outcome.result)
                     },
                 }
             },
@@ -1243,7 +1255,7 @@ impl SimNetwork for SimGraph {
         route: Route,
         custom_records: Option<CustomRecords>,
         payment_hash: PaymentHash,
-        sender: Sender<Result<PaymentResult, LightningError>>,
+        sender: Sender<Result<HtlcOutcome, LightningError>>,
     ) {
         // Expect only one path (right now), with the intention to support multiple in future.
         if route.paths.len() != 1 {
@@ -1256,9 +1268,12 @@ impl SimNetwork for SimGraph {
             None => {
                 log::warn!("Find route did not return expected number of paths.");
 
-                if let Err(e) = sender.send(Ok(PaymentResult {
-                    htlc_count: 0,
-                    payment_outcome: PaymentOutcome::RouteNotFound,
+                if let Err(e) = sender.send(Ok(HtlcOutcome {
+                    result: PaymentResult {
+                        htlc_count: 0,
+                        payment_outcome: PaymentOutcome::RouteNotFound,
+                    },
+                    failed_channel: None,
                 })) {
                     log::error!("Could not send payment result: {:?}.", e);
                 }
@@ -1312,6 +1327,16 @@ impl SimNetwork for SimGraph {
     }
 }
 
+/// A htlc that was rejected while being added along its route.
+struct HtlcFailure {
+    /// The index of the last hop that the htlc was added on, which must be failed back, or `None` if the very first
+    /// add was rejected.
+    fail_idx: Option<usize>,
+    /// The index of the hop whose channel rejected the htlc.
+    failed_hop: usize,
+    error: ForwardingError,
+}
+
 /// Adds htlcs to the simulation state along the path provided. If it encounters a critical error,
 /// it will be returned in the outer Result to signal that the simulation should shut down. If a
 /// forwarding error happens, it will return the index in the path from which to fail back htlcs
@@ -1340,7 +1365,7 @@ async fn add_htlcs(
     interceptors: Vec<Arc<dyn Interceptor>>,
     custom_records: CustomRecords,
     shutdown_listener: Listener,
-) -> Result<Result<(), (Option<usize>, ForwardingError)>, CriticalError> {
+) -> Result<Result<(), HtlcFailure>, CriticalError> {
     let mut outgoing_node = source;
     let mut outgoing_amount = route.fee_msat() + route.final_value_msat();
     let mut outgoing_cltv = route.hops.iter().map(|hop| hop.cltv_expiry_delta).sum();
@@ -1375,9 +1400,15 @@ async fn add_htlcs(
                 },
             )? {
                 Ok(idx) => idx,
-                // If we couldn't add to this HTLC, we only need to fail back from the preceding hop, so we don't
-                // have to progress our fail_idx.
-                Err(e) => return Ok(Err((fail_idx, e))),
+                // This hop's channel rejected the HTLC, so it is to blame for the failure. We only need to fail
+                // back from the preceding hop, so we don't have to progress our fail_idx.
+                Err(e) => {
+                    return Ok(Err(HtlcFailure {
+                        fail_idx,
+                        failed_hop: i,
+                        error: e,
+                    }))
+                },
             };
 
             // If the HTLC was successfully added, then we'll need to remove the HTLC from this channel if we fail,
@@ -1401,9 +1432,14 @@ async fn add_htlcs(
                         outgoing_amount - hop.fee_msat,
                         hop.fee_msat,
                     )? {
-                        // If we haven't met forwarding conditions for the next channel's policy, then we fail at
-                        // the current index, because we've already added the HTLC as outgoing.
-                        return Ok(Err((fail_idx, e)));
+                        // If we haven't met forwarding conditions for the next channel's policy, that channel is
+                        // to blame for the failure. We fail at the current index, because we've already added the
+                        // HTLC as outgoing.
+                        return Ok(Err(HtlcFailure {
+                            fail_idx,
+                            failed_hop: i + 1,
+                            error: e,
+                        }));
                     }
                 }
             }
@@ -1447,7 +1483,15 @@ async fn add_htlcs(
         // Collect any custom records (if any) set by the interceptor(s) for the outgoing link.
         let attached_custom_records = match intercepted_res {
             Ok(records) => records,
-            Err(fwd_err) => return Ok(Err((fail_idx, fwd_err))),
+            // The interceptor acts for the node at this hop, which is deciding whether to forward the HTLC on the
+            // next channel (or to accept it, if it is the receiver), so that channel is to blame for the failure.
+            Err(fwd_err) => {
+                return Ok(Err(HtlcFailure {
+                    fail_idx,
+                    failed_hop: (i + 1).min(last_hop),
+                    error: fwd_err,
+                }))
+            },
         };
 
         // Once we've taken the "hop" to the destination pubkey, it becomes the source of the next outgoing htlc and
@@ -1533,7 +1577,7 @@ struct PropagatePaymentRequest {
     source: PublicKey,
     route: Path,
     payment_hash: PaymentHash,
-    sender: Sender<Result<PaymentResult, LightningError>>,
+    sender: Sender<Result<HtlcOutcome, LightningError>>,
     interceptors: Vec<Arc<dyn Interceptor>>,
     custom_records: CustomRecords,
     shutdown_signal: (Trigger, Listener),
@@ -1571,12 +1615,21 @@ async fn propagate_payment(request: PropagatePaymentRequest) {
                 request.shutdown_signal.0.trigger();
                 log::error!("Could not remove htlcs from channel: {e}.");
             }
-            PaymentResult {
-                htlc_count: 1,
-                payment_outcome: PaymentOutcome::Success,
+            HtlcOutcome {
+                result: PaymentResult {
+                    htlc_count: 1,
+                    payment_outcome: PaymentOutcome::Success,
+                },
+                failed_channel: None,
             }
         },
-        Ok(Err((fail_idx, fwd_err))) => {
+        Ok(Err(HtlcFailure {
+            fail_idx,
+            failed_hop,
+            error: fwd_err,
+        })) => {
+            // Grab the channel to blame before the route is consumed by failing the htlc back.
+            let failed_channel = request.route.hops[failed_hop].short_channel_id;
             // If we partially added HTLCs along the route, we need to fail them back to the source to clean up our partial
             // state. It's possible that we failed with the very first add, and then we don't need to clean anything up.
             if let Some(resolution_idx) = fail_idx {
@@ -1597,12 +1650,15 @@ async fn propagate_payment(request: PropagatePaymentRequest) {
             }
 
             log::debug!(
-                "Forwarding failure for simulated payment {}: {fwd_err}",
+                "Forwarding failure for simulated payment {} at hop {failed_hop}: {fwd_err}",
                 hex::encode(request.payment_hash.0)
             );
-            PaymentResult {
-                htlc_count: 0,
-                payment_outcome: PaymentOutcome::IndexFailure(fail_idx.unwrap_or(0)),
+            HtlcOutcome {
+                result: PaymentResult {
+                    htlc_count: 0,
+                    payment_outcome: PaymentOutcome::IndexFailure(fail_idx.unwrap_or(0)),
+                },
+                failed_channel: Some(failed_channel),
             }
         },
         Err(critical_err) => {
@@ -1611,9 +1667,12 @@ async fn propagate_payment(request: PropagatePaymentRequest) {
                 "Critical error in simulated payment {}: {critical_err}",
                 hex::encode(request.payment_hash.0)
             );
-            PaymentResult {
-                htlc_count: 0,
-                payment_outcome: PaymentOutcome::Unknown,
+            HtlcOutcome {
+                result: PaymentResult {
+                    htlc_count: 0,
+                    payment_outcome: PaymentOutcome::Unknown,
+                },
+                failed_channel: None,
             }
         },
     };
@@ -2242,7 +2301,7 @@ mod tests {
                 route: Route,
                 custom_records: Option<CustomRecords>,
                 payment_hash: PaymentHash,
-                sender: Sender<Result<PaymentResult, LightningError>>,
+                sender: Sender<Result<HtlcOutcome, LightningError>>,
             );
 
             async fn lookup_node(&self, node: &PublicKey) -> Result<(NodeInfo, Vec<u64>), LightningError>;
@@ -2303,7 +2362,7 @@ mod tests {
                       route: Route,
                       _: Option<CustomRecords>,
                       _,
-                      sender: Sender<Result<PaymentResult, LightningError>>| {
+                      sender: Sender<Result<HtlcOutcome, LightningError>>| {
                     // If we've reached dispatch, we must have at least one path, grab the last hop to match the
                     // receiver.
                     let receiver = route.paths[0].hops.last().unwrap().pubkey;
@@ -2321,7 +2380,12 @@ mod tests {
                         panic!("unknown mocked receiver");
                     };
 
-                    sender.send(Ok(result)).unwrap();
+                    sender
+                        .send(Ok(HtlcOutcome {
+                            result,
+                            failed_channel: None,
+                        }))
+                        .unwrap();
                 },
             );
 
@@ -2521,19 +2585,29 @@ mod tests {
             source: PublicKey,
             dest: PublicKey,
             amt: u64,
-        ) -> (Route, Result<PaymentResult, LightningError>) {
+        ) -> (Route, Result<HtlcOutcome, LightningError>) {
             let route =
                 find_payment_route(&source, dest, amt, &self.routing_graph, &self.scorer).unwrap();
 
+            let outcome = self.dispatch_route(source, route.clone()).await;
+            (route, outcome)
+        }
+
+        // Dispatches the route provided through the network and returns the outcome reported for its htlc.
+        async fn dispatch_route(
+            &mut self,
+            source: PublicKey,
+            route: Route,
+        ) -> Result<HtlcOutcome, LightningError> {
             let (sender, receiver) = oneshot::channel();
             self.graph
-                .dispatch_payment(source, route.clone(), None, PaymentHash([1; 32]), sender);
+                .dispatch_payment(source, route, None, PaymentHash([1; 32]), sender);
 
             let payment_result = timeout(Duration::from_millis(10), receiver).await;
             // Assert that we receive from the channel or fail.
             assert!(payment_result.is_ok());
 
-            (route, payment_result.unwrap().unwrap())
+            payment_result.unwrap().unwrap()
         }
 
         // Sets the balance on the channel to the tuple provided, used to arrange liquidity for testing.
@@ -2767,6 +2841,62 @@ mod tests {
         assert!(matches!(result.payment_outcome, PaymentOutcome::Success));
     }
 
+    /// Tests that a failed htlc blames the channel that rejected it, for each place that a htlc can be rejected:
+    /// the receiving node's interceptor, the next channel's forwarding policy and the channel refusing the add.
+    #[tokio::test]
+    async fn test_failure_reports_blamed_channel() {
+        let chan_capacity = 500_000_000;
+
+        // Interceptor that fails htlcs at the receiving node only.
+        let mut interceptor = MockTestInterceptor::new();
+        interceptor.expect_intercept_htlc().returning(|req| {
+            if req.outgoing_channel_id.is_none() {
+                Ok(Err(ForwardingError::InterceptorError(
+                    "receiver rejected".into(),
+                )))
+            } else {
+                Ok(Ok(CustomRecords::default()))
+            }
+        });
+        interceptor.expect_notify_resolution().returning(|_| Ok(()));
+
+        let interceptor: Arc<dyn Interceptor> = Arc::new(interceptor);
+        let mut test_kit =
+            DispatchPaymentTestKit::new(chan_capacity, vec![interceptor], CustomRecords::default())
+                .await;
+        let initial_balances = test_kit.channel_balances().await;
+        let (alice, dave) = (test_kit.nodes[0], test_kit.nodes[3]);
+
+        // Rejected by the receiver, which blames the channel that the receiver was reached on.
+        let (route, outcome) = test_kit.send_test_payment(alice, dave, 20_000).await;
+        let scids: Vec<u64> = route.paths[0]
+            .hops
+            .iter()
+            .map(|hop| hop.short_channel_id)
+            .collect();
+        assert_eq!(outcome.unwrap().failed_channel, Some(scids[2]));
+        assert_eq!(test_kit.channel_balances().await, initial_balances);
+
+        // Rejected by Carol --> Dave's forwarding policy, because Bob forwards with an insufficient cltv delta,
+        // after htlcs were added on Alice --> Bob and Bob --> Carol.
+        let mut short_cltv = route.clone();
+        short_cltv.paths[0].hops[1].cltv_expiry_delta = 39;
+        let outcome = test_kit.dispatch_route(alice, short_cltv).await;
+        assert_eq!(outcome.unwrap().failed_channel, Some(scids[2]));
+        assert_eq!(test_kit.channel_balances().await, initial_balances);
+
+        // Rejected by Bob --> Carol, which has no liquidity to forward the htlc.
+        test_kit
+            .set_channel_balance(&ShortChannelID::from(1), (0, chan_capacity))
+            .await;
+        let outcome = test_kit.dispatch_route(alice, route).await;
+        assert_eq!(outcome.unwrap().failed_channel, Some(scids[1]));
+
+        test_kit.shutdown.0.trigger();
+        test_kit.graph.tasks.close();
+        test_kit.graph.tasks.wait().await;
+    }
+
     fn create_intercept_request(shutdown_listener: Listener) -> InterceptRequest {
         let (_, pubkey) = get_random_keypair();
         InterceptRequest {
@@ -2940,14 +3070,21 @@ mod tests {
         let mock_1 = Arc::new(mock_interceptor_1);
         let mut test_kit =
             DispatchPaymentTestKit::new(500_000_000, vec![mock_1], CustomRecords::default()).await;
-        let (_, result) = test_kit
+        let (route, result) = test_kit
             .send_test_payment(test_kit.nodes[0], test_kit.nodes[3], 150_000_000)
             .await;
 
+        // The interceptor acting for Bob rejected the htlc, so it was only added on Alice --> Bob and the channel
+        // that Bob would have forwarded on is blamed.
+        let outcome = result.unwrap();
         assert!(matches!(
-            result.unwrap().payment_outcome,
+            outcome.result.payment_outcome,
             PaymentOutcome::IndexFailure(0)
         ));
+        assert_eq!(
+            outcome.failed_channel,
+            Some(route.paths[0].hops[1].short_channel_id)
+        );
 
         // The interceptor returned a forwarding error, check that a simulation shutdown has not
         // been triggered.
