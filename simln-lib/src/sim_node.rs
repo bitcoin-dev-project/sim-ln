@@ -1655,7 +1655,7 @@ async fn propagate_payment(request: PropagatePaymentRequest) {
             );
             HtlcOutcome {
                 result: PaymentResult {
-                    htlc_count: 0,
+                    htlc_count: 1,
                     payment_outcome: PaymentOutcome::IndexFailure(fail_idx.unwrap_or(0)),
                 },
                 failed_channel: Some(failed_channel),
