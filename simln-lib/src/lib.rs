@@ -466,7 +466,9 @@ pub enum PaymentOutcome {
     NotDispatched,
     /// The payment was dispatched but its final status could not be determined.
     TrackPaymentFailed,
-    /// The payment failed at the provided index in the path.
+    /// The payment failed at the provided index in the path. Simulated nodes only report this for payments sent to
+    /// a specific route, which are not retried; payments that they route themselves report
+    /// [`PaymentOutcome::RetriesExhausted`] or [`PaymentOutcome::RouteNotFound`] instead.
     IndexFailure(usize),
 }
 
