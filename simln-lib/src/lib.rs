@@ -5,8 +5,8 @@ use self::clock::Clock;
 use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
-use lightning::ln::features::NodeFeatures;
-use lightning::ln::PaymentHash;
+use lightning::types::features::NodeFeatures;
+use lightning::types::payment::PaymentHash;
 use rand::{Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use random_activity::RandomActivityError;
@@ -330,7 +330,7 @@ impl Default for Graph {
 
 /// LightningNode represents the functionality that is required to execute events on a lightning node.
 #[async_trait]
-pub trait LightningNode: Send {
+pub trait LightningNode: Send + Sync {
     /// Get information about the node.
     fn get_info(&self) -> &NodeInfo;
     /// Get the network this node is running at.
@@ -605,7 +605,7 @@ pub struct Simulation<C: Clock> {
     /// Config for the simulation itself.
     cfg: SimulationCfg,
     /// The lightning node that is being simulated.
-    nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
+    nodes: HashMap<PublicKey, Arc<dyn LightningNode>>,
     /// Results logger that holds the simulation statistics.
     results: Arc<Mutex<PaymentResultLogger>>,
     /// Track all tasks spawned for use in the simulation. When used in the `run` method, it will wait for
@@ -683,7 +683,7 @@ struct ProducePaymentEventsTrackers {
 impl<C: Clock + 'static> Simulation<C> {
     pub fn new(
         cfg: SimulationCfg,
-        nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
+        nodes: HashMap<PublicKey, Arc<dyn LightningNode>>,
         tasks: TaskTracker,
         clock: Arc<C>,
         shutdown_trigger: Trigger,
@@ -715,7 +715,6 @@ impl<C: Clock + 'static> Simulation<C> {
                 ));
             } else {
                 for node in self.nodes.values() {
-                    let node = node.lock().await;
                     if !node.get_info().features.supports_keysend() {
                         return Err(LightningError::ValidationError(format!(
                             "All nodes eligible for random activity generation must support keysend, {} does not",
@@ -765,7 +764,7 @@ impl<C: Clock + 'static> Simulation<C> {
         let mut running_network = Option::None;
 
         for node in self.nodes.values() {
-            let network = node.lock().await.get_network();
+            let network = node.get_network();
             if network == Network::Bitcoin {
                 return Err(LightningError::ValidationError(
                     "mainnet is not supported".to_string(),
@@ -1015,7 +1014,7 @@ impl<C: Clock + 'static> Simulation<C> {
         // While we're at it, we get the node info and store it with capacity to create activity generators in our
         // second pass.
         for (pk, node) in self.nodes.iter() {
-            let chan_capacity = node.lock().await.channel_capacities().await?;
+            let chan_capacity = node.channel_capacities().await?;
 
             if let Err(e) = RandomPaymentActivity::validate_capacity(
                 chan_capacity,
@@ -1028,7 +1027,7 @@ impl<C: Clock + 'static> Simulation<C> {
             // Don't double count channel capacity because each channel reports the total balance between counter
             // parities. Track capacity separately to be used for our network generator.
             let capacity = chan_capacity / 2;
-            let node_info = node.lock().await.get_node_info(pk).await?;
+            let node_info = node.get_node_info(pk).await?;
             active_nodes.insert(node_info.pubkey, (node_info, capacity));
         }
 
@@ -1125,7 +1124,7 @@ impl<C: Clock + 'static> Simulation<C> {
 async fn produce_payment_events<C: Clock>(
     mut heap: BinaryHeap<Reverse<PaymentEvent>>,
     mut payments_tracker: HashMap<PublicKey, ExecutorPaymentTracker>,
-    nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
+    nodes: HashMap<PublicKey, Arc<dyn LightningNode>>,
     clock: Arc<C>,
     output_sender: Sender<SimulationOutput>,
     trackers: ProducePaymentEventsTrackers,
@@ -1281,15 +1280,13 @@ async fn generate_payment(
 /// events that are crated for a lightning node that we can execute events on. Any output that is generated from the
 /// event being executed is piped into a channel to handle the result of the event.
 async fn send_payment(
-    node: Arc<Mutex<dyn LightningNode>>,
+    node: Arc<dyn LightningNode>,
     sender: Sender<SimulationOutput>,
     simulation_event: SimulationEvent,
     dispatch_time: SystemTime,
 ) -> Result<(), SimulationError> {
     match simulation_event {
         SimulationEvent::SendPayment(dest, amt_msat) => {
-            let node = node.lock().await;
-
             let mut payment = Payment {
                 source: node.get_info().pubkey,
                 hash: None,
@@ -1499,7 +1496,7 @@ async fn run_results_logger(
 /// out. In the multiple-producer case, a single producer shutting down does not drop *all* sending channels so the
 /// consumer will not exit and a trigger is required.
 async fn produce_simulation_results(
-    nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
+    nodes: HashMap<PublicKey, Arc<dyn LightningNode>>,
     mut output_receiver: Receiver<SimulationOutput>,
     results: Sender<(Payment, PaymentResult)>,
     listener: Listener,
@@ -1552,14 +1549,12 @@ async fn produce_simulation_results(
 }
 
 async fn track_payment_result(
-    node: Arc<Mutex<dyn LightningNode>>,
+    node: Arc<dyn LightningNode>,
     results: Sender<(Payment, PaymentResult)>,
     payment: Payment,
     listener: Listener,
 ) -> Result<(), SimulationError> {
     log::trace!("Payment result tracker starting.");
-
-    let node = node.lock().await;
 
     let res = match payment.hash {
         Some(hash) => {
@@ -1626,7 +1621,6 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
     use std::time::{Duration, SystemTime};
-    use tokio::sync::Mutex;
     use tokio_util::task::TaskTracker;
 
     #[test]
@@ -1904,7 +1898,7 @@ mod tests {
     /// "we don't control any nodes".
     #[tokio::test]
     async fn test_validate_node_network_empty_nodes() {
-        let empty_nodes: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
+        let empty_nodes: HashMap<PublicKey, Arc<dyn LightningNode>> = HashMap::new();
 
         let simulation = test_utils::create_simulation(empty_nodes);
         let result = simulation.validate_node_network().await;
@@ -1974,13 +1968,15 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    async fn mock_send_payment(
-        mock_node: &mut Arc<Mutex<MockLightningNode>>,
+    /// Sets up a mock node's expectations. Takes the node before it is shared, so that it can be mutated through
+    /// its `Arc`.
+    fn mock_send_payment(
+        mock_node: &mut Arc<MockLightningNode>,
         node_info: NodeInfo,
         payments_list: Arc<StdMutex<Vec<PublicKey>>>,
         payment_hash: [u8; 32],
     ) {
-        let mut mock_node = mock_node.lock().await;
+        let mock_node = Arc::get_mut(mock_node).expect("node is not shared yet");
         mock_node.expect_get_info().return_const(node_info.clone());
         mock_node
             .expect_get_network()
@@ -2001,7 +1997,7 @@ mod tests {
         let pl = payments_list.clone();
         mock_node.expect_send_payment().returning(move |a, _| {
             pl.lock().unwrap().push(a);
-            Ok(lightning::ln::PaymentHash(payment_hash))
+            Ok(lightning::types::payment::PaymentHash(payment_hash))
         });
     }
 
@@ -2022,7 +2018,7 @@ mod tests {
 
     #[allow(clippy::type_complexity)]
     /// Helper to create and configure mock nodes for testing
-    async fn setup_test_nodes_for_testing_deterministic_events(
+    fn setup_test_nodes_for_testing_deterministic_events(
         fixed_pubkeys: Option<Vec<PublicKey>>,
     ) -> (TestNodesResult, Arc<StdMutex<Vec<PublicKey>>>) {
         let mut builder = LightningTestNodeBuilder::new(4);
@@ -2038,32 +2034,28 @@ mod tests {
             network.nodes[0].clone(),
             payments_list.clone(),
             [0; 32],
-        )
-        .await;
+        );
 
         mock_send_payment(
             &mut network.clients[1],
             network.nodes[1].clone(),
             payments_list.clone(),
             [0; 32],
-        )
-        .await;
+        );
 
         mock_send_payment(
             &mut network.clients[2],
             network.nodes[2].clone(),
             payments_list.clone(),
             [0; 32],
-        )
-        .await;
+        );
 
         mock_send_payment(
             &mut network.clients[3],
             network.nodes[3].clone(),
             payments_list.clone(),
             [0; 32],
-        )
-        .await;
+        );
 
         (network, payments_list)
     }
@@ -2073,7 +2065,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn test_deterministic_payments_events_defined_activities() {
         let (network, payments_list) =
-            setup_test_nodes_for_testing_deterministic_events(Some(fixed_test_pubkeys())).await;
+            setup_test_nodes_for_testing_deterministic_events(Some(fixed_test_pubkeys()));
 
         // Define two activities
         // Activity 1: From node_1 to node_2
@@ -2156,8 +2148,7 @@ mod tests {
         let pks = fixed_test_pubkeys();
         let (pk1, pk2, pk3, pk4) = (pks[0], pks[1], pks[2], pks[3]);
 
-        let (network, payments_list) =
-            setup_test_nodes_for_testing_deterministic_events(Some(pks)).await;
+        let (network, payments_list) = setup_test_nodes_for_testing_deterministic_events(Some(pks));
 
         let (shutdown_trigger, shutdown_listener) = triggered::trigger();
 

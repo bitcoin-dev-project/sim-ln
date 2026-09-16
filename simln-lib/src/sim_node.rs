@@ -5,7 +5,7 @@ use crate::{
 use async_trait::async_trait;
 use bitcoin::constants::ChainHash;
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::{Network, ScriptBuf, TxOut};
+use bitcoin::{Amount, Network, ScriptBuf, TxOut};
 use lightning::ln::chan_utils::make_funding_redeemscript;
 use serde::{Deserialize, Serialize};
 use std::collections::{hash_map::Entry, HashMap};
@@ -15,17 +15,17 @@ use std::time::UNIX_EPOCH;
 use tokio::task::JoinSet;
 use tokio_util::task::TaskTracker;
 
-use lightning::ln::features::{ChannelFeatures, NodeFeatures};
 use lightning::ln::msgs::{
     LightningError as LdkError, UnsignedChannelAnnouncement, UnsignedChannelUpdate,
 };
-use lightning::ln::{PaymentHash, PaymentPreimage};
 use lightning::routing::gossip::{NetworkGraph, NodeId};
 use lightning::routing::router::{find_route, Path, PaymentParameters, Route, RouteParameters};
 use lightning::routing::scoring::{
     ProbabilisticScorer, ProbabilisticScoringDecayParameters, ScoreUpdate,
 };
 use lightning::routing::utxo::{UtxoLookup, UtxoResult};
+use lightning::types::features::{ChannelFeatures, NodeFeatures};
+use lightning::types::payment::{PaymentHash, PaymentPreimage};
 use lightning::util::logger::{Level, Logger, Record};
 use thiserror::Error;
 use tokio::select;
@@ -514,6 +514,7 @@ pub trait SimNetwork: Send + Sync {
 }
 
 type LdkNetworkGraph = NetworkGraph<Arc<WrappedLog>>;
+type Scorer = ProbabilisticScorer<Arc<LdkNetworkGraph>, Arc<WrappedLog>>;
 
 struct InFlightPayment {
     /// The channel used to report payment results to.
@@ -538,7 +539,7 @@ pub struct SimNode<T: SimNetwork, C: Clock> {
     pathfinding_graph: Arc<LdkNetworkGraph>,
     /// Probabilistic scorer used to rank paths through the network for routing. This is reused across
     /// multiple payments to maintain scoring state.
-    scorer: Mutex<ProbabilisticScorer<Arc<LdkNetworkGraph>, Arc<WrappedLog>>>,
+    scorer: Arc<std::sync::RwLock<Scorer>>,
     /// Clock for tracking simulation time.
     clock: Arc<C>,
 }
@@ -566,7 +567,7 @@ impl<T: SimNetwork, C: Clock> SimNode<T, C> {
             network: payment_network,
             in_flight: Mutex::new(HashMap::new()),
             pathfinding_graph,
-            scorer: Mutex::new(scorer),
+            scorer: Arc::new(std::sync::RwLock::new(scorer)),
             clock,
         })
     }
@@ -581,7 +582,7 @@ impl<T: SimNetwork, C: Clock> SimNode<T, C> {
     ///
     /// **Note:** The route passed in here must contain only one path.
     pub async fn send_to_route(
-        &mut self,
+        &self,
         route: Route,
         payment_hash: PaymentHash,
         custom_records: Option<CustomRecords>,
@@ -635,14 +636,13 @@ fn node_info(pubkey: PublicKey, alias: String) -> NodeInfo {
 
 /// Uses LDK's pathfinding algorithm with default parameters to find a path from source to destination, with no
 /// restrictions on fee budget.
-async fn find_payment_route(
+fn find_payment_route(
     source: &PublicKey,
     dest: PublicKey,
     amount_msat: u64,
     pathfinding_graph: &LdkNetworkGraph,
-    scorer: &Mutex<ProbabilisticScorer<Arc<LdkNetworkGraph>, Arc<WrappedLog>>>,
+    scorer: &Scorer,
 ) -> Result<Route, SimulationError> {
-    let scorer_guard = scorer.lock().await;
     find_route(
         source,
         &RouteParameters {
@@ -657,11 +657,11 @@ async fn find_payment_route(
         pathfinding_graph,
         None,
         &WrappedLog {},
-        &scorer_guard,
+        scorer,
         &Default::default(),
         &[0; 32],
     )
-    .map_err(|e| SimulationError::SimulatedNetworkError(e.err))
+    .map_err(|e| SimulationError::SimulatedNetworkError(e.to_string()))
 }
 
 #[async_trait]
@@ -687,7 +687,35 @@ impl<T: SimNetwork, C: Clock> LightningNode for SimNode<T, C> {
         let preimage = PaymentPreimage(rand::random());
         let payment_hash = preimage.into();
 
-        // Check for payment hash collision, failing the payment if we happen to repeat one.
+        // Pathfinding dominates the cost of a payment and is pure CPU work, so run it on the blocking pool rather
+        // than on the scheduler thread. Routes for different payments are then computed in parallel, using the stored
+        // scorer under a shared read guard.
+        //
+        // On a paused runtime, virtual time cannot advance while a blocking task is outstanding, so the simulation
+        // clock still only moves once every route in progress has been computed.
+        let route = {
+            let source = self.info.pubkey;
+            let pathfinding_graph = self.pathfinding_graph.clone();
+            let scorer = self.scorer.clone();
+
+            tokio::task::spawn_blocking(move || -> Result<_, LightningError> {
+                let scorer = scorer.read().map_err(|e| {
+                    LightningError::SendPaymentError(format!("scorer lock poisoned: {e}"))
+                })?;
+                Ok(find_payment_route(
+                    &source,
+                    dest,
+                    amount_msat,
+                    &pathfinding_graph,
+                    &scorer,
+                ))
+            })
+            .await
+            .map_err(|e| {
+                LightningError::SendPaymentError(format!("pathfinding task failed: {e}"))
+            })??
+        };
+
         let mut in_flight_guard = self.in_flight.lock().await;
         let entry = match in_flight_guard.entry(payment_hash) {
             Entry::Occupied(_) => {
@@ -698,16 +726,7 @@ impl<T: SimNetwork, C: Clock> LightningNode for SimNode<T, C> {
             Entry::Vacant(vacant) => vacant,
         };
 
-        // Use the stored scorer when finding a route
-        let route = match find_payment_route(
-            &self.info.pubkey,
-            dest,
-            amount_msat,
-            &self.pathfinding_graph,
-            &self.scorer,
-        )
-        .await
-        {
+        let route = match route {
             Ok(path) => path,
             // In the case that we can't find a route for the payment, we still report a successful payment *api call*
             // and report RouteNotFound to the tracking channel. This mimics the behavior of real nodes.
@@ -784,10 +803,13 @@ impl<T: SimNetwork, C: Clock> LightningNode for SimNode<T, C> {
                             };
                             match &in_flight.path {
                                 Some(path) => {
+                                    let mut scorer = self.scorer.write().map_err(|e| {
+                                        LightningError::TrackPaymentError(format!("scorer lock poisoned: {e}"))
+                                    })?;
                                     if payment_result.payment_outcome == PaymentOutcome::Success {
-                                        self.scorer.lock().await.payment_path_successful(path, duration);
+                                        scorer.payment_path_successful(path, duration);
                                     } else if let PaymentOutcome::IndexFailure(index) = payment_result.payment_outcome {
-                                        self.scorer.lock().await.payment_path_failed(path, index as u64, duration);
+                                        scorer.payment_path_failed(path, index as u64, duration);
                                     }
                                 },
                                 None => {
@@ -1122,20 +1144,20 @@ pub async fn ln_node_from_graph<C: Clock>(
     graph: Arc<Mutex<SimGraph>>,
     routing_graph: Arc<LdkNetworkGraph>,
     clock: Arc<C>,
-) -> Result<HashMap<PublicKey, Arc<Mutex<SimNode<SimGraph, C>>>>, LightningError> {
+) -> Result<HashMap<PublicKey, Arc<SimNode<SimGraph, C>>>, LightningError> {
     let sim_graph = graph.lock().await;
-    let mut nodes: HashMap<PublicKey, Arc<Mutex<SimNode<SimGraph, C>>>> =
+    let mut nodes: HashMap<PublicKey, Arc<SimNode<SimGraph, C>>> =
         HashMap::with_capacity(sim_graph.nodes.len());
 
     for node in sim_graph.nodes.iter() {
         nodes.insert(
             *node.0,
-            Arc::new(Mutex::new(SimNode::new(
+            Arc::new(SimNode::new(
                 node.1 .0.clone(),
                 graph.clone(),
                 routing_graph.clone(),
                 clock.clone(),
-            )?)),
+            )?),
         );
     }
 
@@ -1179,7 +1201,7 @@ pub fn populate_network_graph<C: Clock>(
                 &channel.node_1.policy.pubkey,
                 &channel.node_2.policy.pubkey,
             )
-            .to_v0_p2wsh(),
+            .to_p2wsh(),
         };
 
         graph.update_channel_from_unsigned_announcement(&announcement, &Some(&utxo_validator))?;
@@ -1189,9 +1211,11 @@ pub fn populate_network_graph<C: Clock>(
                 chain_hash,
                 short_channel_id: channel.short_channel_id.into(),
                 timestamp: now,
+                // Only the must_be_one bit is defined for message_flags.
+                message_flags: 1,
                 // The least significant bit of the channel flag field represents the direction that the channel update
                 // applies to. This value is interpreted as node_1 if it is zero, and node_2 otherwise.
-                flags: i as u8,
+                channel_flags: i as u8,
                 cltv_expiry_delta: node.policy.cltv_expiry_delta as u16,
                 htlc_minimum_msat: node.policy.min_htlc_size_msat,
                 htlc_maximum_msat: node.policy.max_htlc_size_msat,
@@ -1402,7 +1426,7 @@ async fn add_htlcs(
         let request = InterceptRequest {
             forwarding_node: hop.pubkey,
             payment_hash,
-            incoming_htlc: incoming_htlc.clone(),
+            incoming_htlc,
             incoming_custom_records,
             outgoing_channel_id: next_scid,
             incoming_amount_msat: outgoing_amount,
@@ -1626,7 +1650,7 @@ struct UtxoValidator {
 impl UtxoLookup for UtxoValidator {
     fn get_utxo(&self, _genesis_hash: &ChainHash, _short_channel_id: u64) -> UtxoResult {
         UtxoResult::Sync(Ok(TxOut {
-            value: self.amount_sat,
+            value: Amount::from_sat(self.amount_sat),
             script_pubkey: self.script.clone(),
         }))
     }
@@ -2026,14 +2050,14 @@ mod tests {
 
         assert!(nodes.len() == 3);
 
-        let node_1 = nodes.get(&pk1).unwrap().lock().await;
+        let node_1 = nodes.get(&pk1).unwrap();
         let node_1_capacity = node_1.channel_capacities().await.unwrap();
 
         // Node 1 has 2 channels but one was excluded so here we should only have the capacity of
         // the channel that was not excluded.
         assert!(node_1_capacity == capacity_1);
 
-        let node_2 = nodes.get(&pk2).unwrap().lock().await;
+        let node_2 = nodes.get(&pk2).unwrap();
         let node_2_capacity = node_2.channel_capacities().await.unwrap();
         assert!(node_2_capacity == capacity_1);
 
@@ -2041,7 +2065,7 @@ mod tests {
         // present because its only channel was excluded.
         let node_3 = nodes.get(&pk3);
         assert!(node_3.is_some());
-        let node_3 = node_3.unwrap().lock().await;
+        let node_3 = node_3.unwrap();
         assert!(node_3.channel_capacities().await.unwrap() == 0);
     }
 
@@ -2329,7 +2353,7 @@ mod tests {
         let test_kit =
             DispatchPaymentTestKit::new(chan_capacity, vec![], CustomRecords::default()).await;
 
-        let mut node = SimNode::new(
+        let node = SimNode::new(
             node_info(test_kit.nodes[0], String::default()),
             Arc::new(Mutex::new(test_kit.graph)),
             test_kit.routing_graph.clone(),
@@ -2402,7 +2426,7 @@ mod tests {
         graph: SimGraph,
         nodes: Vec<PublicKey>,
         routing_graph: Arc<LdkNetworkGraph>,
-        scorer: Mutex<ProbabilisticScorer<Arc<LdkNetworkGraph>, Arc<WrappedLog>>>,
+        scorer: Scorer,
         shutdown: (Trigger, Listener),
     }
 
@@ -2428,11 +2452,11 @@ mod tests {
                 .unwrap(),
             );
 
-            let scorer = Mutex::new(ProbabilisticScorer::new(
+            let scorer = ProbabilisticScorer::new(
                 ProbabilisticScoringDecayParameters::default(),
                 routing_graph.clone(),
                 Arc::new(WrappedLog {}),
-            ));
+            );
 
             // Collect pubkeys in-order, pushing the last node on separately because they don't have an outgoing
             // channel (they are not node_1 in any channel, only node_2).
@@ -2498,9 +2522,8 @@ mod tests {
             dest: PublicKey,
             amt: u64,
         ) -> (Route, Result<PaymentResult, LightningError>) {
-            let route = find_payment_route(&source, dest, amt, &self.routing_graph, &self.scorer)
-                .await
-                .unwrap();
+            let route =
+                find_payment_route(&source, dest, amt, &self.routing_graph, &self.scorer).unwrap();
 
             let (sender, receiver) = oneshot::channel();
             self.graph
@@ -2704,7 +2727,7 @@ mod tests {
         let test_kit =
             DispatchPaymentTestKit::new(chan_capacity, vec![], CustomRecords::default()).await;
 
-        let mut node = SimNode::new(
+        let node = SimNode::new(
             node_info(test_kit.nodes[0], String::default()),
             Arc::new(Mutex::new(test_kit.graph)),
             test_kit.routing_graph.clone(),

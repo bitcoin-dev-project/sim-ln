@@ -260,7 +260,7 @@ pub async fn create_simulation_with_network(
     (
         Simulation<SimulationClock>,
         Vec<ActivityDefinition>,
-        HashMap<PublicKey, Arc<Mutex<SimNode<SimGraph, SimulationClock>>>>,
+        HashMap<PublicKey, Arc<SimNode<SimGraph, SimulationClock>>>,
     ),
     anyhow::Error,
 > {
@@ -322,9 +322,9 @@ pub async fn create_simulation_with_network(
     // to a dyn trait and exclude any nodes that shouldn't be included in random activity
     // generation.
     let nodes = ln_node_from_graph(simulation_graph, routing_graph, clock.clone()).await?;
-    let mut nodes_dyn: HashMap<_, Arc<Mutex<dyn LightningNode>>> = nodes
+    let mut nodes_dyn: HashMap<_, Arc<dyn LightningNode>> = nodes
         .iter()
-        .map(|(pk, node)| (*pk, Arc::clone(node) as Arc<Mutex<dyn LightningNode>>))
+        .map(|(pk, node)| (*pk, Arc::clone(node) as Arc<dyn LightningNode>))
         .collect();
     for pk in exclude {
         nodes_dyn.remove(pk);
@@ -388,26 +388,25 @@ async fn get_clients(
     nodes: Vec<NodeConnection>,
 ) -> Result<
     (
-        HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
+        HashMap<PublicKey, Arc<dyn LightningNode>>,
         HashMap<PublicKey, NodeInfo>,
     ),
     LightningError,
 > {
-    let mut clients: HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>> = HashMap::new();
+    let mut clients: HashMap<PublicKey, Arc<dyn LightningNode>> = HashMap::new();
     let mut clients_info: HashMap<PublicKey, NodeInfo> = HashMap::new();
 
     for connection in nodes {
-        // TODO: Feels like there should be a better way of doing this without having to Arc<Mutex<T>>> it at this time.
-        // Box sort of works, but we won't know the size of the dyn LightningNode at compile time so the compiler will
-        // scream at us when trying to create the Arc<Mutex>> later on while adding the node to the clients map
-        let node: Arc<Mutex<dyn LightningNode>> = match connection {
-            NodeConnection::Lnd(c) => Arc::new(Mutex::new(LndNode::new(c).await?)),
-            NodeConnection::Cln(c) => Arc::new(Mutex::new(ClnNode::new(c).await?)),
-            NodeConnection::Eclair(c) => Arc::new(Mutex::new(EclairNode::new(c).await?)),
-            NodeConnection::LdkServer(c) => Arc::new(Mutex::new(LdkServerNode::new(c).await?)),
+        // We won't know the size of the dyn LightningNode at compile time, so the node is boxed into an Arc to
+        // store it in the clients map.
+        let node: Arc<dyn LightningNode> = match connection {
+            NodeConnection::Lnd(c) => Arc::new(LndNode::new(c).await?),
+            NodeConnection::Cln(c) => Arc::new(ClnNode::new(c).await?),
+            NodeConnection::Eclair(c) => Arc::new(EclairNode::new(c).await?),
+            NodeConnection::LdkServer(c) => Arc::new(LdkServerNode::new(c).await?),
         };
 
-        let node_info = node.lock().await.get_info().clone();
+        let node_info = node.get_info().clone();
 
         clients.insert(node_info.pubkey, node);
         clients_info.insert(node_info.pubkey, node_info);
@@ -606,7 +605,7 @@ pub fn parse_sim_params(cli: &Cli) -> anyhow::Result<SimParams> {
 }
 
 pub async fn get_validated_activities(
-    clients: &HashMap<PublicKey, Arc<Mutex<dyn LightningNode>>>,
+    clients: &HashMap<PublicKey, Arc<dyn LightningNode>>,
     nodes_info: HashMap<PublicKey, NodeInfo>,
     activity: Vec<ActivityParser>,
 ) -> Result<Vec<ActivityDefinition>, LightningError> {
@@ -614,8 +613,6 @@ pub async fn get_validated_activities(
     // nodes that we do not control. To do this, we can just grab the first node in our map and perform the lookup.
     let graph = match clients.values().next() {
         Some(client) => client
-            .lock()
-            .await
             .get_graph()
             .await
             .map_err(|e| LightningError::GetGraphError(format!("Error getting graph {:?}", e))),

@@ -2,7 +2,7 @@ use expanduser::expanduser;
 use serde::Deserialize;
 
 pub mod serde_option_payment_hash {
-    use lightning::ln::PaymentHash;
+    use lightning::types::payment::PaymentHash;
 
     pub fn serialize<S>(hash: &Option<PaymentHash>, serializer: S) -> Result<S::Ok, S::Error>
     where

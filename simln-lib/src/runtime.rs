@@ -6,6 +6,7 @@
 //! advance, the library builds and owns the runtime here.
 
 use std::future::Future;
+use std::num::NonZero;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -55,9 +56,14 @@ where
         ));
     }
 
+    let blocking_threads = std::thread::available_parallelism()
+        .map(NonZero::get)
+        .unwrap_or(4);
+
     let runtime = Builder::new_current_thread()
         .enable_all()
         .start_paused(true)
+        .max_blocking_threads(blocking_threads)
         .build()
         .map_err(|e| {
             SimulationError::RuntimeError(format!("could not build virtual-time runtime: {e}"))

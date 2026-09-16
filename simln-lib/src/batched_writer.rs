@@ -26,8 +26,10 @@ impl BatchedWriter {
         let file = directory.join(file_name);
 
         let writer = WriterBuilder::new()
-            .from_path(file)
+            .from_path(&file)
             .map_err(SimulationError::CsvError)?;
+
+        log::info!("Writing simulation results to {}.", file.display());
 
         Ok(BatchedWriter {
             batch_size,
