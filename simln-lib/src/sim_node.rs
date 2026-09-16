@@ -820,8 +820,8 @@ impl<T: SimNetwork, C: Clock> LightningNode for SimNode<T, C> {
                                     })?;
                                     if outcome.result.payment_outcome == PaymentOutcome::Success {
                                         scorer.payment_path_successful(path, duration);
-                                    } else if let PaymentOutcome::IndexFailure(index) = outcome.result.payment_outcome {
-                                        scorer.payment_path_failed(path, index as u64, duration);
+                                    } else if let Some(failed_channel) = outcome.failed_channel {
+                                        scorer.payment_path_failed(path, failed_channel, duration);
                                     }
                                 },
                                 None => {
